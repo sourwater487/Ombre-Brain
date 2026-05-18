@@ -32,6 +32,7 @@ def load_config(config_path: str = None) -> dict:
         "transport": "stdio",
         "log_level": "INFO",
         "buckets_dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "buckets"),
+        "state_dir": "",
         "merge_threshold": 75,
         "dehydration": {
             "model": "deepseek-chat",
@@ -116,8 +117,14 @@ def load_config(config_path: str = None) -> dict:
             "initial_affect": {
                 "valence": 0.56,
                 "arousal": 0.34,
+                "tenderness": 0.62,
+                "possessiveness": 0.24,
+                "longing": 0.34,
+                "security": 0.68,
+                "protective_drive": 0.52,
                 "mood_label": "warm_neutral",
                 "session_defensiveness": 0.12,
+                "residue": "",
             },
         },
     }
@@ -187,6 +194,10 @@ def load_config(config_path: str = None) -> dict:
     if env_buckets_dir:
         config["buckets_dir"] = env_buckets_dir
 
+    env_state_dir = os.environ.get("OMBRE_STATE_DIR", "")
+    if env_state_dir:
+        config["state_dir"] = env_state_dir
+
     env_gateway_host = os.environ.get("OMBRE_GATEWAY_HOST", "")
     if env_gateway_host:
         config.setdefault("gateway", {})["host"] = env_gateway_host
@@ -231,6 +242,9 @@ def load_config(config_path: str = None) -> dict:
     # --- Ensure bucket storage directories exist ---
     # --- 确保记忆桶存储目录存在 ---
     buckets_dir = config["buckets_dir"]
+    if not config.get("state_dir"):
+        config["state_dir"] = os.path.join(os.path.dirname(os.path.abspath(buckets_dir)), "state")
+    os.makedirs(config["state_dir"], exist_ok=True)
     for subdir in ["permanent", "dynamic", "archive", "feel"]:
         os.makedirs(os.path.join(buckets_dir, subdir), exist_ok=True)
 

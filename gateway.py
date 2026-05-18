@@ -177,6 +177,7 @@ class GatewayService:
         )
 
         try:
+            persona_user_message = self._extract_last_user_query(payload.get("messages", []))
             forward_payload, recalled_ids = await self.prepare_payload(payload, session_id)
         except ValueError as exc:
             return JSONResponse(
@@ -191,7 +192,12 @@ class GatewayService:
 
         if forward_payload.get("stream") is True:
             try:
-                return await self._stream_upstream(forward_payload, session_id, recalled_ids)
+                return await self._stream_upstream(
+                    forward_payload,
+                    session_id,
+                    recalled_ids,
+                    persona_user_message,
+                )
             except RuntimeError as exc:
                 return JSONResponse(
                     {"error": {"message": str(exc), "type": "server_error"}},
@@ -208,6 +214,12 @@ class GatewayService:
             )
             self._capture_reasoning_from_response(session_id, upstream_response)
             await self._record_successful_round(session_id, recalled_ids)
+            await self._update_persona_after_response(
+                session_id,
+                persona_user_message,
+                upstream_response,
+                recalled_ids,
+            )
 
         return self._proxy_response(upstream_response)
 
@@ -239,6 +251,7 @@ class GatewayService:
         )
 
         try:
+            persona_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
             forward_payload, recalled_ids = await self.prepare_payload(openai_payload, session_id)
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -250,6 +263,7 @@ class GatewayService:
                 forward_payload,
                 session_id,
                 recalled_ids,
+                persona_user_message,
             )
 
         upstream_response = await self._forward_upstream(forward_payload)
@@ -262,6 +276,12 @@ class GatewayService:
             )
             self._capture_reasoning_from_response(session_id, upstream_response)
             await self._record_successful_round(session_id, recalled_ids)
+            await self._update_persona_after_response(
+                session_id,
+                persona_user_message,
+                upstream_response,
+                recalled_ids,
+            )
             return self._openai_response_to_anthropic(upstream_response, forward_payload["model"])
 
         return self._proxy_anthropic_error_response(upstream_response)
@@ -300,7 +320,7 @@ class GatewayService:
         query = self._extract_last_user_query(messages)
         persona_query = self._extract_current_turn_user_query(messages)
         if persona_query:
-            persona_state = await self.persona_engine.update_from_user_message(session_id, persona_query)
+            persona_state = await self.persona_engine.build_pre_reply_guidance(session_id, persona_query)
         else:
             persona_state = self.persona_engine.get_current_state(session_id)
         persona_block = self.persona_engine.format_state_block(persona_state)
@@ -416,6 +436,7 @@ class GatewayService:
         payload: dict,
         session_id: str,
         recalled_ids: list[str],
+        user_message: str,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         upstream = self._get_upstream_for_model(model)
@@ -471,6 +492,12 @@ class GatewayService:
                     )
                     self._capture_reasoning_from_stream_state(session_id, stream_state)
                     await self._record_successful_round(session_id, recalled_ids)
+                    await self._update_persona_after_assistant_message(
+                        session_id,
+                        user_message,
+                        self._build_stream_assistant_message(stream_state),
+                        recalled_ids,
+                    )
 
         return StreamingResponse(
             stream_body(),
@@ -492,6 +519,67 @@ class GatewayService:
             round_id,
             recalled_ids,
         )
+
+    async def _update_persona_after_response(
+        self,
+        session_id: str,
+        user_message: str,
+        upstream_response: httpx.Response,
+        recalled_ids: list[str],
+    ) -> None:
+        try:
+            body = upstream_response.json()
+        except ValueError:
+            return
+        assistant_message = self._extract_assistant_message_from_response_body(body)
+        await self._update_persona_after_assistant_message(
+            session_id,
+            user_message,
+            assistant_message,
+            recalled_ids,
+        )
+
+    async def _update_persona_after_assistant_message(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: dict[str, Any] | None,
+        recalled_ids: list[str],
+    ) -> None:
+        if not user_message.strip() or not isinstance(assistant_message, dict):
+            return
+        assistant_response = self._coerce_message_text(assistant_message.get("content")).strip()
+        if not assistant_response:
+            return
+        tool_summary = self._summarize_assistant_tool_calls(assistant_message)
+        try:
+            await self.persona_engine.update_from_exchange(
+                session_id=session_id,
+                user_message=user_message,
+                assistant_response=assistant_response,
+                recalled_memory_ids=recalled_ids,
+                tool_summary=tool_summary,
+            )
+        except Exception as exc:
+            logger.warning("Persona post-reply update failed | session=%s error=%s", session_id, exc)
+
+    def _summarize_assistant_tool_calls(self, assistant_message: dict[str, Any]) -> str:
+        tool_calls = assistant_message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return ""
+        parts: list[str] = []
+        for index, tool_call in enumerate(tool_calls[:8]):
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or f"tool_{index}")
+            arguments = self._normalize_tool_arguments(function.get("arguments", ""))
+            if len(arguments) > 160:
+                arguments = arguments[:157] + "..."
+            parts.append(f"{name}({arguments})")
+        return "; ".join(parts)
 
     def _log_cache_usage_from_response(
         self,
@@ -847,6 +935,7 @@ class GatewayService:
         payload: dict,
         session_id: str,
         recalled_ids: list[str],
+        user_message: str,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         upstream = self._get_upstream_for_model(model)
@@ -1035,6 +1124,12 @@ class GatewayService:
                     )
                     self._capture_reasoning_from_stream_state(session_id, stream_state)
                     await self._record_successful_round(session_id, recalled_ids)
+                    await self._update_persona_after_assistant_message(
+                        session_id,
+                        user_message,
+                        self._build_stream_assistant_message(stream_state),
+                        recalled_ids,
+                    )
 
         return StreamingResponse(
             stream_body(),

@@ -9,10 +9,12 @@ services:
     environment:
       OMBRE_TRANSPORT: streamable-http
       OMBRE_BUCKETS_DIR: /data
+      OMBRE_STATE_DIR: /state
     ports:
       - "18001:8000"
     volumes:
       - /srv/ombre-brain/buckets:/data
+      - /srv/ombre-brain/state:/state
       - /srv/ombre-brain/config.yaml:/app/config.yaml:ro
 
   ombre-gateway:
@@ -25,8 +27,10 @@ services:
     environment:
       OMBRE_TRANSPORT: streamable-http
       OMBRE_BUCKETS_DIR: /data
+      OMBRE_STATE_DIR: /state
     ports:
       - "18002:8010"
     volumes:
       - /srv/ombre-brain/buckets:/data
+      - /srv/ombre-brain/state:/state
       - /srv/ombre-brain/config.yaml:/app/config.yaml:ro

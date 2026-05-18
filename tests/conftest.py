@@ -27,9 +27,12 @@ def test_config(tmp_path):
     os.makedirs(os.path.join(buckets_dir, "dynamic"), exist_ok=True)
     os.makedirs(os.path.join(buckets_dir, "archive"), exist_ok=True)
     os.makedirs(os.path.join(buckets_dir, "feel"), exist_ok=True)
+    state_dir = str(tmp_path / "state")
+    os.makedirs(state_dir, exist_ok=True)
 
     return {
         "buckets_dir": buckets_dir,
+        "state_dir": state_dir,
         "matching": {"fuzzy_threshold": 50, "max_results": 10},
         "wikilink": {"enabled": False},
         "scoring_weights": {
@@ -109,8 +112,14 @@ def test_config(tmp_path):
             "initial_affect": {
                 "valence": 0.56,
                 "arousal": 0.34,
+                "tenderness": 0.62,
+                "possessiveness": 0.24,
+                "longing": 0.34,
+                "security": 0.68,
+                "protective_drive": 0.52,
                 "mood_label": "warm_neutral",
                 "session_defensiveness": 0.12,
+                "residue": "",
             },
         },
     }

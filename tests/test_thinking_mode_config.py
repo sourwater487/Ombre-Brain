@@ -73,12 +73,14 @@ async def test_persona_sends_enabled_thinking_mode_when_configured(test_config):
                 "event_type": "neutral",
                 "perceived_intent": "user says hi",
                 "affect_delta": {"valence": 0.01, "arousal": 0.0},
+                "relationship_event": False,
                 "relationship_delta": {
                     "affinity": 0.0,
                     "dominance": 0.0,
                     "defensiveness": 0.0,
                     "trust": 0.0,
                 },
+                "personality_signal": False,
                 "personality_delta": {
                     "openness": 0.0,
                     "conscientiousness": 0.0,
@@ -87,7 +89,7 @@ async def test_persona_sends_enabled_thinking_mode_when_configured(test_config):
                     "neuroticism": 0.0,
                 },
                 "mood_label": "warm_neutral",
-                "reply_guidance": "Stay steady.",
+                "residue": "",
                 "confidence": 0.8,
             },
             ensure_ascii=False,
@@ -95,6 +97,6 @@ async def test_persona_sends_enabled_thinking_mode_when_configured(test_config):
     )
     engine.client = client
 
-    await engine.update_from_user_message("sess-thinking", "哥哥在吗")
+    await engine.update_from_exchange("sess-thinking", "哥哥在吗", "在。")
 
     assert client.calls[0]["extra_body"] == {"thinking": {"type": "enabled"}}

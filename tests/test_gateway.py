@@ -45,7 +45,17 @@ class DummyPersonaEngine:
                 "agreeableness": 0.66,
                 "neuroticism": 0.36,
             },
-            "affect": {"valence": 0.62, "arousal": 0.40, "mood_label": "warm_attentive"},
+            "affect": {
+                "valence": 0.62,
+                "arousal": 0.40,
+                "tenderness": 0.70,
+                "possessiveness": 0.22,
+                "longing": 0.31,
+                "security": 0.68,
+                "protective_drive": 0.55,
+                "mood_label": "warm_attentive",
+                "residue": "",
+            },
             "relationship": {
                 "affinity": 0.86,
                 "dominance": 0.38,
@@ -56,6 +66,19 @@ class DummyPersonaEngine:
         }
 
     async def update_from_user_message(self, session_id: str, user_message: str) -> dict:
+        return self._state()
+
+    async def build_pre_reply_guidance(self, session_id: str, latest_user_message: str = "") -> dict:
+        return self._state()
+
+    async def update_from_exchange(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_response: str,
+        recalled_memory_ids: list[str] | None = None,
+        tool_summary: str = "",
+    ) -> dict:
         return self._state()
 
     def get_current_state(self, session_id: str) -> dict:
@@ -74,11 +97,29 @@ class DummyPersonaEngine:
 
 class RecordingPersonaEngine(DummyPersonaEngine):
     def __init__(self):
-        self.calls = []
+        self.pre_calls = []
+        self.post_calls = []
 
-    async def update_from_user_message(self, session_id: str, user_message: str) -> dict:
-        self.calls.append({"session_id": session_id, "user_message": user_message})
-        return await super().update_from_user_message(session_id, user_message)
+    async def update_from_exchange(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_response: str,
+        recalled_memory_ids: list[str] | None = None,
+        tool_summary: str = "",
+    ) -> dict:
+        self.post_calls.append({"session_id": session_id, "user_message": user_message})
+        return await super().update_from_exchange(
+            session_id,
+            user_message,
+            assistant_response,
+            recalled_memory_ids,
+            tool_summary,
+        )
+
+    async def build_pre_reply_guidance(self, session_id: str, latest_user_message: str = "") -> dict:
+        self.pre_calls.append({"session_id": session_id, "user_message": latest_user_message})
+        return await super().build_pre_reply_guidance(session_id, latest_user_message)
 
 
 def _run(coro):
@@ -958,10 +999,13 @@ def test_gateway_skips_persona_reanalysis_on_tool_continuation(monkeypatch, test
                     },
                 ],
             },
-        )
+    )
 
     assert response.status_code == 200
-    assert persona_engine.calls == []
+    assert persona_engine.pre_calls == []
+    assert persona_engine.post_calls == [
+        {"session_id": "sess-tool-continuation", "user_message": "查一下今日日记"}
+    ]
     roles = [message["role"] for message in captured[0]["messages"]]
     assert roles == ["system", "system", "user", "assistant", "tool"]
     assert "Core Memory" in captured[0]["messages"][0]["content"]
