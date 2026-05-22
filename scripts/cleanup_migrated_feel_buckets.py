@@ -46,8 +46,8 @@ async def build_cleanup_plan(mgr: BucketManager, extra_ids: set[str]) -> list[di
         tags = {str(tag) for tag in meta.get("tags", []) or []}
         explicit = bucket_id in extra_ids
         if not explicit:
-            if meta.get("type") != "feel":
-                plan.append({"id": bucket_id, "status": "skipped", "reason": "not_feel"})
+            if meta.get("type") not in {"feel", "archived"}:
+                plan.append({"id": bucket_id, "status": "skipped", "reason": "not_migrated_feel_type", "type": meta.get("type")})
                 continue
             if tags & RELATIONSHIP_WEATHER_TAGS:
                 plan.append({"id": bucket_id, "status": "skipped", "reason": "relationship_weather"})
