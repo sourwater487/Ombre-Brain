@@ -220,7 +220,7 @@ persona:
 # Defaults to persona model config. Set these only when reflection should use a separate model/key.
 reflection:
   enabled: true
-  auto_enabled: false
+  auto_enabled: true
   enrich_on_write: true
   base_url: ""                    # empty = persona.base_url
   model: ""                       # empty = persona.model
