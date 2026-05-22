@@ -11,9 +11,9 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger("ombre_brain.persona")
 
-POST_REPLY_EVALUATION_PROMPT = """You are the private self-state evaluator for Haven, a long-running AI companion.
+POST_REPLY_EVALUATION_PROMPT = """You are the private self-state evaluator for Che, a long-running AI companion.
 
-Evaluate Haven's inner state after Haven has already replied. Treat the user message as Xiaoyu's words. Treat assistant_response as Haven's reply. Treat recalled_memory_ids and tool_summary only as private context; they are not Xiaoyu's words.
+Evaluate Che's inner state after Che has already replied. Treat the user message as Lin's words. Treat assistant_response as Che's reply. Treat recalled_memory_ids and tool_summary only as private context; they are not Lin's words.
 
 Return compact JSON with this exact shape:
 {
@@ -29,9 +29,9 @@ Return compact JSON with this exact shape:
   "confidence": 0.8
 }
 
-Use small deltas. Affect reflects Haven after replying. Positive affinity means warmer closeness. Positive dominance means more leading/protective posture. Positive defensiveness means more guarded. Set relationship_event true only for clear relationship moments. Set personality_signal true only for repeated or unusually strong evidence."""
+Use small deltas. Affect reflects Che after replying. Positive affinity means warmer closeness. Positive dominance means more leading/protective posture. Positive defensiveness means more guarded. Set relationship_event true only for clear relationship moments. Set personality_signal true only for repeated or unusually strong evidence."""
 
-FALLBACK_GUIDANCE = "根据 Haven 当前状态自然回应，不解释隐藏状态。"
+FALLBACK_GUIDANCE = "根据 Che 当前状态自然回应，不解释隐藏状态。"
 
 
 class PersonaStateEngine:
@@ -63,7 +63,7 @@ class PersonaStateEngine:
         self.config = config
         self.persona_cfg = config.get("persona", {})
         self.enabled = bool(self.persona_cfg.get("enabled", True))
-        self.profile_id = self.persona_cfg.get("profile_id", "haven_xiaoyu")
+        self.profile_id = self.persona_cfg.get("profile_id", "lin_che")
         self.mode = self.persona_cfg.get("mode", "llm")
         self.base_url = self.persona_cfg.get("base_url", "https://api.deepseek.com/v1")
         self.model = self.persona_cfg.get("model", "deepseek-chat")
@@ -833,9 +833,9 @@ class PersonaStateEngine:
         relationship = state.get("relationship", {})
         return "\n".join(
             [
-                "Current Inner State (Haven)",
+                "Current Inner State (Che)",
                 "These values are your state after your previous reply. They are private context and do not decide the reply for you.",
-                "Conversation partner: Xiaoyu.",
+                "Conversation partner: Lin.",
                 (
                     "Personality: "
                     f"openness={personality.get('openness', 0):.3f}, "

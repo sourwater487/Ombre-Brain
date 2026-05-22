@@ -38,22 +38,22 @@ Persona 的运行时 SQLite 放在：
 
 评估输入包括：
 
-- latest user message：小雨真实发来的最后一条用户消息
-- assistant response：Haven 已经回复出去的内容
+- latest user message：Lin真实发来的最后一条用户消息
+- assistant response：Che 已经回复出去的内容
 - previous persona state
 - recalled memory ids
 - tool summary
 
-工具结果、隐藏记忆、Core Memory、Recent Context、Recalled Memory 都只能当上下文摘要，不能当作小雨原话。
+工具结果、隐藏记忆、Core Memory、Recent Context、Recalled Memory 都只能当上下文摘要，不能当作Lin原话。
 
 ## 注入给上游的 Persona 文本
 
 当前 `persona_engine.py` 里 `format_state_block()` 的核心提示是：
 
 ```text
-Current Inner State (Haven)
+Current Inner State (Che)
 These values are your state after your previous reply. They are private context and do not decide the reply for you.
-Conversation partner: Xiaoyu.
+Conversation partner: Lin.
 ```
 
 中文版含义：
@@ -62,7 +62,7 @@ Conversation partner: Xiaoyu.
 这是你在上一次回复后的状态，不替你做判断。
 ```
 
-直接部署本仓库时，需要修改一下 User（小雨/xiaoyu）和 Char（Haven）的称呼，并同步改 `persona.profile_id`。
+直接部署本仓库时，需要修改一下 User（Lin/lin）和 Char（Che）的称呼，并同步改 `persona.profile_id`。
 
 ## Supabase 同步规则
 

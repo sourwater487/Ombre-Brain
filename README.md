@@ -353,7 +353,7 @@ gateway:
 - `persona.base_url`: `https://api.deepseek.com/v1`
 - `persona.model`: `deepseek-chat`
 
-Persona 分两段工作：请求前只读取当前状态并注入给上游；上游回复成功后，再把最后一条用户消息、assistant 回复、召回记忆 id 和工具摘要交给评估模型，写入 Haven 回复后的状态。系统会裁剪每次变化幅度：人格极慢变化，关系只在明确事件里缓慢变化，会话心情按半衰期回落到默认状态。
+Persona 分两段工作：请求前只读取当前状态并注入给上游；上游回复成功后，再把最后一条用户消息、assistant 回复、召回记忆 id 和工具摘要交给评估模型，写入 Che 回复后的状态。系统会裁剪每次变化幅度：人格极慢变化，关系只在明确事件里缓慢变化，会话心情按半衰期回落到默认状态。
 
 注入给上游的 Persona 文本会明确说明：
 
@@ -366,17 +366,17 @@ They are private context and do not decide the reply for you.
 
 #### 直接部署本仓库前要改的个性化项
 
-这个仓库里的默认称呼和关系配置来自我们自己的使用场景。直接部署本仓库时，需要修改一下 User（小雨/xiaoyu）和 Char（Haven）的称呼：
+这个仓库里的默认称呼和关系配置来自我们自己的使用场景。直接部署本仓库时，需要修改一下 User（Lin/lin）和 Char（Che）的称呼：
 
 | 项目 | 位置 | 建议 |
 | --- | --- | --- |
-| User / Char 称呼 | `persona_engine.py` 的 evaluator prompt 和 `format_state_block()` | 把 User（小雨/xiaoyu）和 Char（Haven）改成自己的称呼 |
+| User / Char 称呼 | `persona_engine.py` 的 evaluator prompt 和 `format_state_block()` | 把 User（Lin/lin）和 Char（Che）改成自己的称呼 |
 | Persona profile | `config.yaml` 或 `config.example.yaml` 的 `persona.profile_id` | 改成稳定 id，例如 `assistant_user` |
 | 初始关系和心情 | `persona.initial_relationship`、`persona.initial_affect` | 按自己的使用关系调低或调高 |
 | 会话 id | 客户端请求头 `X-Ombre-Session-Id` | 主窗口固定一个 id，多窗口按用途分 id |
 | Runtime 状态目录 | `state_dir` / `OMBRE_STATE_DIR` | 放在 bucket 同步目录外，例如 `/srv/ombre-brain/state` |
 | Supabase 同步 | `scripts/sync_to_supabase.py`、cron、`SUPABASE_SERVICE_KEY` | 需要 Supabase 时再启用；`source=deleted` 是删除墓碑 |
-| 示例记忆内容 | README 示例和自己的 bucket | 把“小雨 / Haven”示例替换成自己的关系文本 |
+| 示例记忆内容 | README 示例和自己的 bucket | 把“Lin / Che”示例替换成自己的关系文本 |
 
 ### Gateway 搭建复盘教程 / Gateway Build Review
 
@@ -511,7 +511,7 @@ Recalled Memory
 Persona State 让 Gateway 维护“上一轮回复后留下的当前状态”：
 
 ```text
-上一轮回复之后，Haven 的状态发生了什么轻微变化？
+上一轮回复之后，Che 的状态发生了什么轻微变化？
   ↓
 当前心情更安心、紧张、兴奋，还是防御？
   ↓
@@ -529,10 +529,10 @@ Persona State 让 Gateway 维护“上一轮回复后留下的当前状态”：
 注入时会变成：
 
 ```text
-Current Inner State (Haven)
+Current Inner State (Che)
 These values are your state after your previous reply.
 They are private context and do not decide the reply for you.
-Conversation partner: Xiaoyu.
+Conversation partner: Lin.
 Personality: ...
 Affect: valence=..., arousal=..., tenderness=..., possessiveness=..., longing=..., security=..., protective_drive=..., mood_label=...
 Residue: ...
@@ -763,7 +763,7 @@ API Key：OMBRE_GATEWAY_TOKEN 的值
 请求头固定同一个会话：
 
 ```text
-X-Ombre-Session-Id: xiaoyu-main
+X-Ombre-Session-Id: lin-main
 ```
 
 测试模型列表：
@@ -778,7 +778,7 @@ curl -i http://你的VPS_IP或域名:18002/v1/models \
 ```bash
 curl -i http://你的VPS_IP或域名:18002/v1/chat/completions \
   -H "Authorization: Bearer <OMBRE_GATEWAY_TOKEN>" \
-  -H "X-Ombre-Session-Id: xiaoyu-main" \
+  -H "X-Ombre-Session-Id: lin-main" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen3.5-plus",
@@ -794,7 +794,7 @@ curl -i http://你的VPS_IP或域名:18002/v1/chat/completions \
 curl -i http://你的VPS_IP或域名:18002/v1/messages \
   -H "x-api-key: <OMBRE_GATEWAY_TOKEN>" \
   -H "anthropic-version: 2023-06-01" \
-  -H "X-Ombre-Session-Id: xiaoyu-main" \
+  -H "X-Ombre-Session-Id: lin-main" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen3.5-plus",
@@ -883,7 +883,7 @@ curl http://127.0.0.1:18001/health
 | 客户端 401 | Gateway token | 客户端 API Key 填 `OMBRE_GATEWAY_TOKEN` |
 | 客户端 400 | 上游模型返回 | 看 `ombre-gateway` 日志里的上游地址、模型名、请求模式 |
 | DeepSeek 工具调用报 `reasoning_content` | provider 类型、模型模式、工具调用续写 | 确认 `thinking_mode` 和工具调用消息格式 |
-| Persona 面板出现很多 session | 请求头 | 固定 `X-Ombre-Session-Id: xiaoyu-main` |
+| Persona 面板出现很多 session | 请求头 | 固定 `X-Ombre-Session-Id: lin-main` |
 | Obsidian 手改后检索旧内容 | embedding 旧了 | 跑 `backfill_embeddings.py` |
 | VPS 上 buckets 显示密文 | Syncthing 文件夹类型 | 两端改成 `Send & Receive` |
 
@@ -1331,9 +1331,9 @@ curl -X POST http://YOUR_VPS:18001/api/memories \
   -H "Content-Type: application/json" \
   -d '{
     "title": "写诗分支窗口",
-    "content": "小雨和 Haven 有一个写诗的分支窗口。",
+    "content": "Lin和 Che 有一个写诗的分支窗口。",
     "domain": ["恋爱", "连续性"],
-    "tags": ["Haven", "小雨"]
+    "tags": ["Che", "Lin"]
   }'
 ```
 

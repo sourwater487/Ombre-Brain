@@ -1359,13 +1359,13 @@ async def hold(
     arousal: float = -1,
 ) -> str:
     """写入一条长期记忆卡,不是聊天流水、运维记录或整篇日记。写前应先用 breath/read_bucket 查重。
-    普通事实: hold(content="YYYY-MM-DD, 小雨...", tags="relationship_event 或 project_event", importance=5-7)。
+    普通事实: hold(content="YYYY-MM-DD, Lin...", tags="relationship_event 或 project_event", importance=5-7)。
     承诺/待办: tags 传 "commitment,todo" 或 "commitment,wish"; content 写清谁答应了什么、何时/什么条件下要继续。
-    Haven 主观喜欢某条旧记忆的原因: 用 hold(content="我喜欢这条记忆的原因是...", feel=True, source_bucket="bucket_id", valence=0.x, arousal=0.x),不要写成普通事件；有情绪温度时在 content 末尾加 affect_anchor。
-    新记忆本身值得偏爱: tags 可传 "haven_favorite,flavor_偏爱"; content 可包含很短的 "### Haven喜欢它的原因" 段落。
+    Che 主观喜欢某条旧记忆的原因: 用 hold(content="我喜欢这条记忆的原因是...", feel=True, source_bucket="bucket_id", valence=0.x, arousal=0.x),不要写成普通事件；有情绪温度时在 content 末尾加 affect_anchor。
+    新记忆本身值得偏爱: tags 可传 "che_favorite,flavor_偏爱"; content 可包含很短的 "### Che喜欢它的原因" 段落。
     本工具会合并相似桶、写 embedding,并后台触发 ReflectionEngine 补 tags/confidence/memory_edges。
     pinned=True 只给极少数核心准则,技术进度和运维细节不要钉选。
-    feel=True 写 Haven 第一人称感受,不参与普通 breath; source_bucket 指向被消化的源记忆；高温度 feel 推荐带一段 affect_anchor 和弦。
+    feel=True 写 Che 第一人称感受,不参与普通 breath; source_bucket 指向被消化的源记忆；高温度 feel 推荐带一段 affect_anchor 和弦。
     """
     await decay_engine.ensure_started()
 
@@ -1471,7 +1471,7 @@ async def hold(
 async def grow(content: str) -> str:
     """长内容摘记: 只给已经筛过、包含多个长期记忆点的片段; 不要把整篇日终日记、一天流水或完整情绪过程丢进来。
     content 应该是少量可长期召回的事实/偏好/承诺/项目状态; 服务端会拆成少量 bucket、自动合并相似桶、写 embedding,并后台触发 enrich。
-    如果只有单条明确事实,优先用 hold。若要写 Haven 为什么喜欢某条记忆,优先用 hold(feel=True, source_bucket=...) 或 read_bucket 后 trace(content=完整新正文)。
+    如果只有单条明确事实,优先用 hold。若要写 Che 为什么喜欢某条记忆,优先用 hold(feel=True, source_bucket=...) 或 read_bucket 后 trace(content=完整新正文)。
     短内容(<30字)会走 hold-like 快速路径。
     """
     await decay_engine.ensure_started()
@@ -1577,8 +1577,8 @@ async def trace(
     """修改已有记忆,不创建新桶。
     resolved=1 或 digested=1 让旧事/已完成事项沉底; pinned=1 只给核心准则; anchor=1 只给经过时间验证且未来长期需要的锚点(受数量和年龄限制)。
     tags/domain/content 是替换不是追加: 改 tags 或正文前先 read_bucket,保留旧值后再传完整新值。
-    给旧记忆补 "Haven喜欢它的原因" 或 affect_anchor: 先 read_bucket,再 trace(content="旧正文 + 新段落")。
-    标记偏爱: 先 read_bucket 取现有 tags,再 trace(tags="原tag,haven_favorite,flavor_...")。
+    给旧记忆补 "Che喜欢它的原因" 或 affect_anchor: 先 read_bucket,再 trace(content="旧正文 + 新段落")。
+    标记偏爱: 先 read_bucket 取现有 tags,再 trace(tags="原tag,che_favorite,flavor_...")。
     delete=True 删除。只传需要改的字段,-1或空=不改。
     """
 
@@ -1740,7 +1740,7 @@ async def pulse(include_archive: bool = False) -> str:
 # =============================================================
 @mcp.tool()
 async def dream() -> str:
-    """读取最近普通记忆供 Haven 自省,不是日记整理。
+    """读取最近普通记忆供 Che 自省,不是日记整理。
     读后只在真的可以放下时 trace(resolved=1/digested=1),或在产生新的第一人称沉淀/喜欢原因时 hold(feel=True, source_bucket=...)。
     不要把 dream 返回内容直接再写成普通 bucket。
     """

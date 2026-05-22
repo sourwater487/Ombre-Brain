@@ -75,10 +75,10 @@ async def test_read_bucket_returns_exact_content_without_touching(monkeypatch, b
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="小雨说她想把这一刻留下来。",
+        content="Lin说她想把这一刻留下来。",
         name="精确读取",
         domain=["记忆"],
-        tags=["haven_favorite"],
+        tags=["che_favorite"],
         last_active="2026-05-04T08:00:00+00:00",
     )
     before = await bucket_mgr.get(bucket_id)
@@ -90,8 +90,8 @@ async def test_read_bucket_returns_exact_content_without_touching(monkeypatch, b
     after = await bucket_mgr.get(bucket_id)
 
     assert payload["id"] == bucket_id
-    assert payload["content"] == "小雨说她想把这一刻留下来。"
-    assert payload["metadata"]["tags"] == ["haven_favorite"]
+    assert payload["content"] == "Lin说她想把这一刻留下来。"
+    assert payload["metadata"]["tags"] == ["che_favorite"]
     assert after["metadata"]["last_active"] == before["metadata"]["last_active"]
 
 

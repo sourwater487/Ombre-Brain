@@ -174,7 +174,7 @@ gateway:
 # 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
 persona:
   enabled: true
-  profile_id: "haven_xiaoyu"
+  profile_id: "lin_che"
   mode: "llm"
   base_url: "https://api.deepseek.com/v1"
   model: "deepseek-chat"
@@ -237,7 +237,7 @@ reflection:
   candidate_recent_limit: 8
   candidate_semantic_limit: 6
   edge_min_confidence: 0.55
-  diary_mcp_url: ""               # optional Haven-diary MCP URL, e.g. http://127.0.0.1:8000/mcp
+  diary_mcp_url: ""               # optional Che-diary MCP URL, e.g. http://127.0.0.1:8000/mcp
   diary_mcp_token_env: ""         # optional bearer token env var name, e.g. MCP_BEARER_TOKEN
   diary_memory_extract_enabled: true
   diary_memory_extract_max_per_day: 1

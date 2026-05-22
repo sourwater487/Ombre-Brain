@@ -235,7 +235,7 @@ class GatewayService:
         if auth_result is not None:
             return auth_result
 
-        session_id = (request.headers.get("X-Ombre-Session-Id") or "xiaoyu-main").strip()
+        session_id = (request.headers.get("X-Ombre-Session-Id") or "lin-main").strip()
 
         try:
             payload = await request.json()
@@ -1448,7 +1448,7 @@ class GatewayService:
         for bucket in all_buckets:
             meta = bucket.get("metadata", {})
             tags = {str(tag) for tag in meta.get("tags", [])}
-            if "haven_favorite" not in tags:
+            if "che_favorite" not in tags:
                 continue
             if meta.get("resolved") or meta.get("digested"):
                 continue
@@ -1707,7 +1707,7 @@ class GatewayService:
             "Relationship Weather",
             relationship_weather or "(none)",
             "",
-            "Haven Favorite Memory",
+            "Che Favorite Memory",
             favorite_memory or "(none)",
             "",
             "Recent Context",

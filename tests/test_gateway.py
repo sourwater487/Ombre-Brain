@@ -31,7 +31,7 @@ class DummyEmbeddingEngine:
 
 class DummyPersonaEngine:
     enabled = True
-    profile_id = "haven_xiaoyu"
+    profile_id = "lin_che"
     mode = "test"
     model = "dummy-persona"
     api_key = "dummy"
@@ -340,7 +340,7 @@ def test_gateway_defaults_anthropic_session_id(monkeypatch, test_config, bucket_
     assert last_message["role"] == "user"
     assert "Current Inner State" in last_message["content"]
     assert last_message["content"].endswith("你好")
-    assert state_store.get_recent_bucket_ids("xiaoyu-main", 5) == set()
+    assert state_store.get_recent_bucket_ids("lin-main", 5) == set()
 
 
 def test_gateway_maps_anthropic_tool_use(monkeypatch, test_config, bucket_mgr):
