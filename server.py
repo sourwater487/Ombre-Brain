@@ -59,6 +59,7 @@ from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
+from gateway import GatewayService
 from import_memory import ImportEngine
 from memory_edges import MemoryEdgeStore
 from persona_engine import PersonaStateEngine
@@ -81,6 +82,7 @@ import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  
 persona_engine = PersonaStateEngine(config)           # Persona state engine / 人格状态引擎
 memory_edge_store = MemoryEdgeStore(config)            # Explicit memory relationship edges / 显式记忆关系边
 reflection_engine = ReflectionEngine(config)           # Reflection worker / 关系天气与关系整理
+gateway_service: GatewayService | None = None          # OpenAI/Anthropic-compatible Gateway / 兼容网关
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -751,6 +753,35 @@ async def health_check(request):
         })
     except Exception as e:
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+
+def _get_gateway_service() -> GatewayService:
+    """Create the Gateway lazily so /v1 routes share the main server process and storage."""
+    global gateway_service
+    if gateway_service is None:
+        gateway_service = GatewayService(
+            config,
+            bucket_mgr=bucket_mgr,
+            dehydrator=dehydrator,
+            embedding_engine=embedding_engine,
+            persona_engine=persona_engine,
+        )
+    return gateway_service
+
+
+@mcp.custom_route("/v1/models", methods=["GET"])
+async def gateway_models(request):
+    return await _get_gateway_service().handle_models(request)
+
+
+@mcp.custom_route("/v1/chat/completions", methods=["POST"])
+async def gateway_chat_completions(request):
+    return await _get_gateway_service().handle_chat(request)
+
+
+@mcp.custom_route("/v1/messages", methods=["POST"])
+async def gateway_anthropic_messages(request):
+    return await _get_gateway_service().handle_anthropic_messages(request)
 
 
 # =============================================================

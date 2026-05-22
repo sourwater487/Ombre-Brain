@@ -8,6 +8,11 @@ class DummyEmbeddingEngine:
     enabled = False
 
 
+class DummyDehydrator:
+    async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
+        return content
+
+
 class DummyRequest:
     def __init__(self, body=None, headers=None, cookies=None):
         self._body = body
@@ -130,6 +135,28 @@ async def test_dashboard_auth_setup_uses_state_dir(monkeypatch, test_config):
 
     assert response.status_code == 200
     assert os.path.exists(auth_file)
+
+
+@pytest.mark.asyncio
+async def test_gateway_models_route_uses_main_server_gateway_service(monkeypatch, test_config, bucket_mgr):
+    import server
+    from gateway import GatewayService
+
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "secret")
+    service = GatewayService(
+        test_config,
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(),
+    )
+    monkeypatch.setattr(server, "gateway_service", service)
+
+    response = await server.gateway_models(DummyRequest(headers={"Authorization": "Bearer secret"}))
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["object"] == "list"
+    assert payload["data"][0]["id"] == "gateway-default-model"
 
 
 def test_chatgpt_oauth_provider_issues_single_use_codes():
