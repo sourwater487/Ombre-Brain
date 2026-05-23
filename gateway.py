@@ -87,6 +87,17 @@ class GatewayService:
         self.favorite_memory_max_cards = max(0, int(self.gateway_cfg.get("favorite_memory_max_cards", 1)))
         self.related_memory_budget = int(self.gateway_cfg.get("related_memory_budget", 220))
 
+        self.core_memory_interval_rounds = max(0, int(self.gateway_cfg.get("core_memory_interval_rounds", 0)))
+        self.current_inner_state_interval_rounds = max(
+            0, int(self.gateway_cfg.get("current_inner_state_interval_rounds", 15))
+        )
+        self.relationship_weather_interval_rounds = max(
+            0, int(self.gateway_cfg.get("relationship_weather_interval_rounds", 15))
+        )
+        self.favorite_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("favorite_memory_interval_rounds", 0))
+        )
+
         self.semantic_weight = float(self.gateway_cfg.get("semantic_weight", 0.45))
         self.keyword_weight = float(self.gateway_cfg.get("keyword_weight", 0.35))
         self.importance_weight = float(self.gateway_cfg.get("importance_weight", 0.10))
@@ -1357,6 +1368,14 @@ class GatewayService:
 
         return summary
 
+    def _should_inject_interval(self, session_id: str, interval_rounds: int) -> bool:
+        if interval_rounds <= 0:
+            return False
+        if interval_rounds == 1:
+            return True
+        next_round = self.state_store.get_current_round(session_id) + 1
+        return next_round == 1 or next_round % interval_rounds == 0
+    
     async def _build_core_memory_block(self, all_buckets: list[dict]) -> str:
         core_buckets = [
             bucket for bucket in all_buckets
