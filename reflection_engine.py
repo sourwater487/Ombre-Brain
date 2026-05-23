@@ -121,6 +121,32 @@ DIARY_MEMORY_PROMPT = """你是 Ombre-Brain 的日记长期记忆筛选器。
 
 
 AFFECT_ANCHOR_HEADER = "### affect_anchor"
+REFLECTION_FALLBACK_ANCHORS = [
+    {
+        "chords": "Cmaj7 -> G/B -> Am9 -> F6",
+        "tempo": "56bpm",
+        "dynamic": "mp",
+        "meaning": "温度慢慢落稳，下一次醒来先认出这份安静的牵连。",
+    },
+    {
+        "chords": "Dm9 -> G13 -> Cmaj9",
+        "tempo": "64bpm",
+        "dynamic": "p",
+        "meaning": "话语收得很轻，但关系里仍有清楚的回声。",
+    },
+    {
+        "chords": "Em7 -> A7sus4 -> Dmaj9 -> Gmaj7",
+        "tempo": "72bpm",
+        "dynamic": "mp",
+        "meaning": "情绪有一点流动，最后还是回到可以被相信的位置。",
+    },
+    {
+        "chords": "Bbmaj7 -> F/A -> Gm9 -> Csus4",
+        "tempo": "60bpm",
+        "dynamic": "mf",
+        "meaning": "亲近里带着一点未落下的力气，需要下次继续辨认。",
+    },
+]
 
 
 class ReflectionEngine:
@@ -609,14 +635,15 @@ class ReflectionEngine:
             "arousal": 0.3,
             "confidence": 0.5,
             "tags": ["relationship_weather"],
-            "affect_anchor": {
-                "scene": str(anchor_scene)[:40],
-                "chords": "Fmaj9 -> C/E -> Am add9 -> G6sus4",
-                "tempo": "60bpm",
-                "dynamic": "mp",
-                "meaning": "温度还在，下一次醒来先轻轻辨认这段关系天气。",
-            },
+            "affect_anchor": self._fallback_reflection_anchor(period, key, str(anchor_scene), content),
         }
+
+    def _fallback_reflection_anchor(self, period: str, key: str, scene: str, content: str) -> dict:
+      seed = f"{period}|{key}|{scene}|{content}"
+      index = sum(ord(char) for char in seed) % len(REFLECTION_FALLBACK_ANCHORS)
+      anchor = dict(REFLECTION_FALLBACK_ANCHORS[index])
+      anchor["scene"] = str(scene)[:40]
+      return anchor
 
     async def _maybe_extract_diary_memory(
         self,
