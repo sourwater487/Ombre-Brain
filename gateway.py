@@ -4,6 +4,7 @@ import secrets
 import json
 import codecs
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -1999,6 +2000,7 @@ class GatewayService:
         return {
             "decoder": codecs.getincrementaldecoder("utf-8")(),
             "buffer": "",
+            "seen_done": False,
             "message": {
                 "role": "assistant",
                 "content": "",
@@ -2041,7 +2043,10 @@ class GatewayService:
         if not data_lines:
             return
         payload = "\n".join(data_lines).strip()
-        if not payload or payload == "[DONE]":
+        if not payload:
+            return
+        if payload == "[DONE]":
+            stream_state["seen_done"] = True
             return
 
         try:
