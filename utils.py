@@ -97,6 +97,9 @@ def load_config(config_path: str = None) -> dict:
             "first_card_min_score": 0.55,
             "second_card_min_score": 0.50,
             "second_card_relative_score": 0.85,
+            "high_confidence_semantic_score": 0.72,
+            "high_confidence_keyword_score": 0.65,
+            "high_confidence_cooldown_floor": 0.8,
         },
         "persona": {
             "enabled": True,
