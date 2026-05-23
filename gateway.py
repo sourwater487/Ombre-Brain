@@ -643,6 +643,61 @@ class GatewayService:
         except Exception as exc:
             logger.warning("Persona post-reply update failed | session=%s error=%s", session_id, exc)
 
+    async def _finalize_stream_turn(
+        self,
+        session_id: str,
+        model: str,
+        route: str,
+        stream_state: dict[str, Any],
+        recalled_ids: list[str] | None,
+        user_message: str,
+    ) -> None:
+        self._log_cache_usage_from_stream_state(
+            session_id,
+            model,
+            stream_state,
+            route=route,
+        )
+        self._capture_reasoning_from_stream_state(session_id, stream_state)
+        await self._record_successful_round(session_id, recalled_ids)
+        assistant_message = self._build_stream_assistant_message(stream_state)
+        self._schedule_persona_post_reply_update(
+            session_id,
+            user_message,
+            assistant_message,
+            recalled_ids or [],
+        )
+
+    def _schedule_persona_post_reply_update(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: dict[str, Any] | None,
+        recalled_ids: list[str],
+    ) -> None:
+        async def runner() -> None:
+            await self._update_persona_after_assistant_message(
+                session_id,
+                user_message,
+                assistant_message,
+                recalled_ids,
+            )
+
+        task = asyncio.create_task(runner())
+        task.add_done_callback(
+            lambda done: self._log_persona_post_update_task(session_id, done)
+        )
+
+    def _log_persona_post_update_task(self, session_id: str, task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except Exception as exc:
+            logger.warning(
+                "Persona post-reply background update failed | session=%s error=%s",
+                session_id,
+                exc,
+            )
+    
     def _summarize_assistant_tool_calls(self, assistant_message: dict[str, Any]) -> str:
         tool_calls = assistant_message.get("tool_calls")
         if not isinstance(tool_calls, list) or not tool_calls:
