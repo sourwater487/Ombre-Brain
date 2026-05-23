@@ -1763,33 +1763,47 @@ class GatewayService:
         favorite_memory: str,
         related_memory: str,
     ) -> tuple[str, str]:
-        stable_sections = [
-            "Use the following private memory only when it fits naturally. "
-            "Keep the reply seamless and do not mention memory lookup, search, or hidden context.",
-            "",
-            "Core Memory",
-            core_memory or "(none)",
-        ]
-        dynamic_sections = [
-            "Live private context for the current turn. Use it quietly when relevant.",
-            "",
-            persona_block,
-            "",
-            "Relationship Weather",
-            relationship_weather or "(none)",
-            "",
-            "Che Favorite Memory",
-            favorite_memory or "(none)",
-            "",
-            "Recent Context",
-            recent_context or "(none)",
-            "",
-            "Recalled Memory",
-            recalled_memory or "(none)",
-            "",
-            "Related Memory",
-            related_memory or "(none)",
-        ]
+        stable_sections = []
+        if core_memory.strip():
+            stable_sections = [
+                "Use the following private memory only when it fits naturally.\n"
+                "Keep the reply seamless and do not mention memory lookup, search, or hidden context.",
+                "",
+                "Core Memory",
+                core_memory,
+            ]
+
+        dynamic_sections = []
+        if any(
+            section.strip()
+            for section in [
+                persona_block,
+                relationship_weather,
+                favorite_memory,
+                recent_context,
+                recalled_memory,
+                related_memory,
+            ]
+        ):
+            dynamic_sections = [
+                "Live private context for the current turn.\nUse it quietly when relevant.",
+            ]
+
+        if persona_block.strip():
+            dynamic_sections.extend(["", persona_block])
+
+        def add_section(title: str, content: str) -> None:
+            if content.strip():
+                dynamic_sections.extend(["", title, content])
+
+        add_section("Relationship Weather", relationship_weather)
+        add_section("Haven Favorite Memory", favorite_memory)
+        add_section("Recent Context", recent_context)
+        add_section("Recalled Memory", recalled_memory)
+        add_section("Related Memory", related_memory)
+
+        stable_context = "\n".join(stable_sections).strip()
+        dynamic_context = "\n".join(dynamic_sections).strip()     
         stable_context = "\n".join(stable_sections).strip()
         dynamic_context = "\n".join(dynamic_sections).strip()
         stable_tokens = count_tokens_approx(stable_context)
