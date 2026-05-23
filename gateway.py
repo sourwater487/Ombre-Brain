@@ -1127,19 +1127,19 @@ class GatewayService:
             text_block_index: int | None = None
             tool_blocks: dict[int, dict[str, Any]] = {}
             
-        async def finalize_once() -> None:
-            nonlocal finalized
-            if finalized:
-                return
-            finalized = True
-            await self._finalize_stream_turn(
-                session_id=session_id,
-                model=model,
-                route="/v1/messages",
-                stream_state=stream_state,
-                recalled_ids=recalled_ids,
-                user_message=user_message,
-            )
+            async def finalize_once() -> None:
+                nonlocal finalized
+                if finalized:
+                    return
+                finalized = True
+                await self._finalize_stream_turn(
+                    session_id=session_id,
+                    model=model,
+                    route="/v1/messages",
+                    stream_state=stream_state,
+                    recalled_ids=recalled_ids,
+                    user_message=user_message,
+                )
 
             try:
                 yield self._anthropic_sse(
