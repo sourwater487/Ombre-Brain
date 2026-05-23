@@ -545,32 +545,34 @@ class GatewayService:
             )
 
         async def stream_body():
-            completed = False
+            finalized = False
             stream_state = self._new_stream_capture_state()
+
+            async def finalize_once() -> None:
+                nonlocal finalized
+                if finalized:
+                    return
+                finalized = True
+                await self._finalize_stream_turn(
+                    session_id=session_id,
+                    model=model,
+                    route="/v1/chat/completions",
+                    stream_state=stream_state,
+                    recalled_ids=recalled_ids,
+                    user_message=user_message,
+                )
+
             try:
                 async for chunk in upstream_response.aiter_bytes():
                     if chunk:
                         self._consume_stream_capture_chunk(stream_state, chunk)
-                        yield chunk
+                        if stream_state.get("seen_done"):
+                            await finalize_once()
+                    yield chunk
                 self._consume_stream_capture_chunk(stream_state, b"", final=True)
-                completed = True
+                await finalize_once()
             finally:
                 await upstream_response.aclose()
-                if completed:
-                    self._log_cache_usage_from_stream_state(
-                        session_id,
-                        model,
-                        stream_state,
-                        route="/v1/chat/completions",
-                    )
-                    self._capture_reasoning_from_stream_state(session_id, stream_state)
-                    await self._record_successful_round(session_id, recalled_ids)
-                    await self._update_persona_after_assistant_message(
-                        session_id,
-                        user_message,
-                        self._build_stream_assistant_message(stream_state),
-                        recalled_ids,
-                    )
 
         return StreamingResponse(
             stream_body(),
