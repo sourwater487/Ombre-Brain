@@ -122,6 +122,15 @@ class GatewayService:
         self.second_card_relative_score = float(
             self.gateway_cfg.get("second_card_relative_score", 0.85)
         )
+        self.high_confidence_semantic_score = float(
+            self.gateway_cfg.get("high_confidence_semantic_score", 0.72)
+        )
+        self.high_confidence_keyword_score = float(
+            self.gateway_cfg.get("high_confidence_keyword_score", 0.65)
+        )
+        self.high_confidence_cooldown_floor = self._clamp(
+            float(self.gateway_cfg.get("high_confidence_cooldown_floor", 0.8))
+        )
         self.edge_min_confidence = float(self.gateway_cfg.get("edge_min_confidence", 0.55))
         self.pending_tool_reasoning: dict[str, dict[tuple[str, ...], dict[str, Any]]] = {}
 
