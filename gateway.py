@@ -324,7 +324,7 @@ class GatewayService:
             }
         )
 
-    async def prepare_payload(self, payload: dict, session_id: str) -> tuple[dict, list[str]]:
+    async def prepare_payload(self, payload: dict, session_id: str) -> tuple[dict, list[str] | None]:
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a non-empty list")
@@ -335,20 +335,54 @@ class GatewayService:
         self._get_upstream_for_model(model)
 
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
-        query = self._extract_last_user_query(messages)
-        persona_query = self._extract_current_turn_user_query(messages)
-        if persona_query:
-            persona_state = await self.persona_engine.build_pre_reply_guidance(session_id, persona_query)
+        current_user_query = self._extract_current_turn_user_query(messages)
+        is_new_user_turn = bool(current_user_query)
+
+        persona_block = ""
+        core_memory = ""
+        recent_context = ""
+        recalled_buckets: list[dict] = []
+        recalled_memory = ""
+        relationship_weather = ""
+        favorite_memory = ""
+        favorite_ids: list[str] = []
+        related_memory = ""
+        injected_ids: list[str] | None = None
+
+        if is_new_user_turn:
+            if self._should_inject_interval(session_id, self.current_inner_state_interval_rounds):
+                persona_state = await self.persona_engine.build_pre_reply_guidance(
+                    session_id, current_user_query
+                )
+                persona_block = self.persona_engine.format_state_block(persona_state)
+
+            if self._should_inject_interval(session_id, self.core_memory_interval_rounds):
+                core_memory = await self._build_core_memory_block(all_buckets)
+
+            recent_context = await self._build_recent_context_block(all_buckets)
+            recalled_buckets = await self._select_dynamic_buckets(
+                current_user_query, session_id, all_buckets
+            )
+            recalled_memory = await self._summarize_buckets(recalled_buckets, self.recalled_budget)
+
+            if self._should_inject_interval(session_id, self.relationship_weather_interval_rounds):
+                relationship_weather = await self._build_relationship_weather_block(all_buckets)
+
+            if self._should_inject_interval(session_id, self.favorite_memory_interval_rounds):
+                favorite_memory, favorite_ids = await self._build_favorite_memory_block(
+                    all_buckets, session_id
+                )
+
+            related_memory = await self._build_related_memory_block(recalled_buckets, all_buckets)
+            injected_ids = list(
+                dict.fromkeys([bucket["id"] for bucket in recalled_buckets] + favorite_ids)
+            )
         else:
-            persona_state = self.persona_engine.get_current_state(session_id)
-        persona_block = self.persona_engine.format_state_block(persona_state)
-        core_memory = await self._build_core_memory_block(all_buckets)
-        recent_context = await self._build_recent_context_block(all_buckets)
-        recalled_buckets = await self._select_dynamic_buckets(query, session_id, all_buckets)
-        recalled_memory = await self._summarize_buckets(recalled_buckets, self.recalled_budget)
-        relationship_weather = await self._build_relationship_weather_block(all_buckets)
-        favorite_memory, favorite_ids = await self._build_favorite_memory_block(all_buckets, session_id)
-        related_memory = await self._build_related_memory_block(recalled_buckets, all_buckets)
+            logger.info(
+                "Gateway dynamic context skipped | session=%s reason=not_current_user_turn",
+                session_id,
+            )
+
         stable_context, dynamic_context = self._build_injected_context_messages(
             persona_block=persona_block,
             core_memory=core_memory,
@@ -369,9 +403,6 @@ class GatewayService:
         )
         self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
-        injected_ids = list(
-            dict.fromkeys([bucket["id"] for bucket in recalled_buckets] + favorite_ids)
-        )
         return forward_payload, injected_ids
 
     def _apply_prompt_cache_hints(self, payload: dict[str, Any], session_id: str) -> None:
