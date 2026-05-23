@@ -85,6 +85,20 @@ class GatewayService:
         self.relationship_weather_budget = int(self.gateway_cfg.get("relationship_weather_budget", 220))
         self.favorite_memory_budget = int(self.gateway_cfg.get("favorite_memory_budget", 180))
         self.favorite_memory_max_cards = max(0, int(self.gateway_cfg.get("favorite_memory_max_cards", 1)))
+
+        self.core_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("core_memory_interval_rounds", 0))
+        )
+        self.current_inner_state_interval_rounds = max(
+            0, int(self.gateway_cfg.get("current_inner_state_interval_rounds", 15))
+        )
+        self.relationship_weather_interval_rounds = max(
+            0, int(self.gateway_cfg.get("relationship_weather_interval_rounds", 15))
+        )
+        self.favorite_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("favorite_memory_interval_rounds", 0))
+        )
+        
         self.related_memory_budget = int(self.gateway_cfg.get("related_memory_budget", 220))
 
         self.core_memory_interval_rounds = max(0, int(self.gateway_cfg.get("core_memory_interval_rounds", 0)))
