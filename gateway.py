@@ -581,7 +581,14 @@ class GatewayService:
             },
         )
 
-    async def _record_successful_round(self, session_id: str, recalled_ids: list[str]) -> None:
+    async def _record_successful_round(self, session_id: str, recalled_ids: list[str] | None) -> None:
+        if recalled_ids is None:
+            logger.info(
+                "Gateway round bookkeeping skipped | session=%s reason=not_current_user_turn",
+                session_id,
+            )
+            return
+        
         round_id = self.state_store.record_success(session_id, recalled_ids)
         for bucket_id in recalled_ids:
             await self.bucket_mgr.touch(bucket_id)
