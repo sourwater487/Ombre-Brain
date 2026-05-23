@@ -507,7 +507,7 @@ class GatewayService:
         self,
         payload: dict,
         session_id: str,
-        recalled_ids: list[str],
+        recalled_ids: list[str] | None,
         user_message: str,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
@@ -604,7 +604,7 @@ class GatewayService:
         session_id: str,
         user_message: str,
         upstream_response: httpx.Response,
-        recalled_ids: list[str],
+        recalled_ids: list[str] | None,
     ) -> None:
         try:
             body = upstream_response.json()
@@ -615,7 +615,7 @@ class GatewayService:
             session_id,
             user_message,
             assistant_message,
-            recalled_ids,
+            recalled_ids or [],
         )
 
     async def _update_persona_after_assistant_message(
@@ -1013,7 +1013,7 @@ class GatewayService:
         self,
         payload: dict,
         session_id: str,
-        recalled_ids: list[str],
+        recalled_ids: list[str] | None,
         user_message: str,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
@@ -1207,7 +1207,7 @@ class GatewayService:
                         session_id,
                         user_message,
                         self._build_stream_assistant_message(stream_state),
-                        recalled_ids,
+                        recalled_ids or [],
                     )
 
         return StreamingResponse(
