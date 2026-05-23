@@ -1109,7 +1109,7 @@ class GatewayService:
             )
 
         async def stream_body():
-            completed = False
+            finalized = False
             stream_state = self._new_stream_capture_state()
             message_id = f"msg_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
             usage = {"input_tokens": 0, "output_tokens": 0}
@@ -1117,6 +1117,20 @@ class GatewayService:
             next_block_index = 0
             text_block_index: int | None = None
             tool_blocks: dict[int, dict[str, Any]] = {}
+            
+        async def finalize_once() -> None:
+            nonlocal finalized
+            if finalized:
+                return
+            finalized = True
+            await self._finalize_stream_turn(
+                session_id=session_id,
+                model=model,
+                route="/v1/messages",
+                stream_state=stream_state,
+                recalled_ids=recalled_ids,
+                user_message=user_message,
+            )
 
             try:
                 yield self._anthropic_sse(
@@ -1140,6 +1154,8 @@ class GatewayService:
                     if not chunk:
                         continue
                     self._consume_stream_capture_chunk(stream_state, chunk)
+                    if stream_state.get("seen_done"):
+                        await finalize_once()
                     for event in self._openai_sse_chunk_to_anthropic_events(chunk):
                         if event.get("_done"):
                             continue
@@ -1221,6 +1237,7 @@ class GatewayService:
                                 )
 
                 self._consume_stream_capture_chunk(stream_state, b"", final=True)
+                await finalize_once()
                 if text_block_index is not None:
                     yield self._anthropic_sse(
                         "content_block_stop",
@@ -1249,24 +1266,8 @@ class GatewayService:
                     "message_stop",
                     {"type": "message_stop"},
                 )
-                completed = True
             finally:
                 await upstream_response.aclose()
-                if completed:
-                    self._log_cache_usage_from_stream_state(
-                        session_id,
-                        model,
-                        stream_state,
-                        route="/v1/messages",
-                    )
-                    self._capture_reasoning_from_stream_state(session_id, stream_state)
-                    await self._record_successful_round(session_id, recalled_ids)
-                    await self._update_persona_after_assistant_message(
-                        session_id,
-                        user_message,
-                        self._build_stream_assistant_message(stream_state),
-                        recalled_ids or [],
-                    )
 
         return StreamingResponse(
             stream_body(),
