@@ -90,7 +90,7 @@ class GatewayStateStore:
         ).fetchone()
         conn.close()
         return int(row["current_round"]) if row else 0
-
+    
     def get_recent_bucket_ids(self, session_id: str, recent_rounds: int) -> set[str]:
         if recent_rounds <= 0:
             return set()
