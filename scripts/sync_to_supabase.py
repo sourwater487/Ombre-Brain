@@ -38,10 +38,16 @@ SYNC_FIELDS = (
     "content",
     "valence",
     "arousal",
+    "confidence",
     "importance",
+    "period",
+    "date",
     "pinned",
+    "anchor",
     "resolved",
     "digested",
+    "comments",
+    "comment_count",
     "source",
 )
 SUPABASE_FIELDS = SYNC_FIELDS + ("created", "last_active", "updated_at", "activation_count")
@@ -109,7 +115,9 @@ def is_tombstone(record: dict[str, Any] | None) -> bool:
 
 def _stable_value(value: Any) -> Any:
     if isinstance(value, list):
-        return [str(item) for item in value]
+        return [_stable_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _stable_value(value[key]) for key in sorted(value)}
     if isinstance(value, bool):
         return value
     if isinstance(value, float):
@@ -167,10 +175,16 @@ def parse_md(path: Path) -> dict[str, Any] | None:
         "content": match.group(2).strip(),
         "valence": float(meta.get("valence", 0.5)),
         "arousal": float(meta.get("arousal", 0.5)),
+        "confidence": float(meta.get("confidence", 0.5)),
         "importance": float(meta.get("importance", 1.0)),
+        "period": str(meta.get("period")) if meta.get("period") else None,
+        "date": str(meta.get("date")) if meta.get("date") else None,
         "pinned": ensure_bool(meta.get("pinned", False)),
+        "anchor": ensure_bool(meta.get("anchor", False)),
         "resolved": ensure_bool(meta.get("resolved", False)),
         "digested": ensure_bool(meta.get("digested", False)),
+        "comments": ensure_list(meta.get("comments")),
+        "comment_count": int(float(meta.get("comment_count", len(ensure_list(meta.get("comments")))))),
         "activation_count": int(float(meta.get("activation_count", 0))),
         "created": str(created),
         "last_active": str(last_active),
@@ -191,10 +205,16 @@ def record_to_md(record: dict[str, Any], path: Path) -> None:
         "tags": ensure_list(record.get("tags")),
         "valence": float(record.get("valence", 0.5)),
         "arousal": float(record.get("arousal", 0.5)),
+        "confidence": float(record.get("confidence", 0.5)),
         "importance": float(record.get("importance", 1.0)),
+        "period": record.get("period") or None,
+        "date": record.get("date") or None,
         "pinned": ensure_bool(record.get("pinned", False)),
+        "anchor": ensure_bool(record.get("anchor", False)),
         "resolved": ensure_bool(record.get("resolved", False)),
         "digested": ensure_bool(record.get("digested", False)),
+        "comments": ensure_list(record.get("comments")),
+        "comment_count": int(float(record.get("comment_count", len(ensure_list(record.get("comments")))))),
         "activation_count": int(float(existing.get("activation_count", record.get("activation_count", 0)))),
         "created": str(record.get("created") or format_time(now_utc())),
         "last_active": str(
@@ -232,10 +252,16 @@ def tombstone_record(bucket_id: str, *, title: str = "", deleted_at: str | None 
         "content": "",
         "valence": 0.5,
         "arousal": 0.5,
+        "confidence": 0.5,
         "importance": 1,
+        "period": None,
+        "date": None,
         "pinned": False,
+        "anchor": False,
         "resolved": True,
         "digested": True,
+        "comments": [],
+        "comment_count": 0,
         "activation_count": 0,
         "created": timestamp,
         "last_active": timestamp,

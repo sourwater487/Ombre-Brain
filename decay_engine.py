@@ -22,7 +22,7 @@
 import math
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger("ombre_brain.decay")
 
@@ -84,6 +84,17 @@ class DecayEngine:
         hours = days_since * 24.0
         return 1.0 + 1.0 * math.exp(-hours / 36.0)
 
+    @staticmethod
+    def _parse_datetime(value) -> datetime:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+    @staticmethod
+    def _now_naive_utc() -> datetime:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
     def calculate_score(self, metadata: dict) -> float:
         """
         Calculate current activity score for a memory bucket.
@@ -117,8 +128,8 @@ class DecayEngine:
         # --- Days since last activation ---
         last_active_str = metadata.get("last_active", metadata.get("created", ""))
         try:
-            last_active = datetime.fromisoformat(str(last_active_str))
-            days_since = max(0.0, (datetime.now() - last_active).total_seconds() / 86400)
+            last_active = self._parse_datetime(last_active_str)
+            days_since = max(0.0, (self._now_naive_utc() - last_active).total_seconds() / 86400)
         except (ValueError, TypeError):
             days_since = 30
 
@@ -208,8 +219,8 @@ class DecayEngine:
                 imp = int(meta.get("importance", 5))
                 last_active_str = meta.get("last_active", meta.get("created", ""))
                 try:
-                    last_active = datetime.fromisoformat(str(last_active_str))
-                    days_since = (datetime.now() - last_active).total_seconds() / 86400
+                    last_active = self._parse_datetime(last_active_str)
+                    days_since = (self._now_naive_utc() - last_active).total_seconds() / 86400
                 except (ValueError, TypeError):
                     days_since = 999
                 if imp <= 4 and days_since > 30:

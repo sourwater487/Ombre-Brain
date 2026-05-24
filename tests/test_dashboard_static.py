@@ -1,0 +1,26 @@
+from pathlib import Path
+
+
+def test_dashboard_comments_show_author_and_time_without_emotion_fields():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+
+    assert "var commentTime = c.original_feel_created || c.created || '';" in html
+    assert "let dashboardAiAuthor = 'Che';" in html
+    assert "function commentAuthorName(comment)" in html
+    assert '<div class="comment-meta">' in html
+    assert '<span class="comment-author">' in html
+    assert '<span class="comment-time">' in html
+
+    comments_block = html.split("var commentsHtml = comments.length", 1)[1].split("var commentFormHtml", 1)[0]
+    assert "commentAuthorName(c)" in comments_block
+    assert "c.valence" not in comments_block
+    assert "c.arousal" not in comments_block
+
+
+def test_dashboard_comment_enter_submit_has_no_visible_send_key():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    form_block = html.split("var commentFormHtml =", 1)[1].split("content.innerHTML =", 1)[0]
+
+    assert "handleCommentKeydown(event)" in form_block
+    assert "comment-send-button" not in html
+    assert 'aria-label="发送"' not in form_block

@@ -326,6 +326,10 @@ class BucketManager:
             post["period"] = str(kwargs["period"])
         if "date" in kwargs:
             post["date"] = str(kwargs["date"])
+        if "comments" in kwargs:
+            post["comments"] = kwargs["comments"] if isinstance(kwargs["comments"], list) else []
+        if "comment_count" in kwargs:
+            post["comment_count"] = max(0, int(kwargs["comment_count"]))
 
         # --- Auto-refresh content update time and activation time ---
         # --- 自动刷新内容更新时间与激活时间 ---
@@ -350,6 +354,130 @@ class BucketManager:
 
         logger.info(f"Updated bucket / 更新记忆桶: {bucket_id}")
         return True
+
+    async def add_comment(
+        self,
+        bucket_id: str,
+        content: str,
+        *,
+        author: str = "Che",
+        kind: str = "comment",
+        valence: float | None = None,
+        arousal: float | None = None,
+        source: str | None = None,
+        created: str | None = None,
+        touch: bool = True,
+    ) -> Optional[dict]:
+        """
+        Append a ring/comment to an existing bucket without changing its body.
+        给已有桶追加年轮，不改正文。
+        """
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path or not content or not str(content).strip():
+            return None
+
+        try:
+            post = frontmatter.load(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to load bucket for comment / 加载评论目标失败: {file_path}: {e}")
+            return None
+
+        comments = post.get("comments", [])
+        if not isinstance(comments, list):
+            comments = []
+
+        now = now_iso()
+        created_at = str(created or now).strip() or now
+        entry = {
+            "id": generate_bucket_id(),
+            "created": created_at,
+            "author": str(author or "Che"),
+            "kind": str(kind or "comment"),
+            "content": str(content).strip(),
+        }
+        if source:
+            entry["source"] = str(source)
+        if valence is not None:
+            entry["valence"] = max(0.0, min(1.0, float(valence)))
+            if entry["kind"] == "feel":
+                post["model_valence"] = entry["valence"]
+        if arousal is not None:
+            entry["arousal"] = max(0.0, min(1.0, float(arousal)))
+
+        comments.append(entry)
+        post["comments"] = comments
+        post["comment_count"] = len(comments)
+        post["updated_at"] = now
+        if touch:
+            post["last_active"] = now
+            post["activation_count"] = post.get("activation_count", 0) + 1
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+        except OSError as e:
+            logger.error(f"Failed to write bucket comment / 写入桶评论失败: {file_path}: {e}")
+            return None
+
+        if touch:
+            current_time = self._parse_iso_datetime(post.get("created", post.get("last_active", "")))
+            if current_time is None:
+                current_time = datetime.now(timezone.utc).replace(tzinfo=None)
+            await self._time_ripple(bucket_id, current_time)
+
+        logger.info(f"Added bucket comment / 已追加年轮: {bucket_id}#{entry['id']}")
+        return entry
+
+    async def delete_comment(
+        self,
+        bucket_id: str,
+        comment_id: str,
+        *,
+        allowed_author: str | None = None,
+        allowed_source: str | None = None,
+    ) -> dict:
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path or not comment_id:
+            return {"status": "not_found"}
+
+        try:
+            post = frontmatter.load(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to load bucket for comment delete / 加载评论删除目标失败: {file_path}: {e}")
+            return {"status": "not_found"}
+
+        comments = post.get("comments", [])
+        if not isinstance(comments, list):
+            return {"status": "not_found"}
+
+        kept = []
+        target = None
+        for comment in comments:
+            if isinstance(comment, dict) and str(comment.get("id") or "") == str(comment_id):
+                target = comment
+            else:
+                kept.append(comment)
+
+        if target is None:
+            return {"status": "not_found"}
+        if allowed_author is not None and target.get("author") != allowed_author:
+            return {"status": "forbidden", "comment": target}
+        if allowed_source is not None and target.get("source") != allowed_source:
+            return {"status": "forbidden", "comment": target}
+
+        post["comments"] = kept
+        post["comment_count"] = len(kept)
+        post["updated_at"] = now_iso()
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+        except OSError as e:
+            logger.error(f"Failed to delete bucket comment / 删除桶评论失败: {file_path}: {e}")
+            return {"status": "failed", "comment": target}
+
+        logger.info(f"Deleted bucket comment / 已删除年轮: {bucket_id}#{comment_id}")
+        return {"status": "deleted", "comment": target}
 
     # ---------------------------------------------------------
     # Wikilink injection — DISABLED
@@ -640,7 +768,13 @@ class BucketManager:
             )
             * 2
         )
-        content_score = fuzz.partial_ratio(query, bucket.get("content", "")[:1000]) * self.content_weight
+        comment_text = " ".join(
+            str(comment.get("content", ""))
+            for comment in meta.get("comments", [])
+            if isinstance(comment, dict)
+        )
+        searchable_content = f"{bucket.get('content', '')}\n{comment_text}"[:1000]
+        content_score = fuzz.partial_ratio(query, searchable_content) * self.content_weight
 
         return (name_score + domain_score + tag_score + content_score) / (100 * (3 + 2.5 + 2 + self.content_weight))
 

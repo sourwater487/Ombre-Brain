@@ -298,6 +298,160 @@
     overflow-y: auto;
     box-shadow: inset 3px 3px 6px var(--shadow-dark-subtle), inset -3px -3px 6px var(--shadow-light);
   }
+  .detail-title-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .detail-title-row h2 {
+    margin-right: auto;
+  }
+  .content-edit-actions button,
+  .comment-delete-button {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--accent);
+    cursor: pointer;
+    transition: all 0.18s ease;
+  }
+  .detail-edit-button {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.18s ease, background-color 0.18s ease;
+  }
+  .content-edit-actions button:hover,
+  .comment-delete-button:hover {
+    color: var(--accent-dark);
+    box-shadow: 3px 3px 8px var(--shadow-dark-subtle), -3px -3px 8px var(--shadow-light);
+  }
+  .detail-edit-button:hover {
+    color: var(--accent-dark);
+    background: var(--accent-glow);
+  }
+  .bucket-content-block {
+    position: relative;
+    margin-top: 42px;
+  }
+  .bucket-content-block .detail-content {
+    margin-top: 0;
+  }
+  .bucket-content-block .detail-edit-button {
+    position: absolute;
+    top: -38px;
+    right: 2px;
+  }
+  .content-edit-form {
+    margin-top: 12px;
+  }
+  .content-edit-form textarea {
+    width: 100%;
+    min-height: 220px;
+    resize: vertical;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.8;
+    box-sizing: border-box;
+  }
+  .content-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .content-edit-actions button {
+    padding: 7px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+  }
+  .content-edit-actions .secondary {
+    color: var(--text-light);
+  }
+  .hidden {
+    display: none !important;
+  }
+  .detail-comments {
+    margin-top: 18px;
+  }
+  .detail-comments h3 {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    margin: 0 0 10px;
+  }
+  .comment-item {
+    position: relative;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .comment-body {
+    white-space: pre-wrap;
+    padding-right: 22px;
+  }
+  .comment-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    color: var(--text-light);
+    font-size: 11px;
+    margin-bottom: 6px;
+  }
+  .comment-author {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .comment-time {
+    color: var(--text-light);
+  }
+  .comment-form {
+    margin-top: 14px;
+  }
+  .comment-form textarea {
+    width: 100%;
+    min-height: 78px;
+    resize: vertical;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.6;
+    box-sizing: border-box;
+  }
+  .comment-delete-button {
+    position: absolute;
+    right: 8px;
+    top: 8px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    color: var(--text-light);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+  }
 
   .config-section {
     margin-bottom: 28px;
@@ -824,6 +978,202 @@
   .flow-step.active { border-color: var(--accent); color: var(--accent); }
   .flow-arrow { color: var(--text-light); font-size: 16px; }
 
+  .reflection-shell { max-width: 1120px; margin: 0 auto; }
+  .reflection-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 22px;
+  }
+  .reflection-title h2 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 30px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.3px;
+  }
+  .reflection-title p {
+    margin-top: 2px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .reflection-month-controls { display: flex; align-items: center; gap: 8px; }
+  .reflection-month-controls button,
+  .reflection-card button,
+  .reflection-entry button {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--accent);
+    border-radius: 12px;
+    padding: 8px 12px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    box-shadow: 3px 3px 8px var(--shadow-dark-subtle), -3px -3px 8px var(--shadow-light);
+  }
+  .reflection-month-controls button:hover,
+  .reflection-card button:hover,
+  .reflection-entry button:hover { border-color: var(--accent); }
+  .reflection-board {
+    display: grid;
+    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+  .reflection-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 20px;
+    box-shadow: 6px 6px 16px var(--shadow-dark-subtle), -6px -6px 16px var(--shadow-light);
+  }
+  .reflection-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .reflection-card h3 {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 0;
+  }
+  .reflection-month-label {
+    min-width: 96px;
+    text-align: center;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .reflection-month-controls .reflection-nav-button {
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border-radius: 999px;
+  }
+  .reflection-weekdays,
+  .reflection-calendar {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 4px;
+  }
+  .reflection-weekdays {
+    color: var(--text-light);
+    font-size: 12px;
+    text-align: center;
+    margin-bottom: 6px;
+  }
+  .reflection-card .reflection-day {
+    position: relative;
+    display: grid;
+    place-items: center;
+    aspect-ratio: 1;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font: inherit;
+    font-size: 16px;
+    padding: 0;
+    box-shadow: none;
+    transition: transform 0.16s ease;
+  }
+  .reflection-card .reflection-day:not(.empty):hover {
+    background: rgba(47,79,79,0.1);
+    color: var(--accent);
+    transform: translateY(-1px);
+    box-shadow: none;
+  }
+  .reflection-card .reflection-day.selected,
+  .reflection-card .reflection-day.selected:hover {
+    color: #F0EDE4;
+    background: var(--accent);
+    box-shadow: 0 10px 24px rgba(47,79,79,0.24);
+    transform: none;
+  }
+  .reflection-day.empty { visibility: hidden; pointer-events: none; }
+  .reflection-day-number { line-height: 1; }
+  .reflection-day-dot {
+    position: absolute;
+    left: 50%;
+    bottom: 6px;
+    width: 4px;
+    height: 4px;
+    border-radius: 999px;
+    transform: translateX(-50%);
+    border: 1px solid rgba(255,255,255,0.72);
+  }
+  .reflection-card .reflection-day.selected .reflection-day-dot {
+    background: #F7F2E8 !important;
+    border-color: rgba(255,255,255,0.88);
+  }
+  .reflection-day-panel {
+    height: 420px;
+    margin-top: 0;
+    overflow-y: auto;
+  }
+  .reflection-day-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+  .reflection-entry-list { display: flex; flex-direction: column; gap: 10px; }
+  .reflection-entry {
+    display: grid;
+    grid-template-columns: 1fr 36px;
+    gap: 12px;
+    align-items: start;
+    padding: 14px 0;
+    border-radius: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .reflection-entry:first-child { border-top: 0; }
+  .reflection-entry h4 {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .reflection-entry-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+  .reflection-entry-preview {
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+  }
+  .reflection-entry-action {
+    width: 34px;
+    height: 34px;
+    padding: 0 !important;
+    border-radius: 999px !important;
+    align-self: start;
+    font-size: 17px !important;
+    line-height: 1;
+  }
+  .reflection-empty {
+    padding: 28px;
+    text-align: center;
+    color: var(--text-light);
+    border: 1px dashed var(--border-strong);
+    border-radius: 16px;
+    background: rgba(255,255,255,0.18);
+  }
+
   @media (max-width: 768px) {
     .header { padding: 20px; flex-wrap: wrap; }
     .header h1 { font-size: 22px; }
@@ -851,6 +1201,10 @@
     .persona-meter-row { grid-template-columns: 108px 1fr 38px; }
     .persona-event { grid-template-columns: 1fr; }
     .persona-event-time { white-space: normal; }
+    .reflection-toolbar { align-items: flex-start; flex-direction: column; }
+    .reflection-board { grid-template-columns: 1fr; }
+    .reflection-day-panel { height: auto; max-height: none; }
+    .reflection-entry { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -860,7 +1214,7 @@
   <h1>◐ Ombre Brain</h1>
   <span class="stats" id="stats">loading...</span>
   <div class="search-bar">
-    <input type="text" id="search-input" placeholder="搜索记忆…" />
+    <input type="search" id="search-input" name="ombre-memory-query" placeholder="搜索记忆…" autocomplete="off" spellcheck="false" />
   </div>
   <button onclick="doLogout()" title="退出登录" style="background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:20px;padding:7px 14px;font-size:12px;cursor:pointer;">退出</button>
 </div>
@@ -868,6 +1222,7 @@
 <div class="tabs">
   <div class="tab active" data-tab="list">记忆桶</div>
   <div class="tab" data-tab="breath">Breath 模拟</div>
+  <div class="tab" data-tab="reflection">日印象</div>
   <div class="tab" data-tab="persona">Persona</div>
   <div class="tab" data-tab="network">记忆网络</div>
   <div class="tab" data-tab="config">配置</div>
@@ -907,6 +1262,34 @@
   <div class="breath-info" id="breath-info" style="display:none"></div>
   <div id="breath-results">
     <div class="loading">输入 query 后点击「模拟 Breath」查看评分链路</div>
+  </div>
+</div>
+
+<div class="content" id="reflection-view" style="display:none">
+  <div class="reflection-shell">
+    <div class="reflection-toolbar">
+      <div class="reflection-title">
+        <h2 id="reflection-month-title">日印象</h2>
+        <p>按日期查看 daily relationship weather；点小铅笔进入原详情面板手动编辑。</p>
+      </div>
+    </div>
+    <div class="reflection-board">
+      <section class="reflection-card">
+        <div class="reflection-card-head">
+          <h3>月历</h3>
+          <div class="reflection-month-controls">
+            <button class="reflection-nav-button" type="button" onclick="shiftReflectionMonth(-1)" aria-label="上个月">‹</button>
+            <span class="reflection-month-label" id="reflection-calendar-month">—</span>
+            <button class="reflection-nav-button" type="button" onclick="shiftReflectionMonth(1)" aria-label="下个月">›</button>
+          </div>
+        </div>
+        <div class="reflection-weekdays">
+          <span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span>
+        </div>
+        <div class="reflection-calendar" id="reflection-calendar"></div>
+      </section>
+      <section class="reflection-card reflection-day-panel" id="reflection-day-panel"></section>
+    </div>
   </div>
 </div>
 
@@ -1065,13 +1448,13 @@
     <p style="color:var(--text-dim);font-size:13px;margin-bottom:24px;" id="auth-subtitle">验证身份</p>
     <div id="auth-setup-form" style="display:none;">
       <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;">首次使用，请设置访问密码</p>
-      <input type="password" id="auth-setup-pwd" placeholder="设置密码（至少6位）" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:10px;" />
-      <input type="password" id="auth-setup-pwd2" placeholder="确认密码" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:16px;" onkeydown="if(event.key==='Enter')doSetup()" />
-      <button onclick="doSetup()" style="width:100%;padding:12px;background:var(--accent);color:#fff;border:none;border-radius:10px;font-size:14px;cursor:pointer;">设置密码并进入</button>
+      <input type="password" id="auth-setup-pwd" name="ombre-new-password" placeholder="设置密码（至少6位）" autocomplete="new-password" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:10px;" />
+      <input type="password" id="auth-setup-pwd2" name="ombre-new-password-confirm" placeholder="确认密码" autocomplete="new-password" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:16px;" onkeydown="if(event.key==='Enter')doSetup()" />
+      <button type="button" onclick="doSetup()" style="width:100%;padding:12px;background:var(--accent);color:#fff;border:none;border-radius:10px;font-size:14px;cursor:pointer;">设置密码并进入</button>
     </div>
     <div id="auth-login-form" style="display:none;">
-      <input type="password" id="auth-login-pwd" placeholder="输入访问密码" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:16px;" onkeydown="if(event.key==='Enter')doLogin()" />
-      <button onclick="doLogin()" style="width:100%;padding:12px;background:var(--accent);color:#fff;border:none;border-radius:10px;font-size:14px;cursor:pointer;">登录</button>
+      <input type="password" id="auth-login-pwd" name="ombre-current-password" placeholder="输入访问密码" autocomplete="current-password" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:16px;" onkeydown="if(event.key==='Enter')doLogin()" />
+      <button type="button" onclick="doLogin()" style="width:100%;padding:12px;background:var(--accent);color:#fff;border:none;border-radius:10px;font-size:14px;cursor:pointer;">登录</button>
     </div>
     <div id="auth-error" style="color:var(--negative);font-size:13px;margin-top:12px;display:none;"></div>
   </div>
@@ -1082,6 +1465,10 @@ const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
 const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
 let currentFilter = 'all';
+let dashboardCommentAuthor = 'Lin';
+let dashboardAiAuthor = 'Che';
+let reflectionSelectedDate = formatLocalDate(new Date());
+let reflectionCurrentMonth = monthStart(new Date());
 
 function authUrl(path) {
   return path.startsWith('http') ? path : BASE + path;
@@ -1110,10 +1497,23 @@ function showAuthOverlay(setupNeeded) {
   document.getElementById('auth-overlay').style.display = 'flex';
 }
 
+function clearAuthSensitiveFields(password) {
+  ['auth-login-pwd', 'auth-setup-pwd', 'auth-setup-pwd2'].forEach(function(id) {
+    var input = document.getElementById(id);
+    if (input) input.value = '';
+  });
+  var search = document.getElementById('search-input');
+  if (search && password && search.value === password) search.value = '';
+}
+
 async function checkAuth() {
   try {
     const response = await fetch(authUrl('/auth/status'));
     const data = await response.json();
+    if (data.identity) {
+      if (data.identity.user_name) dashboardCommentAuthor = data.identity.user_name;
+      if (data.identity.ai_name) dashboardAiAuthor = data.identity.ai_name;
+    }
     if (data.authenticated) {
       document.getElementById('auth-overlay').style.display = 'none';
       return true;
@@ -1139,6 +1539,7 @@ async function doSetup() {
   });
   if (response.ok) {
     document.getElementById('auth-overlay').style.display = 'none';
+    clearAuthSensitiveFields(p1);
     loadBuckets();
     return;
   }
@@ -1155,6 +1556,8 @@ async function doLogin() {
   });
   if (response.ok) {
     document.getElementById('auth-overlay').style.display = 'none';
+    clearAuthSensitiveFields(password);
+    setTimeout(function() { clearAuthSensitiveFields(password); }, 80);
     loadBuckets();
     return;
   }
@@ -1173,10 +1576,12 @@ document.querySelectorAll('.tab').forEach(tab => {
     const target = tab.dataset.tab;
     document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
     document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
+    document.getElementById('reflection-view').style.display = target === 'reflection' ? '' : 'none';
     document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
     document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
+    if (target === 'reflection') renderReflectionReview();
     if (target === 'persona') loadPersona();
     if (target === 'network') loadNetwork();
     if (target === 'config') loadConfig();
@@ -1202,9 +1607,175 @@ async function loadBuckets() {
     updateStats();
     buildFilters();
     renderBuckets(allBuckets);
+    if (getActiveTab() === 'reflection') renderReflectionReview();
   } catch (e) {
     document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
   }
+}
+
+function getActiveTab() {
+  var tab = document.querySelector('.tab.active');
+  return tab ? tab.dataset.tab : 'list';
+}
+
+function monthStart(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function formatLocalDate(dateOrYear, monthIndex, day) {
+  var date = dateOrYear instanceof Date
+    ? dateOrYear
+    : new Date(dateOrYear, monthIndex, day);
+  var y = date.getFullYear();
+  var m = String(date.getMonth() + 1).padStart(2, '0');
+  var d = String(date.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + d;
+}
+
+function parseLocalDate(value) {
+  if (!value) return null;
+  var match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function getBucketDate(bucket) {
+  if (bucket.date) return String(bucket.date).slice(0, 10);
+  var idMatch = String(bucket.id || '').match(/^reflection_daily_(\d{4}-\d{2}-\d{2})$/);
+  if (idMatch) return idMatch[1];
+  return String(bucket.created || '').slice(0, 10);
+}
+
+function isDailyImpressionBucket(bucket) {
+  var tags = (bucket.tags || []).map(function(tag) { return String(tag); });
+  return bucket.type === 'feel'
+    && tags.includes('relationship_weather')
+    && tags.includes('daily_impression');
+}
+
+function getDailyImpressions() {
+  return allBuckets.filter(function(b) {
+    return isDailyImpressionBucket(b);
+  }).map(function(b) {
+    return Object.assign({}, b, { reflection_date: getBucketDate(b) });
+  }).filter(function(b) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(b.reflection_date);
+  }).sort(function(a, b) {
+    return String(a.reflection_date).localeCompare(String(b.reflection_date));
+  });
+}
+
+function shiftReflectionMonth(delta) {
+  reflectionCurrentMonth = new Date(
+    reflectionCurrentMonth.getFullYear(),
+    reflectionCurrentMonth.getMonth() + delta,
+    1
+  );
+  reflectionSelectedDate = formatLocalDate(reflectionCurrentMonth);
+  renderReflectionReview();
+}
+
+function jumpReflectionToday() {
+  var today = new Date();
+  reflectionCurrentMonth = monthStart(today);
+  reflectionSelectedDate = formatLocalDate(today);
+  renderReflectionReview();
+}
+
+function selectReflectionDate(dateStr) {
+  reflectionSelectedDate = dateStr;
+  var parsed = parseLocalDate(dateStr);
+  if (parsed) reflectionCurrentMonth = monthStart(parsed);
+  renderReflectionReview();
+}
+
+function renderReflectionReview() {
+  var calendar = document.getElementById('reflection-calendar');
+  var panel = document.getElementById('reflection-day-panel');
+  var title = document.getElementById('reflection-month-title');
+  var calendarMonth = document.getElementById('reflection-calendar-month');
+  if (!calendar || !panel || !title) return;
+
+  var impressions = getDailyImpressions();
+  var byDate = {};
+  impressions.forEach(function(bucket) {
+    if (!byDate[bucket.reflection_date]) byDate[bucket.reflection_date] = [];
+    byDate[bucket.reflection_date].push(bucket);
+  });
+
+  var year = reflectionCurrentMonth.getFullYear();
+  var month = reflectionCurrentMonth.getMonth();
+  title.textContent = year + ' 年 ' + (month + 1) + ' 月日印象';
+  if (calendarMonth) calendarMonth.textContent = year + '年' + (month + 1) + '月';
+
+  var firstDay = new Date(year, month, 1);
+  var leading = firstDay.getDay();
+  var dayCount = new Date(year, month + 1, 0).getDate();
+  var cells = [];
+  for (var i = 0; i < leading; i++) cells.push('<button class="reflection-day empty"></button>');
+  for (var day = 1; day <= dayCount; day++) {
+    var dateStr = formatLocalDate(year, month, day);
+    var items = byDate[dateStr] || [];
+    var dot = items.length ? '<span class="reflection-day-dot" style="background:var(--accent)"></span>' : '';
+    cells.push(
+      '<button type="button" class="reflection-day ' + (dateStr === reflectionSelectedDate ? 'selected' : '') + '" onclick="selectReflectionDate(\'' + dateStr + '\')">' +
+        '<span class="reflection-day-number">' + day + '</span>' +
+        dot +
+      '</button>'
+    );
+  }
+  calendar.innerHTML = cells.join('');
+  renderReflectionDayPanel(byDate[reflectionSelectedDate] || []);
+}
+
+function reflectionEntryMeta(bucket) {
+  var parts = [];
+  parts.push('V' + Number(bucket.valence || 0.5).toFixed(2));
+  parts.push('A' + Number(bucket.arousal || 0.3).toFixed(2));
+  parts.push('置信度 ' + Number(bucket.confidence || 0).toFixed(2));
+  parts.push('年轮 ' + (bucket.comment_count || 0));
+  return parts.map(function(part) { return '<span>' + esc(part) + '</span>'; }).join('');
+}
+
+function reflectionEntry(bucket, index) {
+  var id = String(bucket.id || '');
+  return '<div class="reflection-entry">' +
+    '<div>' +
+      '<h4>' + esc(bucket.name || bucket.id) + '</h4>' +
+      '<div class="reflection-entry-meta">' + reflectionEntryMeta(bucket) + '</div>' +
+      '<div class="reflection-entry-preview" id="reflection-entry-body-' + index + '" data-bucket-id="' + esc(id) + '">' + esc(bucket.content_preview || '') + '</div>' +
+    '</div>' +
+    '<button type="button" class="reflection-entry-action" onclick="showDetail(\'' + id.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')" aria-label="打开详情" title="打开详情">✎</button>' +
+  '</div>';
+}
+
+async function hydrateReflectionEntryContents(impressions) {
+  for (var i = 0; i < impressions.length; i++) {
+    var bucket = impressions[i];
+    var id = String(bucket.id || '');
+    if (!id) continue;
+    try {
+      var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(id));
+      if (!res.ok) continue;
+      var detail = await res.json();
+      var body = document.getElementById('reflection-entry-body-' + i);
+      if (body && body.dataset.bucketId === id) {
+        body.textContent = detail.content || bucket.content_preview || '';
+      }
+    } catch (e) {}
+  }
+}
+
+function renderReflectionDayPanel(impressions) {
+  var panel = document.getElementById('reflection-day-panel');
+  var impressionBlock = impressions.length
+    ? '<div class="reflection-entry-list">' + impressions.map(function(b, i) { return reflectionEntry(b, i); }).join('') + '</div>'
+    : '<div class="reflection-empty">这一天没有日印象。</div>';
+
+  panel.innerHTML =
+    '<div class="reflection-day-heading"><span>日印象</span><span>' + impressions.length + ' 条</span></div>' +
+    impressionBlock;
+  if (impressions.length) hydrateReflectionEntryContents(impressions);
 }
 
 function updateStats() {
@@ -1307,8 +1878,29 @@ async function showDetail(id) {
     if (!res) return;
     var b = await res.json();
     var meta = b.metadata || {};
+    var comments = Array.isArray(meta.comments) ? meta.comments : [];
+    var commentsHtml = comments.length
+      ? '<div class="detail-comments"><h3>年轮</h3>' + comments.map(function(c) {
+          var canDelete = c && c.id && c.author === dashboardCommentAuthor && c.source === 'dashboard';
+          var commentTime = c.original_feel_created || c.created || '';
+          return '<div class="comment-item">' +
+            (canDelete ? '<button type="button" class="comment-delete-button" title="删除" aria-label="删除" onclick="deleteBucketComment(\'' + id + '\', \'' + esc(c.id) + '\')">×</button>' : '') +
+            '<div class="comment-meta">' +
+              '<span class="comment-author">' + esc(commentAuthorName(c)) + '</span>' +
+              (commentTime ? '<span class="comment-time">' + esc(commentTime) + '</span>' : '') +
+            '</div>' +
+            '<div class="comment-body">' + esc(c.content || '') + '</div>' +
+          '</div>';
+        }).join('') + '</div>'
+      : '';
+    var commentFormHtml =
+      '<form class="comment-form" onsubmit="submitBucketComment(event, \'' + id + '\')">' +
+        '<textarea name="content" placeholder="写一圈新的年轮…" onkeydown="handleCommentKeydown(event)"></textarea>' +
+      '</form>';
     content.innerHTML =
-      '<h2>' + esc(meta.name || id) + '</h2>' +
+      '<div class="detail-title-row">' +
+        '<h2>' + esc(meta.name || id) + '</h2>' +
+      '</div>' +
       '<div class="detail-meta">' +
         '<div class="field"><label>ID</label>' + id + '</div>' +
         '<div class="field"><label>类型</label>' + (meta.type || 'dynamic') + '</div>' +
@@ -1330,9 +1922,135 @@ async function showDetail(id) {
         '<div class="field"><label>创建</label>' + (meta.created || '—') + '</div>' +
         '<div class="field"><label>最后活跃</label>' + (meta.last_active || '—') + '</div>' +
       '</div>' +
-      '<div class="detail-content">' + esc(b.content) + '</div>';
+      '<div class="bucket-content-block">' +
+        '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + id + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
+        '<div id="bucket-content-view" class="detail-content">' + esc(b.content || '') + '</div>' +
+        '<form id="bucket-content-edit" class="content-edit-form hidden" onsubmit="submitBucketContentEdit(event, \'' + id + '\')">' +
+          '<textarea name="content">' + esc(b.content || '') + '</textarea>' +
+          '<div class="content-edit-actions">' +
+            '<button type="button" class="secondary" onclick="cancelBucketContentEdit()">取消</button>' +
+            '<button type="submit">保存</button>' +
+          '</div>' +
+        '</form>' +
+      '</div>' +
+      commentsHtml +
+      commentFormHtml;
   } catch (e) {
     content.innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+  }
+}
+
+function startBucketContentEdit(bucketId) {
+  var view = document.getElementById('bucket-content-view');
+  var form = document.getElementById('bucket-content-edit');
+  var editButton = document.getElementById('bucket-content-edit-button');
+  if (!view || !form) return;
+  view.classList.add('hidden');
+  form.classList.remove('hidden');
+  if (editButton) editButton.classList.add('hidden');
+  var textarea = form.querySelector('textarea[name="content"]');
+  if (textarea) {
+    textarea.focus();
+    textarea.selectionStart = textarea.value.length;
+    textarea.selectionEnd = textarea.value.length;
+  }
+}
+
+function cancelBucketContentEdit() {
+  var view = document.getElementById('bucket-content-view');
+  var form = document.getElementById('bucket-content-edit');
+  var editButton = document.getElementById('bucket-content-edit-button');
+  if (!view || !form) return;
+  form.classList.add('hidden');
+  view.classList.remove('hidden');
+  if (editButton) editButton.classList.remove('hidden');
+}
+
+async function submitBucketContentEdit(event, bucketId) {
+  event.preventDefault();
+  var form = event.target;
+  var textarea = form.querySelector('textarea[name="content"]');
+  var newContent = (textarea.value || '').trim();
+  if (!newContent) return;
+  var button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  button.textContent = '保存中…';
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + bucketId, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({content: newContent})
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '保存失败');
+    }
+    await showDetail(bucketId);
+    await loadBuckets();
+  } catch (e) {
+    alert('保存正文失败: ' + e.message);
+    button.disabled = false;
+    button.textContent = '保存';
+  }
+}
+
+function handleCommentKeydown(event) {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  event.target.form.requestSubmit();
+}
+
+function commentAuthorName(comment) {
+  if (comment && comment.author) return comment.author;
+  if (comment && comment.source === 'dashboard') return dashboardCommentAuthor;
+  return dashboardAiAuthor;
+}
+
+async function submitBucketComment(event, bucketId) {
+  event.preventDefault();
+  var form = event.target;
+  var textarea = form.querySelector('textarea[name="content"]');
+  var content = (textarea.value || '').trim();
+  if (!content) return;
+  var button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  textarea.disabled = true;
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + bucketId + '/comments', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({content: content})
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '写入失败');
+    }
+    await showDetail(bucketId);
+    await loadBuckets();
+  } catch (e) {
+    alert('写入年轮失败: ' + e.message);
+    if (button) button.disabled = false;
+    textarea.disabled = false;
+    textarea.focus();
+  }
+}
+
+async function deleteBucketComment(bucketId, commentId) {
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + bucketId + '/comments/' + commentId, {
+      method: 'DELETE'
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '删除失败');
+    }
+    await showDetail(bucketId);
+    await loadBuckets();
+  } catch (e) {
+    alert('删除年轮失败: ' + e.message);
   }
 }
 

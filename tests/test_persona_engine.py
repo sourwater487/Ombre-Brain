@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from persona_engine import FALLBACK_GUIDANCE, PersonaStateEngine
+from persona_engine import FALLBACK_GUIDANCE, POST_REPLY_EVALUATION_PROMPT, PersonaStateEngine
 
 
 class FakePersonaClient:
@@ -81,6 +81,33 @@ def test_persona_initializes_default_global_and_session_state(test_config):
     assert state["affect"]["mood_label"] == "warm_neutral"
     assert state["affect"]["tenderness"] == pytest.approx(0.62)
     assert "Current Inner State" in engine.format_state_block(state)
+    assert "Conversation partner: Lin" in engine.format_state_block(state)
+
+
+def test_persona_evaluator_prompt_asks_for_chinese_persona_text():
+    assert "perceived_intent 和 residue 必须是自然中文" in POST_REPLY_EVALUATION_PROMPT
+    assert "用户、对方" in POST_REPLY_EVALUATION_PROMPT
+    assert "event_type 和 mood_label 保持短英文标签" in POST_REPLY_EVALUATION_PROMPT
+    assert "Che" not in FALLBACK_GUIDANCE
+
+
+def test_persona_identity_config_updates_prompt_and_state_block(test_config):
+    cfg = _persona_config(test_config)
+    cfg["identity"] = {
+        "ai_name": "Echo",
+        "user_name": "Mira",
+        "user_display_name": "米拉",
+        "user_aliases": ["", "她"],
+    }
+    engine = PersonaStateEngine(cfg)
+    state = engine.get_current_state("session-identity")
+    block = engine.format_state_block(state)
+    prompt = engine._post_reply_evaluation_prompt()
+
+    assert "Current Inner State (Echo)" in block
+    assert "Conversation partner: 米拉" in block
+    assert "米拉、、她" in prompt
+    assert "Echo 回复后的状态" in prompt
 
 
 @pytest.mark.asyncio
@@ -90,7 +117,7 @@ async def test_persona_pre_reply_guidance_is_read_only(test_config):
 
     state = await engine.build_pre_reply_guidance("session-pre", "爱你")
 
-    assert state["reply_guidance"] == FALLBACK_GUIDANCE
+    assert state["reply_guidance"] == engine.fallback_guidance
     assert _event_count(engine.db_path) == 0
 
 
@@ -129,7 +156,7 @@ async def test_persona_llm_update_clips_deltas_and_records_event(test_config):
     assert state["affect"]["arousal"] == pytest.approx(0.52)
     assert state["affect"]["tenderness"] == pytest.approx(0.80)
     assert state["affect"]["residue"] == "still carrying a warm aftertaste"
-    assert state["reply_guidance"] == FALLBACK_GUIDANCE
+    assert state["reply_guidance"] == engine.fallback_guidance
     assert _event_count(engine.db_path) == 1
 
 
@@ -180,7 +207,7 @@ async def test_persona_malformed_json_keeps_state_and_records_raw_response(test_
 
     assert after["personality"] == before["personality"]
     assert after["relationship"] == before["relationship"]
-    assert after["reply_guidance"] == FALLBACK_GUIDANCE
+    assert after["reply_guidance"] == engine.fallback_guidance
 
     conn = sqlite3.connect(engine.db_path)
     row = conn.execute("SELECT raw_response, error FROM persona_events").fetchone()
@@ -195,7 +222,7 @@ async def test_persona_missing_key_uses_existing_state_fallback(test_config):
 
     state = await engine.update_from_exchange("session-no-key", "哥哥你在吗", "在。")
 
-    assert state["reply_guidance"] == FALLBACK_GUIDANCE
+    assert state["reply_guidance"] == engine.fallback_guidance
     assert state["affect"]["mood_label"] == "warm_neutral"
     assert _event_count(engine.db_path) == 1
 
@@ -210,7 +237,7 @@ async def test_persona_dashboard_payload_lists_state_sessions_and_events(test_co
 
     assert payload["profile_id"] == "lin_che"
     assert payload["active_session_id"] == "session-dashboard"
-    assert payload["state"]["reply_guidance"] == FALLBACK_GUIDANCE
+    assert payload["state"]["reply_guidance"] == engine.fallback_guidance
     assert payload["state"]["affect"]["mood_label"] == "warm_touched"
     assert payload["state"]["affect"]["residue"] == "still carrying a warm aftertaste"
     assert payload["sessions"][0]["session_id"] == "session-dashboard"

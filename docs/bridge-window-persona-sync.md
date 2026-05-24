@@ -76,7 +76,7 @@ python3 scripts/sync_to_supabase.py --buckets-dir /srv/ombre-brain/buckets --app
 
 当前规则：
 
-- 内容字段参与同步：`content/title/tags/domain/pinned/resolved/digested/importance/source`
+- 内容字段参与同步：`content/title/tags/domain/pinned/anchor/resolved/digested/importance/source`
 - `updated_at` 是内容更新时间，用来判断谁更新
 - `last_active` 和 `activation_count` 是 VPS 本地运行时字段，召回刷新它们时不会推到 Supabase
 - `synced_at` 只表示同步脚本处理时间

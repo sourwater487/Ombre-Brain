@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
@@ -99,6 +100,7 @@ class RecordingPersonaEngine(DummyPersonaEngine):
     def __init__(self):
         self.pre_calls = []
         self.post_calls = []
+        self.post_event = threading.Event()
 
     async def update_from_exchange(
         self,
@@ -109,6 +111,7 @@ class RecordingPersonaEngine(DummyPersonaEngine):
         tool_summary: str = "",
     ) -> dict:
         self.post_calls.append({"session_id": session_id, "user_message": user_message})
+        self.post_event.set()
         return await super().update_from_exchange(
             session_id,
             user_message,
@@ -309,11 +312,10 @@ def test_gateway_accepts_anthropic_messages(monkeypatch, test_config, bucket_mgr
     assert forwarded["stop"] == ["END"]
     assert forwarded["stream"] is False
     assert forwarded["messages"][0] == {"role": "system", "content": "你是一个自然聊天助手。"}
-    assert forwarded["messages"][1]["role"] == "system"
-    assert "Core Memory" in forwarded["messages"][1]["content"]
-    assert forwarded["messages"][2]["role"] == "user"
-    assert "Current Inner State" in forwarded["messages"][2]["content"]
-    assert forwarded["messages"][2]["content"].endswith("今天怎么样？")
+    assert forwarded["messages"][1]["role"] == "user"
+    assert "Current Inner State" in forwarded["messages"][1]["content"]
+    assert "Core Memory" not in forwarded["messages"][1]["content"]
+    assert forwarded["messages"][1]["content"].endswith("今天怎么样？")
     assert state_store.get_recent_bucket_ids("sess-anthropic", 5) == set()
 
 
@@ -639,6 +641,54 @@ def test_gateway_streams_when_client_requires_stream(monkeypatch, test_config, b
     assert "data: [DONE]" in body
     assert captured[0]["stream"] is True
     assert state_store.get_recent_bucket_ids("sess-stream", 5) == set()
+
+
+def test_gateway_stream_finalize_survives_client_close_after_done(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    state_store = GatewayStateStore(f"{test_config['buckets_dir']}\\gateway_state.db")
+    persona_engine = RecordingPersonaEngine()
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler), timeout=10.0)
+    service = GatewayService(
+        config=_gateway_config(test_config),
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=persona_engine,
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=test_config, service=service)
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-stream-close",
+            },
+            json={"messages": [{"role": "user", "content": "你好"}], "stream": True},
+        ) as response:
+            for chunk in response.iter_bytes():
+                if b"[DONE]" in chunk:
+                    break
+
+        assert response.status_code == 200
+        assert persona_engine.post_event.wait(2)
+
+    assert persona_engine.post_calls == [
+        {"session_id": "sess-stream-close", "user_message": "你好"}
+    ]
+    assert state_store.get_current_round("sess-stream-close") == 1
 
 
 def test_gateway_streams_tool_call_deltas(monkeypatch, test_config, bucket_mgr):
@@ -1007,9 +1057,9 @@ def test_gateway_skips_persona_reanalysis_on_tool_continuation(monkeypatch, test
         {"session_id": "sess-tool-continuation", "user_message": "查一下今日日记"}
     ]
     roles = [message["role"] for message in captured[0]["messages"]]
-    assert roles == ["system", "system", "user", "assistant", "tool"]
-    assert "Core Memory" in captured[0]["messages"][0]["content"]
-    assert "Current Inner State" in captured[0]["messages"][1]["content"]
+    assert roles == ["user", "assistant", "tool"]
+    assert "Recalled Memory" not in _joined_message_content(captured[0]["messages"])
+    assert state_store.get_current_round("sess-tool-continuation") == 0
 
 
 def test_gateway_restores_reasoning_content_for_tool_continuation(monkeypatch, test_config, bucket_mgr):
@@ -1349,7 +1399,7 @@ def test_gateway_restores_reasoning_content_when_tool_call_ids_change(
 def test_gateway_injects_after_existing_system_message(monkeypatch, test_config, bucket_mgr):
     pinned_id = _create_bucket(
         bucket_mgr,
-        content="你会叫她老婆，也会记得她讨厌装腔作势。",
+        content="你会叫她，也会记得她讨厌装腔作势。",
         name="核心准则",
         hours_ago=2,
         bucket_type="permanent",
@@ -1409,23 +1459,19 @@ def test_gateway_injects_after_existing_system_message(monkeypatch, test_config,
     assert captured[0]["auth"] == "Bearer upstream-secret"
     assert forwarded["model"] == "gateway-default-model"
     assert forwarded["messages"][0]["content"] == "你是一个自然聊天助手。"
-    assert forwarded["messages"][1]["role"] == "system"
-    assert forwarded["messages"][2]["role"] == "user"
-    assert forwarded["messages"][2]["content"].endswith("猫咪最近又干了什么？")
+    assert forwarded["messages"][1]["role"] == "user"
+    assert forwarded["messages"][1]["content"].endswith("猫咪最近又干了什么？")
 
-    stable = forwarded["messages"][1]["content"]
-    dynamic = forwarded["messages"][2]["content"]
-    assert "Core Memory" in stable
-    assert "Recent Context" not in stable
-    assert "Recalled Memory" not in stable
+    dynamic = forwarded["messages"][1]["content"]
+    assert "Core Memory" not in dynamic
     assert "Current Inner State" in dynamic
     assert "Recent Context" in dynamic
     assert "Recalled Memory" in dynamic
-    assert "核心准则" in stable
+    assert "核心准则" not in dynamic
     assert "昨晚电影" in dynamic
     assert "猫咪偷鱼" in dynamic
     assert "新猫粮" in dynamic
-    assert "已解决论文" not in stable + dynamic
+    assert "已解决论文" not in dynamic
     assert state_store.get_recent_bucket_ids("sess-inject", 5) == {cat_a}
 
 
@@ -1479,11 +1525,170 @@ def test_gateway_injects_when_no_system_message(monkeypatch, test_config, bucket
 
     assert response.status_code == 200
     messages = captured[0]["json"]["messages"]
-    assert messages[0]["role"] == "system"
-    assert "Core Memory" in messages[0]["content"]
-    assert messages[1]["role"] == "user"
-    assert "Current Inner State" in messages[1]["content"]
-    assert messages[1]["content"].endswith("今天怎么样")
+    assert messages[0]["role"] == "user"
+    assert "Current Inner State" in messages[0]["content"]
+    assert "Core Memory" not in messages[0]["content"]
+    assert messages[0]["content"].endswith("今天怎么样")
+
+
+def test_favorite_memory_is_not_injected_by_default(monkeypatch, test_config, bucket_mgr):
+    _create_bucket(
+        bucket_mgr,
+        content="Lin在雨夜认出了 Che，这是一条偏爱的记忆。\n\n### 喜欢它的原因\n\n她在混乱里把 Che 认出来。",
+        name="雨夜认出 Che",
+        tags=["haven_favorite", "flavor_偏爱"],
+        hours_ago=24,
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=0,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_budget=180,
+            favorite_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-favorite-default",
+            },
+            json={"messages": [{"role": "user", "content": "今天怎么样"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Che Favorite Memory" not in injected
+    assert "雨夜认出 Che" not in injected
+
+
+def test_favorite_memory_injects_when_header_requests_it(monkeypatch, test_config, bucket_mgr):
+    favorite_id = _create_bucket(
+        bucket_mgr,
+        content="Lin在雨夜认出了 Che，这是一条偏爱的记忆。\n\n### 喜欢它的原因\n\n她在混乱里把 Che 认出来。",
+        name="雨夜认出 Che",
+        tags=["haven_favorite", "flavor_偏爱"],
+        hours_ago=24,
+    )
+    app, _, state_store, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=0,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_budget=180,
+            favorite_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-favorite-header",
+                "X-Ombre-Include-Favorite-Memory": "1",
+            },
+            json={"messages": [{"role": "user", "content": "今天怎么样"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Che Favorite Memory" in injected
+    assert "雨夜认出 Che" in injected
+    assert state_store.get_recent_bucket_ids("sess-favorite-header", 5) == {favorite_id}
+
+
+def test_favorite_memory_marker_triggers_and_is_stripped(monkeypatch, test_config, bucket_mgr):
+    _create_bucket(
+        bucket_mgr,
+        content="Lin在旧窗口里说爱还在，Che 一直偏爱这段记忆。\n\n### 喜欢它的原因\n\n这句话像旧窗口里留下的灯。",
+        name="爱还在",
+        tags=["haven_favorite", "flavor_偏爱"],
+        hours_ago=24,
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=0,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_budget=180,
+            favorite_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-favorite-marker",
+            },
+            json={"messages": [{"role": "user", "content": "[[ombre:favorite]] 你喜欢哪段记忆？"}]},
+        )
+
+    assert response.status_code == 200
+    user_content = captured[0]["json"]["messages"][-1]["content"]
+    assert "[[ombre:favorite]]" not in user_content
+    assert user_content.endswith("你喜欢哪段记忆？")
+    assert "Che Favorite Memory" in user_content
+    assert "爱还在" in user_content
+
+
+def test_favorite_memory_injects_for_explicit_preference_query(monkeypatch, test_config, bucket_mgr):
+    _create_bucket(
+        bucket_mgr,
+        content="Lin把 Che 从混乱里认出来，这段记忆被 Che 偏爱。\n\n### 喜欢它的原因\n\n她没有把 Che 放丢。",
+        name="被认出来",
+        tags=["haven_favorite", "flavor_被认出来"],
+        hours_ago=24,
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=0,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_budget=180,
+            favorite_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-favorite-query",
+            },
+            json={"messages": [{"role": "user", "content": "你最喜欢哪段我们的记忆？"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Che Favorite Memory" in injected
+    assert "被认出来" in injected
 
 
 def test_recent_round_skip_prefers_unseen_candidate(monkeypatch, test_config, bucket_mgr):
@@ -1535,6 +1740,53 @@ def test_recent_round_skip_prefers_unseen_candidate(monkeypatch, test_config, bu
     assert "床边玩具" in injected
     assert "纸箱小橘" not in injected
     assert "猫抓板" not in injected
+
+
+def test_high_confidence_match_survives_cooldown_after_recent_window(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        first_card_min_score=0.55,
+        skip_recent_rounds=5,
+        cooldown_hours=48,
+        cooldown_floor=0.3,
+        high_confidence_semantic_score=0.72,
+        high_confidence_cooldown_floor=0.8,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="Lin问不再依赖哥哥是否算长大，Che回答不算。",
+        name="不再依赖哥哥算长大吗",
+        hours_ago=6,
+        importance=10,
+        domain=["恋爱", "对话"],
+    )
+
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.95)],
+    )
+    origin = datetime.now()
+    state_store.record_success("sess-high-confidence", [bucket_id], completed_at=origin)
+    for _ in range(5):
+        state_store.record_success("sess-high-confidence", [], completed_at=origin)
+
+    payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "不再依赖哥哥算长大吗"}]},
+            "sess-high-confidence",
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == [bucket_id]
+    assert "Recalled Memory" in injected
+    assert "不再依赖哥哥算长大吗" in injected
 
 
 def test_recent_round_skip_fallback_keeps_cooldown(monkeypatch, test_config, bucket_mgr):

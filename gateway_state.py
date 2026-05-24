@@ -82,15 +82,20 @@ class GatewayStateStore:
         conn.close()
         return next_round
 
-    def get_recent_bucket_ids(self, session_id: str, recent_rounds: int) -> set[str]:
-        if recent_rounds <= 0:
-            return set()
+    def get_current_round(self, session_id: str) -> int:
         conn = self._connect()
         row = conn.execute(
             "SELECT COALESCE(MAX(round_id), 0) AS current_round FROM request_rounds WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-        current_round = int(row["current_round"])
+        conn.close()
+        return int(row["current_round"]) if row else 0
+
+    def get_recent_bucket_ids(self, session_id: str, recent_rounds: int) -> set[str]:
+        if recent_rounds <= 0:
+            return set()
+        conn = self._connect()
+        current_round = self.get_current_round(session_id)
         if current_round <= 0:
             conn.close()
             return set()

@@ -16,6 +16,10 @@ import yaml
 import logging
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def load_config(config_path: str = None) -> dict:
@@ -34,6 +38,12 @@ def load_config(config_path: str = None) -> dict:
         "buckets_dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "buckets"),
         "state_dir": "",
         "merge_threshold": 75,
+        "identity": {
+            "ai_name": "Che",
+            "user_name": "Lin",
+            "user_display_name": "Lin",
+            "user_aliases": ["", "", "", "她"],
+        },
         "dehydration": {
             "model": "deepseek-chat",
             "base_url": "https://api.deepseek.com/v1",
@@ -68,6 +78,7 @@ def load_config(config_path: str = None) -> dict:
         "gateway": {
             "host": "0.0.0.0",
             "port": 8010,
+            "default_session_id": "lin-main",
             "upstream_base_url": "",
             "upstream_default_model": "",
             "upstream_models": [],
@@ -79,13 +90,17 @@ def load_config(config_path: str = None) -> dict:
             "cooldown_hours": 48,
             "cooldown_floor": 0.3,
             "inject_total_budget": 1200,
-            "core_memory_budget": 500,
+            "core_memory_budget": 0,
             "recent_context_budget": 300,
             "recalled_memory_budget": 400,
             "relationship_weather_budget": 220,
-            "favorite_memory_budget": 180,
+            "favorite_memory_budget": 0,
             "favorite_memory_max_cards": 1,
             "related_memory_budget": 220,
+            "core_memory_interval_rounds": 0,
+            "current_inner_state_interval_rounds": 15,
+            "relationship_weather_interval_rounds": 15,
+            "favorite_memory_interval_rounds": 0,
             "semantic_weight": 0.45,
             "keyword_weight": 0.35,
             "importance_weight": 0.1,
@@ -93,6 +108,9 @@ def load_config(config_path: str = None) -> dict:
             "first_card_min_score": 0.55,
             "second_card_min_score": 0.50,
             "second_card_relative_score": 0.85,
+            "high_confidence_semantic_score": 0.72,
+            "high_confidence_keyword_score": 0.65,
+            "high_confidence_cooldown_floor": 0.8,
         },
         "persona": {
             "enabled": True,
@@ -414,4 +432,4 @@ def now_iso() -> str:
     Return current time as ISO format string.
     返回当前时间的 ISO 格式字符串。
     """
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(LOCAL_TZ).isoformat(timespec="seconds")

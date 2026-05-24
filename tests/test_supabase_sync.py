@@ -23,10 +23,16 @@ def _record(bucket_id, *, source="ombre", last_active="2026-05-04T08:00:00+00:00
         "content": f"content-{bucket_id}",
         "valence": 0.5,
         "arousal": 0.5,
+        "confidence": 0.5,
         "importance": 5,
+        "period": None,
+        "date": None,
         "pinned": False,
+        "anchor": False,
         "resolved": False,
         "digested": False,
+        "comments": [],
+        "comment_count": 0,
         "activation_count": 1,
         "created": last_active,
         "last_active": last_active,
@@ -107,6 +113,7 @@ def test_plan_pulls_remote_table_editor_change_by_updated_at():
             "chatgpt-memory",
             source="chatgpt",
             content="remote edited content",
+            anchor=True,
             resolved=True,
             digested=True,
             last_active="2026-05-04T08:00:00+00:00",
@@ -117,6 +124,7 @@ def test_plan_pulls_remote_table_editor_change_by_updated_at():
     plan = sync.build_plan(local, remote)
 
     assert [record["id"] for record in plan.to_pull] == ["chatgpt-memory"]
+    assert plan.to_pull[0]["anchor"] is True
     assert plan.to_pull[0]["resolved"] is True
     assert plan.to_pull[0]["digested"] is True
     assert plan.to_push == []
@@ -163,8 +171,14 @@ def test_record_to_md_preserves_chatgpt_source_and_timezone(tmp_path):
     record = _record(
         "entry",
         source="chatgpt",
+        anchor=True,
         resolved=True,
         digested=True,
+        confidence=0.72,
+        period="daily",
+        date="2026-05-04",
+        comments=[{"id": "c1", "content": "年轮"}],
+        comment_count=1,
         last_active=datetime(2026, 5, 4, 8, 0, tzinfo=timezone.utc).isoformat(timespec="seconds"),
     )
 
@@ -172,8 +186,14 @@ def test_record_to_md_preserves_chatgpt_source_and_timezone(tmp_path):
     parsed = sync.parse_md(path)
 
     assert parsed["source"] == "chatgpt"
+    assert parsed["anchor"] is True
     assert parsed["resolved"] is True
     assert parsed["digested"] is True
+    assert parsed["confidence"] == 0.72
+    assert parsed["period"] == "daily"
+    assert parsed["date"] == "2026-05-04"
+    assert parsed["comments"] == [{"id": "c1", "content": "年轮"}]
+    assert parsed["comment_count"] == 1
     assert parsed["last_active"].endswith("+00:00")
     assert parsed["updated_at"].endswith("+00:00")
 
@@ -228,6 +248,7 @@ async def test_bucket_manager_create_accepts_client_id_source_and_timezone(bucke
         created="2026-05-04T08:00:00+00:00",
         last_active="2026-05-04T08:00:00+00:00",
         updated_at="2026-05-04T08:00:00+00:00",
+        anchor=True,
         resolved=True,
         digested=True,
     )
@@ -236,6 +257,7 @@ async def test_bucket_manager_create_accepts_client_id_source_and_timezone(bucke
 
     assert bucket_id == "chatgpt_memory_20260504"
     assert bucket["metadata"]["source"] == "chatgpt"
+    assert bucket["metadata"]["anchor"] is True
     assert bucket["metadata"]["resolved"] is True
     assert bucket["metadata"]["digested"] is True
     assert bucket["metadata"]["created"].endswith("+00:00")
@@ -263,6 +285,7 @@ async def test_bucket_manager_update_preserves_client_source(bucket_mgr):
         source="chatgpt",
         last_active="2026-05-04T09:00:00+00:00",
         updated_at="2026-05-04T09:00:00+00:00",
+        anchor=True,
         resolved=True,
         digested=True,
     )
@@ -271,6 +294,7 @@ async def test_bucket_manager_update_preserves_client_source(bucket_mgr):
     assert ok is True
     assert bucket["content"] == "新内容"
     assert bucket["metadata"]["source"] == "chatgpt"
+    assert bucket["metadata"]["anchor"] is True
     assert bucket["metadata"]["resolved"] is True
     assert bucket["metadata"]["digested"] is True
     assert bucket["metadata"]["last_active"].endswith("+00:00")

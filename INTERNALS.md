@@ -72,17 +72,19 @@
 
 ### 技术能力
 
-**6 个 MCP 工具**
+**9 个 MCP 工具**
 
 | 工具 | 关键参数 | 功能 |
 |---|---|---|
 | `breath` | query, max_tokens, domain, valence, arousal, max_results | 检索/浮现记忆 |
-| `hold` | content, tags, importance, pinned, feel, source_bucket, valence, arousal | 存储记忆 |
+| `hold` | content, tags, importance, pinned, feel, whisper, source_bucket, valence, arousal | 存储记忆；新无源碎碎念用 `whisper=True` |
 | `grow` | content | 日记拆分归档 |
-| `trace` | bucket_id, name, domain, valence, arousal, importance, tags, resolved, pinned, digested, content, delete | 修改元数据/内容/删除 |
+| `comment_bucket` | bucket_id, content, kind, valence, arousal | 给源 bucket 追加年轮 |
+| `trace` | bucket_id, name, domain, valence, arousal, importance, tags, resolved, pinned, anchor, digested, content, delete | 修改元数据/内容/删除 |
 | `pulse` | include_archive | 系统状态 |
 | `dream` | （无） | 做梦自省 |
-| `reflect` | period, force | 生成日印象 / 周印象 relationship_weather feel |
+| `resurface` | max_results, include_archive, max_tokens | 只读浮现久未触碰的旧记忆 |
+| `reflect` | period, force | 生成日印象 relationship_weather feel；周印象默认关闭 |
 
 **工具详细行为**
 
@@ -92,9 +94,14 @@
 - **Feel 检索**（`domain="feel"`）：特殊通道，按创建时间倒序返回所有 feel 类型桶，不走评分逻辑
 - 若指定 valence，对匹配桶的 valence 微调 ±0.1（情感记忆重构）
 
-**`hold`** — 两种模式：
+**`hold`** — 主要模式：
 - **普通模式**（`feel=False`，默认）：自动 LLM 分析 domain/valence/arousal/tags/name → 向量相似度查重 → 相似度>0.85 则合并到已有桶 → 否则新建 dynamic 桶 → 生成 embedding
-- **Feel 模式**（`feel=True`）：跳过 LLM 分析，直接存为 `feel` 类型桶（存入 `feel/` 目录），不参与普通浮现/衰减/合并。若提供 `source_bucket`，标记源记忆为 `digested=True` 并写入 `model_valence`。返回格式：`🫧feel→{bucket_id}`
+- **Whisper 模式**（`whisper=True`）：无源碎碎念/悄悄话，独立保存为 `type=feel + whisper`，可用 `breath(domain="whisper")` 读取。
+- **旧兼容 Feel 路径**（`feel=True`）：不建议新调用。带 `source_bucket` 时转为年轮 comment；不带源桶时转为 whisper。
+
+**`comment_bucket`** — 年轮：
+- 给已有 bucket 追加 `metadata.comments[]`，MCP 作者固定取 `identity.ai_name`
+- 追加后 touch 源 bucket、刷新源 bucket embedding，不新建独立 feel 桶
 
 **`dream`** — 做梦/自省触发器：
 - 返回最近 10 条 dynamic 桶摘要 + 自省引导词
@@ -103,7 +110,7 @@
 
 **`reflect`** — 关系天气：
 - `period=daily` 生成当天 `daily_impression`
-- `period=weekly` 生成本周 `weekly_impression`
+- `period=weekly` 默认 skipped；当前不把日印象压缩成周印象
 - 结果存为 `type=feel`，带 `relationship_weather` 标签
 - 默认复用 `persona` 模型配置和 key，可用 `OMBRE_REFLECTION_*` 单独覆盖
 
@@ -146,12 +153,14 @@
 | `/api/import/results` | GET | 已导入记忆桶列表 |
 | `/api/import/review` | POST | 批量审阅/批准导入结果 |
 
-**Dashboard（5 个 Tab）**
+**Dashboard（7 个 Tab）**
 1. 记忆桶列表：6 种过滤器 + 主题域过滤 + 搜索 + 详情面板
 2. Breath 模拟：输入参数 → 可视化五步流程 → 四维条形图
-3. 记忆网络：Canvas 力导向图（节点=桶，边=相似度）
-4. 配置：热更新脱水/embedding/合并参数
-5. 导入：历史对话拖拽上传 → 分块处理进度条 → 词频规律分析 → 导入结果审阅
+3. 日印象：月历 + 单卡片详情，按日期显示完整 daily relationship weather；手动编辑仍走 bucket 详情面板
+4. Persona：查看 Persona State sessions / events / 当前状态
+5. 记忆网络：Canvas 力导向图（节点=桶，边=相似度）
+6. 配置：热更新脱水/embedding/合并参数
+7. 导入：历史对话拖拽上传 → 分块处理进度条 → 词频规律分析 → 导入结果审阅
 
 **部署选项**
 1. 本地 stdio（`python server.py`）
@@ -193,7 +202,7 @@
 
 ```
                     ┌──────────────┐
-                    │  server.py   │  MCP 主入口，6 个工具 + Dashboard + Hook
+                    │  server.py   │  MCP 主入口，9 个工具 + Dashboard + Hook
                     └──────┬───────┘
            ┌───────────────┼───────────────┬────────────────┐
            ▼               ▼               ▼                ▼
