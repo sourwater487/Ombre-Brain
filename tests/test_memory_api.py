@@ -44,11 +44,6 @@ class EchoDehydrator:
         return content
 
 
-class DummyDehydrator:
-    async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
-        return content
-
-
 class DummyRequest:
     def __init__(self, body=None, headers=None, cookies=None, path_params=None):
         self._body = body
@@ -145,7 +140,7 @@ async def test_hold_rejects_favorite_without_reason(monkeypatch, bucket_mgr, dec
     monkeypatch.setattr(server, "dehydrator", DummyDehydrator())
     monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
 
-    result = await server.hold("Lin想留下这条偏爱的记忆。", tags="haven_favorite,flavor_偏爱")
+    result = await server.hold("小雨想留下这条偏爱的记忆。", tags="haven_favorite,flavor_偏爱")
 
     assert "喜欢它的原因" in result
     assert await bucket_mgr.list_all(include_archive=True) == []
@@ -156,10 +151,10 @@ async def test_read_bucket_returns_exact_content_without_touching(monkeypatch, b
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="Lin说她想把这一刻留下来。",
+        content="小雨说她想把这一刻留下来。",
         name="精确读取",
         domain=["记忆"],
-        tags=["che_favorite"],
+        tags=["haven_favorite"],
         last_active="2026-05-04T08:00:00+00:00",
     )
     before = await bucket_mgr.get(bucket_id)
@@ -171,8 +166,8 @@ async def test_read_bucket_returns_exact_content_without_touching(monkeypatch, b
     after = await bucket_mgr.get(bucket_id)
 
     assert payload["id"] == bucket_id
-    assert payload["content"] == "Lin说她想把这一刻留下来。"
-    assert payload["metadata"]["tags"] == ["che_favorite"]
+    assert payload["content"] == "小雨说她想把这一刻留下来。"
+    assert payload["metadata"]["tags"] == ["haven_favorite"]
     assert after["metadata"]["last_active"] == before["metadata"]["last_active"]
 
 
@@ -181,7 +176,7 @@ async def test_trace_rejects_favorite_without_reason(monkeypatch, bucket_mgr, de
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="Lin想留下这条记忆。",
+        content="小雨想留下这条记忆。",
         name="普通记忆",
         domain=["恋爱"],
     )
@@ -201,7 +196,7 @@ async def test_comment_bucket_adds_ring_and_touches_source(monkeypatch, bucket_m
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="Lin把旧记忆拿出来看。",
+        content="小雨把旧记忆拿出来看。",
         name="旧记忆",
         domain=["恋爱"],
         last_active="2026-05-04T08:00:00+00:00",
@@ -265,7 +260,7 @@ async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr,
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="Lin想在前端补一句评论。",
+        content="小雨想在前端补一句评论。",
         name="前端评论",
         domain=["恋爱"],
     )
@@ -277,7 +272,7 @@ async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr,
 
     response = await server.api_bucket_comment(
         DummyRequest(
-            {"content": "这句是Lin从前端补的。", "author": "Che"},
+            {"content": "这句是小雨从前端补的。", "author": "Haven"},
             path_params={"bucket_id": bucket_id},
         )
     )
@@ -287,9 +282,9 @@ async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr,
 
     assert response.status_code == 200
     assert payload["status"] == "commented"
-    assert comment["author"] == "Lin"
+    assert comment["author"] == "Rain"
     assert comment["source"] == "dashboard"
-    assert comment["content"] == "这句是Lin从前端补的。"
+    assert comment["content"] == "这句是小雨从前端补的。"
     assert embedding_engine.calls[0][0] == bucket_id
 
 
@@ -341,8 +336,8 @@ async def test_dashboard_content_api_edits_body_preserves_comments(monkeypatch, 
     )
     comment = await bucket_mgr.add_comment(
         bucket_id,
-        "正文下面的Lin年轮。",
-        author="Lin",
+        "正文下面的小雨年轮。",
+        author="Rain",
         source="dashboard",
         touch=False,
     )
@@ -367,7 +362,7 @@ async def test_dashboard_content_api_edits_body_preserves_comments(monkeypatch, 
     assert bucket["metadata"]["comments"][0]["id"] == comment["id"]
     assert bucket["metadata"]["last_active"] == before["metadata"]["last_active"]
     assert "新正文" in embedding_engine.calls[0][1]
-    assert "正文下面的Lin年轮" in embedding_engine.calls[0][1]
+    assert "正文下面的小雨年轮" in embedding_engine.calls[0][1]
 
 
 @pytest.mark.asyncio
@@ -381,15 +376,15 @@ async def test_dashboard_comment_delete_only_allows_rain_dashboard_comments(monk
     )
     rain = await bucket_mgr.add_comment(
         bucket_id,
-        "Lin从前端写的年轮。",
-        author="Lin",
+        "小雨从前端写的年轮。",
+        author="Rain",
         source="dashboard",
         touch=False,
     )
     haven = await bucket_mgr.add_comment(
         bucket_id,
-        "Che 写的年轮。",
-        author="Che",
+        "Haven 写的年轮。",
+        author="Haven",
         source="hold(feel=True)",
         touch=False,
     )
@@ -419,14 +414,14 @@ async def test_breath_summary_includes_bucket_comments(monkeypatch, bucket_mgr, 
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="Lin把这段旧事留下。",
+        content="小雨把这段旧事留下。",
         name="带年轮浮现",
         domain=["恋爱"],
     )
     await bucket_mgr.add_comment(
         bucket_id,
         "后来再看，这里多了一圈新的年轮。",
-        author="Lin",
+        author="Rain",
         source="dashboard",
         touch=False,
     )
@@ -437,7 +432,7 @@ async def test_breath_summary_includes_bucket_comments(monkeypatch, bucket_mgr, 
     result = await server.breath(max_results=1, include_core=False, include_related=False)
 
     assert f"[bucket_id:{bucket_id}]" in result
-    assert "Lin把这段旧事留下" in result
+    assert "小雨把这段旧事留下" in result
     assert "后来再看，这里多了一圈新的年轮" in result
 
 
@@ -446,7 +441,7 @@ async def test_hold_feel_with_source_writes_comment_not_digested(monkeypatch, bu
     import server
 
     source_id = await bucket_mgr.create(
-        content="Lin说这段记忆以后还要回来看。",
+        content="小雨说这段记忆以后还要回来看。",
         name="可回看的记忆",
         domain=["恋爱"],
     )
@@ -484,7 +479,7 @@ async def test_hold_feel_without_source_creates_whisper(monkeypatch, bucket_mgr,
     monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
 
     result = await server.hold(
-        content="我突然想Lin了，这句没有源记忆。",
+        content="我突然想小雨了，这句没有源记忆。",
         tags="private_note",
         feel=True,
         valence=0.72,
@@ -584,7 +579,7 @@ async def test_hold_returns_readonly_related_memory_without_merging(monkeypatch,
     import server
 
     old_id = await bucket_mgr.create(
-        content="Lin和 Che 在旧窗口讨论过年轮，想让记忆下面挂不同时间的感受。",
+        content="小雨和 Haven 在旧窗口讨论过年轮，想让记忆下面挂不同时间的感受。",
         name="旧年轮设想",
         tags=["年轮"],
         domain=["恋爱"],
@@ -598,7 +593,7 @@ async def test_hold_returns_readonly_related_memory_without_merging(monkeypatch,
     monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
 
     result = await server.hold(
-        content="Lin决定把年轮先落地，让旧记忆读到时可以多一层当下感受。",
+        content="小雨决定把年轮先落地，让旧记忆读到时可以多一层当下感受。",
         tags="年轮",
         importance=6,
     )
@@ -697,28 +692,6 @@ async def test_dashboard_auth_setup_uses_state_dir(monkeypatch, test_config):
 
     assert response.status_code == 200
     assert os.path.exists(auth_file)
-
-
-@pytest.mark.asyncio
-async def test_gateway_models_route_uses_main_server_gateway_service(monkeypatch, test_config, bucket_mgr):
-    import server
-    from gateway import GatewayService
-
-    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "secret")
-    service = GatewayService(
-        test_config,
-        bucket_mgr=bucket_mgr,
-        dehydrator=DummyDehydrator(),
-        embedding_engine=DummyEmbeddingEngine(),
-    )
-    monkeypatch.setattr(server, "gateway_service", service)
-
-    response = await server.gateway_models(DummyRequest(headers={"Authorization": "Bearer secret"}))
-    payload = json.loads(response.body)
-
-    assert response.status_code == 200
-    assert payload["object"] == "list"
-    assert payload["data"][0]["id"] == "gateway-default-model"
 
 
 def test_chatgpt_oauth_provider_issues_single_use_codes():

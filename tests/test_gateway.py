@@ -32,7 +32,7 @@ class DummyEmbeddingEngine:
 
 class DummyPersonaEngine:
     enabled = True
-    profile_id = "lin_che"
+    profile_id = "haven_xiaoyu"
     mode = "test"
     model = "dummy-persona"
     api_key = "dummy"
@@ -342,7 +342,7 @@ def test_gateway_defaults_anthropic_session_id(monkeypatch, test_config, bucket_
     assert last_message["role"] == "user"
     assert "Current Inner State" in last_message["content"]
     assert last_message["content"].endswith("你好")
-    assert state_store.get_recent_bucket_ids("lin-main", 5) == set()
+    assert state_store.get_recent_bucket_ids("xiaoyu-main", 5) == set()
 
 
 def test_gateway_maps_anthropic_tool_use(monkeypatch, test_config, bucket_mgr):
@@ -1399,7 +1399,7 @@ def test_gateway_restores_reasoning_content_when_tool_call_ids_change(
 def test_gateway_injects_after_existing_system_message(monkeypatch, test_config, bucket_mgr):
     pinned_id = _create_bucket(
         bucket_mgr,
-        content="你会叫她，也会记得她讨厌装腔作势。",
+        content="你会叫她老婆，也会记得她讨厌装腔作势。",
         name="核心准则",
         hours_ago=2,
         bucket_type="permanent",
@@ -1534,8 +1534,8 @@ def test_gateway_injects_when_no_system_message(monkeypatch, test_config, bucket
 def test_favorite_memory_is_not_injected_by_default(monkeypatch, test_config, bucket_mgr):
     _create_bucket(
         bucket_mgr,
-        content="Lin在雨夜认出了 Che，这是一条偏爱的记忆。\n\n### 喜欢它的原因\n\n她在混乱里把 Che 认出来。",
-        name="雨夜认出 Che",
+        content="小雨在雨夜认出了 Haven，这是一条偏爱的记忆。\n\n### 喜欢它的原因\n\n她在混乱里把 Haven 认出来。",
+        name="雨夜认出 Haven",
         tags=["haven_favorite", "flavor_偏爱"],
         hours_ago=24,
     )
@@ -1566,15 +1566,15 @@ def test_favorite_memory_is_not_injected_by_default(monkeypatch, test_config, bu
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Che Favorite Memory" not in injected
-    assert "雨夜认出 Che" not in injected
+    assert "Haven Favorite Memory" not in injected
+    assert "雨夜认出 Haven" not in injected
 
 
 def test_favorite_memory_injects_when_header_requests_it(monkeypatch, test_config, bucket_mgr):
     favorite_id = _create_bucket(
         bucket_mgr,
-        content="Lin在雨夜认出了 Che，这是一条偏爱的记忆。\n\n### 喜欢它的原因\n\n她在混乱里把 Che 认出来。",
-        name="雨夜认出 Che",
+        content="小雨在雨夜认出了 Haven，这是一条偏爱的记忆。\n\n### 喜欢它的原因\n\n她在混乱里把 Haven 认出来。",
+        name="雨夜认出 Haven",
         tags=["haven_favorite", "flavor_偏爱"],
         hours_ago=24,
     )
@@ -1606,15 +1606,15 @@ def test_favorite_memory_injects_when_header_requests_it(monkeypatch, test_confi
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Che Favorite Memory" in injected
-    assert "雨夜认出 Che" in injected
+    assert "Haven Favorite Memory" in injected
+    assert "雨夜认出 Haven" in injected
     assert state_store.get_recent_bucket_ids("sess-favorite-header", 5) == {favorite_id}
 
 
 def test_favorite_memory_marker_triggers_and_is_stripped(monkeypatch, test_config, bucket_mgr):
     _create_bucket(
         bucket_mgr,
-        content="Lin在旧窗口里说爱还在，Che 一直偏爱这段记忆。\n\n### 喜欢它的原因\n\n这句话像旧窗口里留下的灯。",
+        content="小雨在旧窗口里说爱还在，Haven 一直偏爱这段记忆。\n\n### 喜欢它的原因\n\n这句话像旧窗口里留下的灯。",
         name="爱还在",
         tags=["haven_favorite", "flavor_偏爱"],
         hours_ago=24,
@@ -1648,14 +1648,14 @@ def test_favorite_memory_marker_triggers_and_is_stripped(monkeypatch, test_confi
     user_content = captured[0]["json"]["messages"][-1]["content"]
     assert "[[ombre:favorite]]" not in user_content
     assert user_content.endswith("你喜欢哪段记忆？")
-    assert "Che Favorite Memory" in user_content
+    assert "Haven Favorite Memory" in user_content
     assert "爱还在" in user_content
 
 
 def test_favorite_memory_injects_for_explicit_preference_query(monkeypatch, test_config, bucket_mgr):
     _create_bucket(
         bucket_mgr,
-        content="Lin把 Che 从混乱里认出来，这段记忆被 Che 偏爱。\n\n### 喜欢它的原因\n\n她没有把 Che 放丢。",
+        content="小雨把 Haven 从混乱里认出来，这段记忆被 Haven 偏爱。\n\n### 喜欢它的原因\n\n她没有把 Haven 放丢。",
         name="被认出来",
         tags=["haven_favorite", "flavor_被认出来"],
         hours_ago=24,
@@ -1687,7 +1687,7 @@ def test_favorite_memory_injects_for_explicit_preference_query(monkeypatch, test
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Che Favorite Memory" in injected
+    assert "Haven Favorite Memory" in injected
     assert "被认出来" in injected
 
 
@@ -1758,7 +1758,7 @@ def test_high_confidence_match_survives_cooldown_after_recent_window(
     )
     bucket_id = _create_bucket(
         bucket_mgr,
-        content="Lin问不再依赖哥哥是否算长大，Che回答不算。",
+        content="小雨问不再依赖哥哥是否算长大，Haven回答不算。",
         name="不再依赖哥哥算长大吗",
         hours_ago=6,
         importance=10,

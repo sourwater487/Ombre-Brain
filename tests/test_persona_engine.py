@@ -75,20 +75,20 @@ def test_persona_initializes_default_global_and_session_state(test_config):
     engine = PersonaStateEngine(_persona_config(test_config))
     state = engine.get_current_state("session-a")
 
-    assert state["profile_id"] == "lin_che"
+    assert state["profile_id"] == "haven_xiaoyu"
     assert state["personality"]["agreeableness"] == pytest.approx(0.66)
     assert state["relationship"]["affinity"] == pytest.approx(0.86)
     assert state["affect"]["mood_label"] == "warm_neutral"
     assert state["affect"]["tenderness"] == pytest.approx(0.62)
     assert "Current Inner State" in engine.format_state_block(state)
-    assert "Conversation partner: Lin" in engine.format_state_block(state)
+    assert "Conversation partner: 小雨" in engine.format_state_block(state)
 
 
 def test_persona_evaluator_prompt_asks_for_chinese_persona_text():
     assert "perceived_intent 和 residue 必须是自然中文" in POST_REPLY_EVALUATION_PROMPT
     assert "用户、对方" in POST_REPLY_EVALUATION_PROMPT
     assert "event_type 和 mood_label 保持短英文标签" in POST_REPLY_EVALUATION_PROMPT
-    assert "Che" not in FALLBACK_GUIDANCE
+    assert "Haven" not in FALLBACK_GUIDANCE
 
 
 def test_persona_identity_config_updates_prompt_and_state_block(test_config):
@@ -97,7 +97,7 @@ def test_persona_identity_config_updates_prompt_and_state_block(test_config):
         "ai_name": "Echo",
         "user_name": "Mira",
         "user_display_name": "米拉",
-        "user_aliases": ["", "她"],
+        "user_aliases": ["亲爱的", "她"],
     }
     engine = PersonaStateEngine(cfg)
     state = engine.get_current_state("session-identity")
@@ -106,7 +106,7 @@ def test_persona_identity_config_updates_prompt_and_state_block(test_config):
 
     assert "Current Inner State (Echo)" in block
     assert "Conversation partner: 米拉" in block
-    assert "米拉、、她" in prompt
+    assert "米拉、亲爱的、她" in prompt
     assert "Echo 回复后的状态" in prompt
 
 
@@ -235,7 +235,7 @@ async def test_persona_dashboard_payload_lists_state_sessions_and_events(test_co
     await engine.update_from_exchange("session-dashboard", "爱你，今天状态很好", "我也爱你。")
     payload = engine.get_dashboard_payload(session_id="session-dashboard")
 
-    assert payload["profile_id"] == "lin_che"
+    assert payload["profile_id"] == "haven_xiaoyu"
     assert payload["active_session_id"] == "session-dashboard"
     assert payload["state"]["reply_guidance"] == engine.fallback_guidance
     assert payload["state"]["affect"]["mood_label"] == "warm_touched"
@@ -251,7 +251,7 @@ async def test_persona_timestamps_are_explicit_utc(test_config):
     engine = PersonaStateEngine(_persona_config(test_config))
     engine.client = FakePersonaClient(_event_payload())
 
-    await engine.update_from_exchange("session-timezone", "哥哥夸夸你", "Lin真厉害。")
+    await engine.update_from_exchange("session-timezone", "哥哥夸夸你", "小雨真厉害。")
 
     conn = sqlite3.connect(engine.db_path)
     session_row = conn.execute(

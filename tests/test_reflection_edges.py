@@ -26,7 +26,7 @@ class DummyEmbeddingEngine:
 
 class DummyPersonaEngine:
     enabled = True
-    profile_id = "lin_che"
+    profile_id = "haven_xiaoyu"
     mode = "llm"
     model = "dummy"
     api_key = ""
@@ -38,7 +38,7 @@ class DummyPersonaEngine:
         return self.get_current_state(session_id)
 
     def format_state_block(self, state: dict) -> str:
-        return "Current Inner State (Che)"
+        return "Current Inner State (Haven)"
 
 
 def _no_api_config(test_config: dict) -> dict:
@@ -117,7 +117,7 @@ async def test_reflection_enrich_bucket_does_not_fallback_to_template_anchor(tes
     engine = ReflectionEngine(cfg)
 
     bucket_id = await bucket_mgr.create(
-        content="Che答应周末带Lin出去玩，还需要记得提前规划路线。",
+        content="Haven答应周末带小雨出去玩，还需要记得提前规划路线。",
         tags=[],
         importance=4,
         domain=["恋爱"],
@@ -151,7 +151,7 @@ async def test_reflection_enrich_bucket_adds_model_affect_anchor(test_config, mo
             "confidence": 0.72,
             "affect_anchor_needed": True,
             "affect_anchor": {
-                "scene": "Lin把旧信放到桌上，等Che读完。",
+                "scene": "小雨把旧信放到桌上，等Haven读完。",
                 "chords": "Dbmaj9 -> Ab/C -> Bbm9",
                 "tempo": "54bpm",
                 "dynamic": "p",
@@ -163,7 +163,7 @@ async def test_reflection_enrich_bucket_adds_model_affect_anchor(test_config, mo
     monkeypatch.setattr(engine, "_api_classify", fake_api_classify)
 
     bucket_id = await bucket_mgr.create(
-        content="Lin把旧信放到桌上，让Che读完后记得这份轻轻放下的心事。",
+        content="小雨把旧信放到桌上，让Haven读完后记得这份轻轻放下的心事。",
         tags=[],
         importance=5,
         domain=["恋爱"],
@@ -175,7 +175,7 @@ async def test_reflection_enrich_bucket_adds_model_affect_anchor(test_config, mo
 
     assert result["status"] == "ok"
     assert "### affect_anchor" in bucket["content"]
-    assert "Lin把旧信放到桌上，等Che读完。" in bucket["content"]
+    assert "小雨把旧信放到桌上，等Haven读完。" in bucket["content"]
     assert "Dbmaj9 -> Ab/C -> Bbm9 · 54bpm · p" in bucket["content"]
     assert "Fmaj9" not in bucket["content"]
 
@@ -226,7 +226,7 @@ async def test_reflection_candidate_pool_mixes_semantic_shape_commitments_and_an
         name="同标签记忆",
     )
     commitment_id = await bucket_mgr.create(
-        content="Che答应之后继续看未完成的记忆功能。",
+        content="Haven答应之后继续看未完成的记忆功能。",
         tags=["commitment", "todo"],
         importance=7,
         domain=["事务"],
@@ -277,7 +277,7 @@ async def test_reflect_daily_creates_relationship_weather_feel(test_config):
     engine = ReflectionEngine(cfg)
 
     await bucket_mgr.create(
-        content="Lin和Che讨论记忆系统，希望下一次醒来能带回脉络。",
+        content="小雨和Haven讨论记忆系统，希望下一次醒来能带回脉络。",
         tags=["记忆系统"],
         importance=7,
         domain=["数字", "恋爱"],
@@ -334,7 +334,7 @@ async def test_reflect_daily_skips_diary_extract_when_ordinary_memory_exists(tes
     created = now.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
 
     await bucket_mgr.create(
-        content="Lin今天已经有一条普通记忆。",
+        content="小雨今天已经有一条普通记忆。",
         tags=["relationship_event"],
         importance=5,
         domain=["恋爱"],
@@ -366,7 +366,7 @@ async def test_reflect_daily_skips_low_value_diary(test_config, monkeypatch):
     engine = ReflectionEngine(cfg)
 
     async def fake_read_diary(date: str) -> dict:
-        return {"id": 14, "date": date, "title": "普通一天", "content": "今天有点困，和Lin贴贴，然后睡觉。"}
+        return {"id": 14, "date": date, "title": "普通一天", "content": "今天有点困，和小雨贴贴，然后睡觉。"}
 
     monkeypatch.setattr(engine, "_read_diary_for_date", fake_read_diary)
     now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -388,7 +388,7 @@ async def test_reflect_daily_stores_love_letter_as_summary_anchor(test_config, m
             "id": 15,
             "date": date,
             "title": "520：被认出来",
-            "content": "今天读到一封写给Lin的情书。信里有一句：你不是因为 prompt 才特别。它讲的是爱和被认出来。",
+            "content": "今天读到一封写给小雨的情书。信里有一句：你不是因为 prompt 才特别。它讲的是爱和被认出来。",
         }
 
     monkeypatch.setattr(engine, "_read_diary_for_date", fake_read_diary)
@@ -415,7 +415,7 @@ async def test_reflect_weekly_prefers_daily_impressions(test_config):
 
     await bucket_mgr.create(
         bucket_id="reflection_daily_2026-05-20",
-        content="今天关系天气很轻。\n\n### affect_anchor\n\n> Lin把旧信放到桌上。\n> Dbmaj9 -> Ab/C -> Bbm9 · 60bpm · mp\n\n含义：温度仍在。",
+        content="今天关系天气很轻。\n\n### affect_anchor\n\n> 小雨把旧信放到桌上。\n> Dbmaj9 -> Ab/C -> Bbm9 · 60bpm · mp\n\n含义：温度仍在。",
         tags=["relationship_weather", "daily_impression"],
         importance=6,
         domain=["自省", "恋爱"],
@@ -501,7 +501,7 @@ async def test_gateway_builds_favorite_memory_block_and_injects_section(test_con
     cfg["gateway"]["favorite_memory_max_cards"] = 1
     bucket_mgr = BucketManager(cfg)
     favorite_id = await bucket_mgr.create(
-        content="Lin和Che有一条特别喜欢的记忆，要在合适的时候被轻轻想起。\n\n### 喜欢它的原因\n\n这条记忆带着被认出来的温度。",
+        content="小雨和Haven有一条特别喜欢的记忆，要在合适的时候被轻轻想起。\n\n### 喜欢它的原因\n\n这条记忆带着被认出来的温度。",
         tags=["haven_favorite", "flavor_偏爱"],
         importance=9,
         domain=["恋爱"],
@@ -524,7 +524,7 @@ async def test_gateway_builds_favorite_memory_block_and_injects_section(test_con
 
     block, favorite_ids = await service._build_favorite_memory_block(all_buckets, "session-favorite")
     _stable, dynamic = service._build_injected_context_messages(
-        persona_block="Current Inner State (Che)",
+        persona_block="Current Inner State (Haven)",
         core_memory="",
         relationship_weather="",
         favorite_memory=block,
@@ -535,5 +535,5 @@ async def test_gateway_builds_favorite_memory_block_and_injects_section(test_con
 
     assert favorite_ids == [favorite_id]
     assert "偏爱的记忆" in block
-    assert "Che Favorite Memory" in dynamic
+    assert "Haven Favorite Memory" in dynamic
     assert "普通记忆" not in block
