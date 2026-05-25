@@ -120,11 +120,10 @@ embedding:
 gateway:
   host: "0.0.0.0"
   port: 8010
-  upstream_base_url: "https://api.openai.com/v1"
-  upstream_default_model: "gpt-4.1-mini"
+  upstream_base_url: "https://openrouter.ai/api/v1"
+  upstream_default_model: "anthropic/claude-opus-4.6"
   upstream_models:
-    - "gpt-4.1-mini"
-    - "gpt-4.1"
+    - "anthropic/claude-opus-4.6"
   # Optional prompt cache hints / 可选提示缓存参数
   # openai: send prompt_cache_key using X-Ombre-Session-Id; leave empty for other providers.
   # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；其他供应商保持空值。
