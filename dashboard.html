@@ -1420,6 +1420,20 @@
     </div>
 
     <div class="config-section">
+        <h3>记忆浮现</h3>
+        <div class="config-row">
+          <label>冷却时间</label>
+          <input type="number" id="cfg-gateway-cooldown" min="0" max="168" step="0.5" />
+        </div>
+        <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，就是同一条记忆浮现后，6 小时内降低再次出现的概率</div>
+        <div class="config-row">
+          <label>冷却轮数</label>
+          <input type="number" id="cfg-gateway-rounds" min="0" max="50" />
+        </div>
+        <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 5，就是最近 5 轮浮现过的记忆会优先避开</div>
+      </div>
+
+      <div class="config-section">
       <h3>其他参数</h3>
       <div class="config-row">
         <label>合并阈值</label>
@@ -2509,6 +2523,8 @@ async function loadConfig() {
     document.getElementById('cfg-emb-url').value = cfg.embedding.base_url || '';
     document.getElementById('cfg-emb-key').placeholder = '当前: ' + (cfg.embedding.api_key_masked || (cfg.embedding.has_own_api_key ? '***' : '复用脱水 API'));
     document.getElementById('cfg-emb-key').value = '';
+    document.getElementById('cfg-gateway-cooldown').value = (cfg.gateway && cfg.gateway.cooldown_hours) ?? 6;
+    document.getElementById('cfg-gateway-rounds').value = (cfg.gateway && cfg.gateway.skip_recent_rounds) ?? 5;
     document.getElementById('cfg-merge').value = cfg.merge_threshold || 75;
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + cfg.transport + '</strong><br>' +
@@ -2532,6 +2548,10 @@ async function saveConfig(persist) {
       enabled: document.getElementById('cfg-emb-enabled').value === 'true',
       model: document.getElementById('cfg-emb-model').value,
       base_url: document.getElementById('cfg-emb-url').value,
+    },
+    gateway: {
+      cooldown_hours: floatValue('cfg-gateway-cooldown', 6),
+      skip_recent_rounds: numberValue('cfg-gateway-rounds', 5),
     },
     merge_threshold: parseInt(document.getElementById('cfg-merge').value) || 75,
     persist: persist,
