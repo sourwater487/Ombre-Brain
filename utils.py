@@ -99,7 +99,7 @@ def load_config(config_path: str = None) -> dict:
             "related_memory_budget": 220,
             "core_memory_interval_rounds": 0,
             "current_inner_state_interval_rounds": 15,
-            "relationship_weather_interval_rounds": 15,
+            "relationship_weather_interval_rounds": 0,
             "favorite_memory_interval_rounds": 0,
             "semantic_weight": 0.45,
             "keyword_weight": 0.35,
