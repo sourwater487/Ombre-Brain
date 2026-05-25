@@ -95,6 +95,7 @@ def load_config(config_path: str = None) -> dict:
             "inject_total_budget": 1200,
             "core_memory_budget": 0,
             "recent_context_budget": 300,
+            "recent_context_interval_rounds": 1,
             "recalled_memory_budget": 400,
             "relationship_weather_budget": 220,
             "favorite_memory_budget": 0,

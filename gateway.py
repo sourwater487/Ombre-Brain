@@ -82,6 +82,9 @@ class GatewayService:
         self.inject_total_budget = int(self.gateway_cfg.get("inject_total_budget", 1200))
         self.core_budget = int(self.gateway_cfg.get("core_memory_budget", 500))
         self.recent_budget = int(self.gateway_cfg.get("recent_context_budget", 300))
+        self.recent_context_interval_rounds = max(
+            0, int(self.gateway_cfg.get("recent_context_interval_rounds", 1))
+        )
         self.recalled_budget = int(self.gateway_cfg.get("recalled_memory_budget", 400))
         self.relationship_weather_budget = int(self.gateway_cfg.get("relationship_weather_budget", 220))
         self.favorite_memory_budget = int(self.gateway_cfg.get("favorite_memory_budget", 180))
@@ -420,9 +423,10 @@ class GatewayService:
             recent_bucket_ids = self.state_store.get_recent_bucket_ids(
                 session_id, self.skip_recent_rounds
             )
-            recent_context, recent_context_ids = await self._build_recent_context_block(
-                all_buckets, exclude_bucket_ids=recent_bucket_ids
-            )
+            if self._should_inject_interval(session_id, self.recent_context_interval_rounds):
+                recent_context, recent_context_ids = await self._build_recent_context_block(
+                    all_buckets, exclude_bucket_ids=recent_bucket_ids
+                )
             recalled_buckets = await self._select_dynamic_buckets(
                 current_user_query,
                 session_id,
