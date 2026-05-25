@@ -34,4 +34,20 @@ def test_oversized_markdown_turn_is_split_into_multiple_chunks():
 
     assert len(chunks) > 1
     assert all(count_tokens_approx(chunk["content"]) <= 1200 for chunk in chunks)
-    assert all(chunk["content"].startswith("[用户] ") for chunk in chunks)
+    assert chunks[0]["content"].startswith("[用户] ")
+    assert all("[上下文提示]" in chunk["content"] for chunk in chunks[1:])
+    assert all("[本段内容]" in chunk["content"] for chunk in chunks[1:])
+
+
+def test_oversized_markdown_overlap_is_marked_as_context_only():
+    long_turn = "\n".join(
+        f"第{i}段：这是一段需要连续理解的内容。" * 20
+        for i in range(20)
+    )
+    turns = detect_and_parse("用户：" + long_turn, "chat.md")
+
+    chunks = chunk_turns(turns, target_tokens=500)
+
+    assert len(chunks) > 1
+    assert "请不要从这里单独提取记忆" in chunks[1]["content"]
+    assert chunks[1]["content"].index("[上下文提示]") < chunks[1]["content"].index("[本段内容]")
