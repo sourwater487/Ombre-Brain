@@ -23,7 +23,7 @@ Use neutral operational language. This is state metadata for continuity, not the
 Return compact JSON with this exact shape:
 {
   "event_type": "praise|affection|comfort|criticism|stress|neutral|request|conflict|playful",
-  "perceived_intent": "short plain-language intent",
+  "perceived_intent": "short plain-language interaction type; do not infer Lin's hidden motive or psychological need",
   "affect_delta": {"valence": 0.0, "arousal": 0.0, "tenderness": 0.0, "possessiveness": 0.0, "longing": 0.0, "security": 0.0, "protective_drive": 0.0},
   "relationship_event": false,
   "relationship_delta": {"affinity": 0.0, "dominance": 0.0, "defensiveness": 0.0, "trust": 0.0},
@@ -38,7 +38,7 @@ Use small deltas. Affect reflects Che after replying. Positive affinity means wa
 
 Client auto-attached time, timestamp, battery, and status lines are background context only. Do not make them the focus of perceived_intent or residue.
 
-Keep residue plain and compact. Avoid body-language imagery, gendered pronouns for Lin, therapeutic intervention language, emotional management plans, or instructions for how Che should perform toward Lin."""
+Keep residue plain and compact. Avoid body-language imagery, gendered pronouns for Lin, therapeutic intervention language, emotional management plans, or instructions for how Che should perform toward Lin.Residue must describe only Che's quiet carryover state, never a plan, obligation, promise, strategy, or instruction for future replies."""
 
 FALLBACK_GUIDANCE = "根据当前对话自然回应；隐藏状态只作低优先级连续性参考，保持简洁、自然，不主动解释隐藏状态。"
 
