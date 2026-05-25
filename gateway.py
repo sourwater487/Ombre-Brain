@@ -398,6 +398,7 @@ class GatewayService:
         persona_block = ""
         core_memory = ""
         recent_context = ""
+        recent_context_ids: list[str] = []
         recalled_buckets: list[dict] = []
         recalled_memory = ""
         relationship_weather = ""
@@ -416,9 +417,17 @@ class GatewayService:
             if self._should_inject_interval(session_id, self.core_memory_interval_rounds):
                 core_memory = await self._build_core_memory_block(all_buckets)
 
-            recent_context = await self._build_recent_context_block(all_buckets)
+            recent_bucket_ids = self.state_store.get_recent_bucket_ids(
+                session_id, self.skip_recent_rounds
+            )
+            recent_context, recent_context_ids = await self._build_recent_context_block(
+                all_buckets, exclude_bucket_ids=recent_bucket_ids
+            )
             recalled_buckets = await self._select_dynamic_buckets(
-                current_user_query, session_id, all_buckets
+                current_user_query,
+                session_id,
+                all_buckets,
+                exclude_bucket_ids=recent_bucket_ids,
             )
             recalled_memory = await self._summarize_buckets(recalled_buckets, self.recalled_budget)
 
@@ -432,7 +441,18 @@ class GatewayService:
 
             related_memory = await self._build_related_memory_block(recalled_buckets, all_buckets)
             injected_ids = list(
-                dict.fromkeys([bucket["id"] for bucket in recalled_buckets] + favorite_ids)
+                dict.fromkeys(
+                    recent_context_ids
+                    + [bucket["id"] for bucket in recalled_buckets]
+                    + favorite_ids
+                )
+            )
+            logger.info(
+                "Gateway memory suppression | session=%s recent_suppressed=%s recent_context=%s recalled=%s",
+                session_id,
+                sorted(recent_bucket_ids),
+                recent_context_ids,
+                [bucket["id"] for bucket in recalled_buckets],
             )
         else:
             logger.info(
@@ -1550,10 +1570,17 @@ class GatewayService:
         )
         return await self._summarize_buckets(core_buckets, self.core_budget)
 
-    async def _build_recent_context_block(self, all_buckets: list[dict]) -> str:
+    async def _build_recent_context_block(
+        self,
+        all_buckets: list[dict],
+        exclude_bucket_ids: set[str] | None = None,
+    ) -> tuple[str, list[str]]:
         cutoff = datetime.now() - timedelta(hours=self.head_recent_hours)
+        excluded_ids = exclude_bucket_ids or set()
         recent_buckets = []
         for bucket in all_buckets:
+            if bucket.get("id") in excluded_ids:
+                continue
             meta = bucket.get("metadata", {})
             if meta.get("type") == "feel":
                 continue
@@ -1567,7 +1594,11 @@ class GatewayService:
             key=lambda bucket: bucket.get("metadata", {}).get("created", ""),
             reverse=True,
         )
-        return await self._summarize_buckets(recent_buckets[:6], self.recent_budget)
+        selected = recent_buckets[:6]
+        return (
+            await self._summarize_buckets(selected, self.recent_budget),
+            [bucket["id"] for bucket in selected],
+        )
 
     async def _build_relationship_weather_block(self, all_buckets: list[dict]) -> str:
         if self.relationship_weather_budget <= 0:
@@ -1722,6 +1753,7 @@ class GatewayService:
         query: str,
         session_id: str,
         all_buckets: list[dict],
+        exclude_bucket_ids: set[str] | None = None,
     ) -> list[dict]:
         if not query or self.inject_max_cards <= 0:
             return []
@@ -1738,9 +1770,15 @@ class GatewayService:
             return []
 
         now = datetime.now()
-        recent_ids = self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
+        recent_ids = (
+            exclude_bucket_ids
+            if exclude_bucket_ids is not None
+            else self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
+        )
         scored_candidates = []
         for bucket_id in candidate_ids:
+            if bucket_id in recent_ids:
+                continue
             bucket = bucket_map.get(bucket_id)
             if not bucket:
                 continue
@@ -1762,9 +1800,7 @@ class GatewayService:
                 cooldown_floor=self.cooldown_floor,
                 now=now,
             )
-            if bucket_id not in recent_ids and self._is_high_confidence_match(
-                semantic_score, keyword_score
-            ):
+            if self._is_high_confidence_match(semantic_score, keyword_score):
                 cooldown_multiplier = max(
                     cooldown_multiplier,
                     self.high_confidence_cooldown_floor,
@@ -1782,9 +1818,7 @@ class GatewayService:
             )
 
         scored_candidates.sort(key=lambda item: item["score"], reverse=True)
-        filtered = [item for item in scored_candidates if item["bucket"]["id"] not in recent_ids]
-        active_pool = filtered or scored_candidates
-        selected = self._pick_dynamic_cards(active_pool)
+        selected = self._pick_dynamic_cards(scored_candidates)
         return [item["bucket"] for item in selected]
 
     def _is_high_confidence_match(self, semantic_score: float, keyword_score: float) -> bool:
