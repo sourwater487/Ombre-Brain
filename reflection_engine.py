@@ -201,8 +201,9 @@ class ReflectionEngine:
         bucket_mgr,
         edge_store: MemoryEdgeStore,
         embedding_engine=None,
+        force: bool = False,
     ) -> dict:
-        if not self.enabled or not self.enrich_on_write:
+        if not self.enabled or (not self.enrich_on_write and not force):
             return {"status": "disabled", "id": bucket_id}
         bucket = await bucket_mgr.get(bucket_id)
         if not bucket:

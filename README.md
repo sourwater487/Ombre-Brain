@@ -45,7 +45,7 @@
 | 年轮 comments | 将再次阅读某条记忆时的感受挂到源 bucket 的 `metadata.comments` 下；旧 feel 可迁移成源记忆年轮 | `bucket_manager.py`、`server.py`、`dashboard.html` |
 | whisper | 无源碎碎念/悄悄话独立保存为 `type=feel + whisper` 标签，可用 `breath(domain="whisper")` 单独读取 | `server.py` |
 | Dashboard 编辑 | 支持正文编辑、前端用户年轮写入/删除、日印象月历、Persona 面板、网络图、手动 reflect；日印象页按日期显示完整日印象，不再做情绪天气图 | `dashboard.html`、`server.py` |
-| 可选 Haven-diary/RiJi 摘记 | 完整日记留在 [Yinglianchun/RiJi](https://github.com/Yinglianchun/RiJi) 这类外部日记系统，Ombre 只提取少量长期有用记忆；不用可关闭 | `reflection_engine.py` |
+| 可选 RiJi 摘记 | 完整日记留在 [Yinglianchun/RiJi](https://github.com/Yinglianchun/RiJi) 这类外部日记系统，Ombre 只提取少量长期有用记忆；不用可关闭 | `reflection_engine.py` |
 | Supabase 同步 | 本地 bucket 与 Supabase memories 表同步，支持 tombstone 删除墓碑 | `scripts/sync_to_supabase.py` |
 | ChatGPT Connector OAuth | 为 `/ombre/mcp` 提供 OAuth authorize/token 元数据 | `server.py` |
 
@@ -156,11 +156,16 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 
 - `gateway.upstreams`：配置上游 OpenAI-compatible provider。
 - `gateway.default_session_id`：少数兼容路由没传 `X-Ombre-Session-Id` 时的默认房间名，通用部署不要照抄旧示例名。
+- `gateway.cooldown_hours`：动态记忆再次出现的冷却小时，默认 `6`。
+- `gateway.skip_recent_rounds`：最近几轮里已经注入过的记忆优先避开，默认 `5`。
+- `embedding.model/base_url`：embedding 模型和地址；key 推荐放 `.env` 的 `OMBRE_EMBEDDING_API_KEY`。
+- `write_path.semantic_search_timeout_seconds`：写入时找“只读相关旧记忆”的语义检索最多等待几秒，默认 `3`。网络慢时会跳过语义部分，不影响写入成功。
 - `identity.*`：改 AI 名、前端用户作者名、prompt 里的用户称呼和亲密称呼。
 - `persona.profile_id`：改成自己的稳定 id，避免和示例部署共用同一份 Persona 状态身份。
 - `persona.*`：改成自己的 Persona 模型和关系默认值。
 - `reflection.timezone`：默认 `Asia/Shanghai`。
-- `reflection.diary_mcp_url` / `diary_mcp_token_env`：只有接 Haven-diary/RiJi 时再启用；不使用日记系统就留空，并关闭 `reflection.diary_memory_extract_enabled`。
+- `reflection.enrich_backfill_enabled/enrich_backfill_limit`：默认每次反思定时器顺手补少量缺失 enrich 的普通 bucket，用来恢复 tags/confidence/memory_edges。
+- `reflection.diary_mcp_url` / `diary_mcp_token_env`：只有接 RiJi 时再启用；不使用日记系统就留空，并关闭 `reflection.diary_memory_extract_enabled`。
 
 ### 准备 `.env`
 
@@ -185,7 +190,7 @@ OMBRE_CHATGPT_OAUTH_REFRESH_TOKEN=
 OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL=
 ```
 
-`MCP_BEARER_TOKEN` 只在接 RiJi/Haven-diary 摘记时需要；不接外部日记系统就不要配置 diary URL/token。
+`MCP_BEARER_TOKEN` 只在接 RiJi 摘记时需要；不接外部日记系统就不要配置 diary URL/token。
 
 ### Compose
 
@@ -501,12 +506,13 @@ arousal: float = -1
   "status": "commented",
   "id": "源 bucket id",
   "comment": {"id": "comment id", "author": "<identity.ai_name>", "content": "..."},
-  "embedding_refreshed": true,
+  "embedding_refreshed": false,
+  "embedding_queued": true,
   "metadata": {}
 }
 ```
 
-用途：给已有 bucket 追加年轮。MCP 调用不需要传作者，作者固定取 `identity.ai_name`。它会 `touch+1` 源 bucket，刷新源 bucket embedding，不改正文，不把源 bucket 标为 `digested`。
+用途：给已有 bucket 追加年轮。MCP 调用不需要传作者，作者固定取 `identity.ai_name`。它会 `touch+1` 源 bucket，后台刷新源 bucket embedding，不改正文，不把源 bucket 标为 `digested`。`embedding_refreshed` 保留给旧客户端兼容；新逻辑看 `embedding_queued`。
 
 这是现在推荐的年轮入口。新调用不要用 `hold(feel=True, source_bucket=...)` 写年轮；那只是旧兼容入口。
 
@@ -674,6 +680,9 @@ curl -sS http://127.0.0.1:18002/health
 
 # embedding 回填
 docker compose -f compose.hk.yml exec -T ombre-brain python backfill_embeddings.py --batch-size 20
+
+# enrich 补跑
+# 正常情况下 reflection scheduler 会自动少量补跑；需要手动修复时可从 MCP 客户端调用 enrich_backfill(limit=20)。
 
 # 旧 feel 桶清理，先 dry-run 再 apply
 docker compose -f compose.hk.yml exec -T ombre-brain python scripts/cleanup_migrated_feel_buckets.py

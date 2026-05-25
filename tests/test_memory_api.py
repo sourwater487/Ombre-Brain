@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 
@@ -30,6 +31,23 @@ class CapturingEmbeddingEngine(DummyEmbeddingEngine):
 
     def delete_embedding(self, bucket_id: str):
         self.deleted.append(bucket_id)
+
+
+class BlockingEmbeddingEngine(DummyEmbeddingEngine):
+    enabled = True
+
+    def __init__(self):
+        self.calls = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.finished = asyncio.Event()
+
+    async def generate_and_store(self, bucket_id: str, content: str) -> bool:
+        self.calls.append((bucket_id, content))
+        self.started.set()
+        await self.release.wait()
+        self.finished.set()
+        return True
 
 
 class DummyDehydrator:
@@ -65,6 +83,32 @@ class DummyRequest:
         if isinstance(self._body, bytes):
             return self._body
         return json.dumps(self._body or {}).encode("utf-8")
+
+
+async def wait_for_embedding_call(embedding_engine, bucket_id: str | None = None):
+    async def wait():
+        while not embedding_engine.calls:
+            await asyncio.sleep(0.01)
+        if bucket_id is None:
+            return embedding_engine.calls[0]
+        while not any(call[0] == bucket_id for call in embedding_engine.calls):
+            await asyncio.sleep(0.01)
+        return next(call for call in embedding_engine.calls if call[0] == bucket_id)
+
+    return await asyncio.wait_for(wait(), timeout=1)
+
+
+async def assert_returns_before_embedding_finishes(awaitable, message: str):
+    try:
+        return await asyncio.wait_for(awaitable, timeout=0.25)
+    except asyncio.TimeoutError:
+        pytest.fail(message)
+
+
+async def finish_blocking_embedding(embedding_engine: BlockingEmbeddingEngine):
+    await asyncio.wait_for(embedding_engine.started.wait(), timeout=1)
+    embedding_engine.release.set()
+    await asyncio.wait_for(embedding_engine.finished.wait(), timeout=1)
 
 
 @pytest.mark.asyncio
@@ -199,6 +243,153 @@ async def test_trace_rejects_favorite_without_reason(monkeypatch, bucket_mgr, de
 
 
 @pytest.mark.asyncio
+async def test_comment_bucket_returns_before_slow_embedding_refresh(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="小雨把旧记忆拿出来看。",
+        name="旧记忆",
+        domain=["恋爱"],
+    )
+    embedding_engine = BlockingEmbeddingEngine()
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    result = await assert_returns_before_embedding_finishes(
+        server.comment_bucket(bucket_id=bucket_id, content="慢 embedding 不能卡住年轮返回。"),
+        "comment_bucket waited for embedding refresh instead of returning after the comment write.",
+    )
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert result["status"] == "commented"
+    assert bucket["metadata"]["comment_count"] == 1
+    await finish_blocking_embedding(embedding_engine)
+    assert embedding_engine.calls[0][0] == bucket_id
+
+
+@pytest.mark.asyncio
+async def test_trace_content_returns_before_slow_embedding_refresh(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="旧正文。",
+        name="旧标题",
+        domain=["恋爱"],
+    )
+    embedding_engine = BlockingEmbeddingEngine()
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    result = await assert_returns_before_embedding_finishes(
+        server.trace(bucket_id=bucket_id, content="新正文。"),
+        "trace waited for embedding refresh instead of returning after the content write.",
+    )
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert "content=已替换" in result
+    assert bucket["content"] == "新正文。"
+    await finish_blocking_embedding(embedding_engine)
+    assert embedding_engine.calls[0][0] == bucket_id
+
+
+@pytest.mark.asyncio
+async def test_hold_returns_before_slow_embedding_refresh(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    embedding_engine = BlockingEmbeddingEngine()
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", DummyDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
+
+    result = await assert_returns_before_embedding_finishes(
+        server.hold(content="小雨要补一条写入后慢 embedding 不阻塞的测试。", tags="project_event"),
+        "hold waited for embedding refresh instead of returning after the bucket write.",
+    )
+    buckets = await bucket_mgr.list_all(include_archive=True)
+
+    assert result.startswith("新建→")
+    assert len(buckets) == 1
+    await finish_blocking_embedding(embedding_engine)
+    assert embedding_engine.calls[0][0] == buckets[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_startup_helper_starts_decay_engine(monkeypatch):
+    import server
+
+    class FakeDecayEngine:
+        is_running = False
+
+        def __init__(self):
+            self.calls = 0
+
+        async def ensure_started(self):
+            self.calls += 1
+            self.is_running = True
+
+    decay_engine = FakeDecayEngine()
+    monkeypatch.setattr(server, "decay_engine", decay_engine)
+
+    await server._ensure_decay_engine_started_for_transport("streamable-http")
+
+    assert decay_engine.calls == 1
+    assert decay_engine.is_running is True
+
+
+@pytest.mark.asyncio
+async def test_enrich_backfill_helper_enriches_unenriched_dynamic_buckets(monkeypatch, bucket_mgr):
+    import server
+
+    needs_enrich = await bucket_mgr.create(
+        content="这条旧记忆还没有 confidence，需要补 enrich。",
+        name="待补 enrich",
+        domain=["记忆"],
+    )
+    await bucket_mgr.create(
+        content="这条已经补过 confidence。",
+        name="已补 enrich",
+        domain=["记忆"],
+        confidence=0.71,
+    )
+    await bucket_mgr.create(
+        content="feel 不参与普通 enrich backfill。",
+        name="日印象",
+        tags=["relationship_weather"],
+        bucket_type="feel",
+    )
+    calls = []
+    edge_store = object()
+
+    class FakeReflectionEngine:
+        async def enrich_bucket(self, bucket_id, bucket_mgr_arg, edge_store_arg, embedding_engine=None, force=False):
+            assert bucket_mgr_arg is bucket_mgr
+            assert edge_store_arg is edge_store
+            assert embedding_engine is server.embedding_engine
+            assert force is True
+            calls.append(bucket_id)
+            return {"status": "ok", "id": bucket_id}
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    monkeypatch.setattr(server, "reflection_engine", FakeReflectionEngine())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server._backfill_memory_enrichment(limit=10)
+
+    assert calls == [needs_enrich]
+    assert result["processed"] == 1
+    assert result["ids"] == [needs_enrich]
+
+
+@pytest.mark.asyncio
 async def test_comment_bucket_adds_ring_and_touches_source(monkeypatch, bucket_mgr, decay_eng):
     import server
 
@@ -222,17 +413,17 @@ async def test_comment_bucket_adds_ring_and_touches_source(monkeypatch, bucket_m
         arousal=0.35,
     )
     bucket = await bucket_mgr.get(bucket_id)
+    embedding_call = await wait_for_embedding_call(embedding_engine, bucket_id)
 
     assert result["status"] == "commented"
-    assert result["embedding_refreshed"] is True
     assert bucket["metadata"]["comment_count"] == 1
     assert bucket["metadata"]["comments"][0]["kind"] == "feel"
     assert bucket["metadata"]["comments"][0]["valence"] == 0.82
     assert bucket["metadata"]["model_valence"] == 0.82
     assert bucket["metadata"]["activation_count"] == 1
     assert bucket["metadata"]["last_active"] != "2026-05-04T08:00:00+00:00"
-    assert embedding_engine.calls[0][0] == bucket_id
-    assert "现在再看到它" in embedding_engine.calls[0][1]
+    assert embedding_call[0] == bucket_id
+    assert "现在再看到它" in embedding_call[1]
 
 
 @pytest.mark.asyncio
@@ -286,13 +477,14 @@ async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr,
     payload = json.loads(response.body)
     bucket = await bucket_mgr.get(bucket_id)
     comment = bucket["metadata"]["comments"][0]
+    embedding_call = await wait_for_embedding_call(embedding_engine, bucket_id)
 
     assert response.status_code == 200
     assert payload["status"] == "commented"
     assert comment["author"] == "Rain"
     assert comment["source"] == "dashboard"
     assert comment["content"] == "这句是小雨从前端补的。"
-    assert embedding_engine.calls[0][0] == bucket_id
+    assert embedding_call[0] == bucket_id
 
 
 @pytest.mark.asyncio
@@ -363,13 +555,14 @@ async def test_dashboard_content_api_edits_body_preserves_comments(monkeypatch, 
         )
     )
     bucket = await bucket_mgr.get(bucket_id)
+    embedding_call = await wait_for_embedding_call(embedding_engine, bucket_id)
 
     assert response.status_code == 200
     assert bucket["content"] == "新正文，只替换正文。"
     assert bucket["metadata"]["comments"][0]["id"] == comment["id"]
     assert bucket["metadata"]["last_active"] == before["metadata"]["last_active"]
-    assert "新正文" in embedding_engine.calls[0][1]
-    assert "正文下面的小雨年轮" in embedding_engine.calls[0][1]
+    assert "新正文" in embedding_call[1]
+    assert "正文下面的小雨年轮" in embedding_call[1]
 
 
 @pytest.mark.asyncio
@@ -409,11 +602,12 @@ async def test_dashboard_comment_delete_only_allows_rain_dashboard_comments(monk
     )
     bucket = await bucket_mgr.get(bucket_id)
     remaining_ids = [comment["id"] for comment in bucket["metadata"]["comments"]]
+    embedding_call = await wait_for_embedding_call(embedding_engine, bucket_id)
 
     assert forbidden.status_code == 403
     assert deleted.status_code == 200
     assert remaining_ids == [haven["id"]]
-    assert embedding_engine.calls[-1][0] == bucket_id
+    assert embedding_call[0] == bucket_id
 
 
 @pytest.mark.asyncio
@@ -491,6 +685,7 @@ async def test_hold_feel_with_source_writes_comment_not_digested(monkeypatch, bu
         arousal=0.31,
     )
     bucket = await bucket_mgr.get(source_id)
+    embedding_call = await wait_for_embedding_call(embedding_engine, source_id)
 
     assert result.startswith(f"年轮→{source_id}#")
     assert bucket["metadata"]["comment_count"] == 1
@@ -498,8 +693,8 @@ async def test_hold_feel_with_source_writes_comment_not_digested(monkeypatch, bu
     assert bucket["metadata"]["comments"][0]["content"].startswith("我现在看到它")
     assert bucket["metadata"]["model_valence"] == 0.76
     assert not bucket["metadata"].get("digested")
-    assert embedding_engine.calls[0][0] == source_id
-    assert "被认出来的安静" in embedding_engine.calls[0][1]
+    assert embedding_call[0] == source_id
+    assert "被认出来的安静" in embedding_call[1]
 
 
 @pytest.mark.asyncio

@@ -740,27 +740,48 @@ def _bucket_read_payload(bucket: dict) -> dict:
     }
 
 
-def _queue_memory_enrichment(bucket_id: str) -> None:
+def _queue_memory_enrichment(bucket_id: str, *, force: bool = False) -> None:
     if not bucket_id:
         return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(_enrich_memory_async(bucket_id))
+    loop.create_task(_enrich_memory_async(bucket_id, force=force))
 
 
-async def _enrich_memory_async(bucket_id: str) -> None:
+async def _enrich_memory_async(bucket_id: str, *, force: bool = False) -> None:
     try:
         result = await reflection_engine.enrich_bucket(
             bucket_id,
             bucket_mgr,
             memory_edge_store,
             embedding_engine=embedding_engine,
+            force=force,
         )
         logger.debug("Memory enrichment complete / 记忆关系补全完成: %s", result)
     except Exception as e:
         logger.warning("Memory enrichment failed / 记忆关系补全失败: %s: %s", bucket_id, e)
+
+
+def _queue_embedding_refresh(bucket_id: str) -> bool:
+    if not bucket_id or not getattr(embedding_engine, "enabled", False):
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    loop.create_task(_refresh_bucket_embedding_async(bucket_id))
+    return True
+
+
+async def _refresh_bucket_embedding_async(bucket_id: str) -> None:
+    try:
+        ok = await _refresh_bucket_embedding(bucket_id)
+        if not ok:
+            logger.debug("Embedding refresh skipped or failed / 向量刷新跳过或失败: %s", bucket_id)
+    except Exception as e:
+        logger.warning("Embedding refresh failed / 向量刷新失败: %s: %s", bucket_id, e)
 
 
 # =============================================================
@@ -1040,6 +1061,14 @@ async def _refresh_bucket_embedding(bucket_id: str) -> bool:
     return await embedding_engine.generate_and_store(bucket_id, bucket_text_for_embedding(bucket))
 
 
+def _write_semantic_search_timeout_seconds() -> float:
+    write_cfg = config.get("write_path", {}) if isinstance(config.get("write_path", {}), dict) else {}
+    try:
+        return max(0.0, float(write_cfg.get("semantic_search_timeout_seconds", 3)))
+    except (TypeError, ValueError):
+        return 3.0
+
+
 async def _find_readonly_related_bucket(
     content: str,
     *,
@@ -1056,7 +1085,13 @@ async def _find_readonly_related_bucket(
 
     if getattr(embedding_engine, "enabled", False):
         try:
-            for bucket_id, similarity in await embedding_engine.search_similar(content, top_k=8):
+            semantic_lookup = embedding_engine.search_similar(content, top_k=8)
+            timeout_seconds = _write_semantic_search_timeout_seconds()
+            if timeout_seconds > 0:
+                similar = await asyncio.wait_for(semantic_lookup, timeout=timeout_seconds)
+            else:
+                similar = await semantic_lookup
+            for bucket_id, similarity in similar:
                 if bucket_id in candidates:
                     candidates[bucket_id]["_related_score"] = max(
                         candidates[bucket_id].get("_related_score", 0.0),
@@ -1066,6 +1101,11 @@ async def _find_readonly_related_bucket(
                 bucket = await bucket_mgr.get(bucket_id)
                 if bucket:
                     candidates[bucket_id] = {**bucket, "_related_score": float(similarity) * 100.0}
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Related old memory semantic search timed out after %.1fs / 写入时相关旧记忆语义搜索超时",
+                _write_semantic_search_timeout_seconds(),
+            )
         except Exception as e:
             logger.warning(f"Related old memory semantic search failed / 相关旧记忆语义搜索失败: {e}")
 
@@ -1086,6 +1126,83 @@ async def _find_readonly_related_bucket(
         reverse=True,
     )
     return ranked[0] if ranked else None
+
+
+def _bucket_needs_memory_enrichment(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    if meta.get("type") == "feel" or meta.get("protected"):
+        return False
+    try:
+        confidence = float(meta.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return confidence <= 0.0
+
+
+async def _backfill_memory_enrichment(
+    limit: int | None = None,
+    *,
+    bucket_mgr_arg=None,
+    reflection_engine_arg=None,
+    edge_store_arg=None,
+    embedding_engine_arg=None,
+) -> dict:
+    mgr = bucket_mgr_arg or bucket_mgr
+    engine = reflection_engine_arg or reflection_engine
+    edge_store = edge_store_arg or memory_edge_store
+    emb_engine = embedding_engine_arg or embedding_engine
+    reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+    default_limit = _int_between(reflection_cfg.get("enrich_backfill_limit"), 5, 0, 50)
+    limit = _int_between(limit, default_limit, 0, 50)
+    if limit <= 0:
+        return {"processed": 0, "ids": [], "errors": []}
+
+    try:
+        all_buckets = await mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.warning("Memory enrichment backfill list failed / enrich 补跑列桶失败: %s", e)
+        return {"processed": 0, "ids": [], "errors": [str(e)]}
+
+    candidates = [bucket for bucket in all_buckets if _bucket_needs_memory_enrichment(bucket)]
+    candidates.sort(
+        key=lambda item: item.get("metadata", {}).get("updated_at") or item.get("metadata", {}).get("created", ""),
+        reverse=True,
+    )
+
+    processed: list[str] = []
+    errors: list[str] = []
+    for bucket in candidates[:limit]:
+        bucket_id = bucket.get("id")
+        if not bucket_id:
+            continue
+        try:
+            await engine.enrich_bucket(
+                bucket_id,
+                mgr,
+                edge_store,
+                embedding_engine=emb_engine,
+                force=True,
+            )
+            processed.append(bucket_id)
+        except Exception as e:
+            logger.warning("Memory enrichment backfill failed / enrich 补跑失败: %s: %s", bucket_id, e)
+            errors.append(f"{bucket_id}: {e}")
+    return {"processed": len(processed), "ids": processed, "errors": errors}
+
+
+@mcp.tool()
+async def enrich_backfill(limit: int = 10) -> dict:
+    """后台补跑缺失的 tags/confidence/memory_edges；主要用于 enrich_on_write 曾经超时或关闭后的修复。"""
+    return await _backfill_memory_enrichment(limit=limit)
+
+
+async def _ensure_decay_engine_started_for_transport(transport_name: str) -> None:
+    if transport_name not in ("sse", "streamable-http"):
+        return
+    try:
+        await decay_engine.ensure_started()
+    except Exception as e:
+        logger.warning("Decay engine startup failed / 衰减引擎启动失败: %s", e)
 
 
 async def _merge_or_create(
@@ -1142,11 +1259,7 @@ async def _merge_or_create(
                     valence=merged_valence,
                     arousal=merged_arousal,
                 )
-                # --- Update embedding after merge ---
-                try:
-                    await _refresh_bucket_embedding(bucket["id"])
-                except Exception:
-                    pass
+                _queue_embedding_refresh(bucket["id"])
                 return bucket["id"], bucket["metadata"].get("name", bucket["id"]), True, related_bucket
             except Exception as e:
                 logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
@@ -1160,11 +1273,7 @@ async def _merge_or_create(
         arousal=arousal,
         name=name or None,
     )
-    # --- Generate embedding for new bucket ---
-    try:
-        await _refresh_bucket_embedding(bucket_id)
-    except Exception:
-        pass
+    _queue_embedding_refresh(bucket_id)
     return bucket_id, name or bucket_id, False, related_bucket
 
 
@@ -1734,16 +1843,13 @@ async def comment_bucket(
     if not entry:
         return {"error": "write failed", "id": bucket_id}
     bucket = await bucket_mgr.get(bucket_id)
-    embedding_refreshed = False
-    try:
-        embedding_refreshed = await _refresh_bucket_embedding(bucket_id)
-    except Exception as e:
-        logger.warning(f"Failed to refresh embedding after comment / 评论后刷新向量失败: {bucket_id}: {e}")
+    embedding_queued = _queue_embedding_refresh(bucket_id)
     return {
         "status": "commented",
         "id": bucket_id,
         "comment": entry,
-        "embedding_refreshed": embedding_refreshed,
+        "embedding_refreshed": False,
+        "embedding_queued": embedding_queued,
         "metadata": _bucket_read_payload(bucket)["metadata"] if bucket else {},
     }
 
@@ -1789,18 +1895,15 @@ async def api_bucket_comment(request):
     if not entry:
         return JSONResponse({"error": "write failed", "id": bucket_id}, status_code=500)
 
-    embedding_refreshed = False
-    try:
-        embedding_refreshed = await _refresh_bucket_embedding(bucket_id)
-    except Exception as e:
-        logger.warning(f"Failed to refresh embedding after dashboard comment / 前端评论后刷新向量失败: {bucket_id}: {e}")
+    embedding_queued = _queue_embedding_refresh(bucket_id)
 
     bucket = await bucket_mgr.get(bucket_id)
     return JSONResponse({
         "status": "commented",
         "id": bucket_id,
         "comment": entry,
-        "embedding_refreshed": embedding_refreshed,
+        "embedding_refreshed": False,
+        "embedding_queued": embedding_queued,
         "metadata": _bucket_read_payload(bucket)["metadata"] if bucket else {},
     })
 
@@ -1836,18 +1939,15 @@ async def api_bucket_comment_delete(request):
     if result.get("status") != "deleted":
         return JSONResponse({"error": "delete failed"}, status_code=500)
 
-    embedding_refreshed = False
-    try:
-        embedding_refreshed = await _refresh_bucket_embedding(bucket_id)
-    except Exception as e:
-        logger.warning(f"Failed to refresh embedding after dashboard comment delete / 前端删除评论后刷新向量失败: {bucket_id}: {e}")
+    embedding_queued = _queue_embedding_refresh(bucket_id)
 
     bucket = await bucket_mgr.get(bucket_id)
     return JSONResponse({
         "status": "deleted",
         "id": bucket_id,
         "comment_id": comment_id,
-        "embedding_refreshed": embedding_refreshed,
+        "embedding_refreshed": False,
+        "embedding_queued": embedding_queued,
         "metadata": _bucket_read_payload(bucket)["metadata"] if bucket else {},
     })
 
@@ -1901,10 +2001,7 @@ async def hold(
             name=None,
             bucket_type="feel",
         )
-        try:
-            await _refresh_bucket_embedding(bucket_id)
-        except Exception:
-            pass
+        _queue_embedding_refresh(bucket_id)
         return f"🫧whisper→{bucket_id}"
 
     if whisper:
@@ -1937,10 +2034,7 @@ async def hold(
             )
             if not entry:
                 return "年轮写入失败。"
-            try:
-                await _refresh_bucket_embedding(source_id)
-            except Exception as e:
-                logger.warning(f"Failed to refresh source embedding after feel comment / feel 评论后刷新源向量失败: {source_id}: {e}")
+            _queue_embedding_refresh(source_id)
             return f"年轮→{source_id}#{entry['id']}"
 
         # No source bucket: keep a standalone feel for compatibility.
@@ -1982,10 +2076,7 @@ async def hold(
             bucket_type="permanent",
             pinned=True,
         )
-        try:
-            await _refresh_bucket_embedding(bucket_id)
-        except Exception:
-            pass
+        _queue_embedding_refresh(bucket_id)
         _queue_memory_enrichment(bucket_id)
         related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
         return f"📌钉选→{bucket_id} {','.join(domain)}{related_note}"
@@ -2195,10 +2286,7 @@ async def trace(
 
     # Re-generate embedding if content or title changed.
     if "content" in updates or "name" in updates:
-        try:
-            await _refresh_bucket_embedding(bucket_id)
-        except Exception:
-            pass
+        _queue_embedding_refresh(bucket_id)
 
     changed = ", ".join(f"{k}={v}" for k, v in updates.items() if k != "content")
     if "content" in updates:
@@ -2536,7 +2624,7 @@ async def api_create_memory(request):
         status = "created"
 
     if embedding_engine.enabled:
-        embedding_status = "stored" if await _refresh_bucket_embedding(bucket_id) else "failed"
+        embedding_status = "queued" if _queue_embedding_refresh(bucket_id) else "failed"
     else:
         embedding_status = "disabled"
 
@@ -2648,17 +2736,14 @@ async def api_bucket_update(request):
     if not ok:
         return JSONResponse({"error": "update failed"}, status_code=500)
 
-    embedding_refreshed = False
-    try:
-        embedding_refreshed = await _refresh_bucket_embedding(bucket_id)
-    except Exception as e:
-        logger.warning(f"Failed to refresh embedding after dashboard content edit / 前端正文编辑后刷新向量失败: {bucket_id}: {e}")
+    embedding_queued = _queue_embedding_refresh(bucket_id)
 
     bucket = await bucket_mgr.get(bucket_id)
     return JSONResponse({
         "status": "updated",
         "id": bucket_id,
-        "embedding_refreshed": embedding_refreshed,
+        "embedding_refreshed": False,
+        "embedding_queued": embedding_queued,
         **_bucket_read_payload(bucket),
     })
 
@@ -3347,6 +3432,7 @@ if __name__ == "__main__":
             local_embedding_engine = EmbeddingEngine(config)
             local_persona_engine = PersonaStateEngine(config)
             local_reflection_engine = ReflectionEngine(config)
+            local_memory_edge_store = MemoryEdgeStore(config)
             while True:
                 try:
                     results = await local_reflection_engine.run_due(
@@ -3356,6 +3442,20 @@ if __name__ == "__main__":
                     )
                     if results:
                         logger.info("Reflection run-due results / 反思定时结果: %s", results)
+                    reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+                    if reflection_cfg.get("enrich_backfill_enabled", True):
+                        backfill_result = await _backfill_memory_enrichment(
+                            limit=reflection_cfg.get("enrich_backfill_limit", 5),
+                            bucket_mgr_arg=local_bucket_mgr,
+                            reflection_engine_arg=local_reflection_engine,
+                            edge_store_arg=local_memory_edge_store,
+                            embedding_engine_arg=local_embedding_engine,
+                        )
+                        if backfill_result.get("processed"):
+                            logger.info(
+                                "Memory enrichment backfill / 记忆 enrich 补跑: %s",
+                                backfill_result,
+                            )
                 except Exception as e:
                     logger.warning("Reflection scheduler failed / 反思定时器失败: %s", e)
                 await asyncio.sleep(local_reflection_engine.check_interval_minutes * 60)
@@ -3375,6 +3475,11 @@ if __name__ == "__main__":
             _app = mcp.streamable_http_app()
         else:
             _app = mcp.sse_app()
+        if hasattr(_app, "add_event_handler"):
+            async def _start_decay_engine_on_app_startup():
+                await _ensure_decay_engine_started_for_transport(transport)
+
+            _app.add_event_handler("startup", _start_decay_engine_on_app_startup)
         _app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],

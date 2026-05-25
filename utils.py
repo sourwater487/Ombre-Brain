@@ -38,6 +38,9 @@ def load_config(config_path: str = None) -> dict:
         "buckets_dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "buckets"),
         "state_dir": "",
         "merge_threshold": 75,
+        "write_path": {
+            "semantic_search_timeout_seconds": 3,
+        },
         "identity": {
             "ai_name": "Che",
             "user_name": "Lin",
@@ -157,6 +160,8 @@ def load_config(config_path: str = None) -> dict:
             "enabled": True,
             "auto_enabled": True,
             "enrich_on_write": True,
+            "enrich_backfill_enabled": True,
+            "enrich_backfill_limit": 5,
             "base_url": "",
             "model": "",
             "api_key": "",
