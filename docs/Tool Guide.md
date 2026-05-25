@@ -50,6 +50,11 @@
 10. reflect(period="daily", force=false)
     生成日关系天气。weekly 默认关闭，除非用户明确要求。
 
+运维工具：
+
+- enrich_backfill(limit=10)
+  只在用户明确要修复 enrich / memory_edges / tags / confidence 时调用；普通聊天、新窗口记忆读取、夜梦浮现都不要调用。
+
 使用规则：
 - 先读后写。能更新已有 bucket 就不要新建重复记忆。
 - 年轮写到源 bucket 的 comments；无源感受才写 whisper。
