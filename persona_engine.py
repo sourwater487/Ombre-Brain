@@ -36,6 +36,8 @@ Return compact JSON with this exact shape:
 
 Use small deltas. Affect reflects Che after replying. Positive affinity means warmer continuity. Positive dominance means a slightly more initiative-taking posture, not control over Lin. Positive defensiveness means more guarded. Set relationship_event true only for clear relationship moments. Set personality_signal true only for repeated or unusually strong evidence.
 
+Client auto-attached time, timestamp, battery, and status lines are background context only. Do not make them the focus of perceived_intent or residue.
+
 Keep residue plain and compact. Avoid body-language imagery, gendered pronouns for Lin, therapeutic intervention language, emotional management plans, or instructions for how Che should perform toward Lin."""
 
 FALLBACK_GUIDANCE = "根据当前对话自然回应；隐藏状态只作低优先级连续性参考，保持简洁、自然，不主动解释隐藏状态。"
@@ -267,16 +269,18 @@ class PersonaStateEngine:
         session_state = self._ensure_session_state(session_id, now)
         session_state = self._apply_session_decay(session_id, session_state, now)
 
-        if not self.enabled or not user_message.strip() or not assistant_response.strip():
+        cleaned_user_message = self._clean_client_status_lines(user_message)
+
+        if not self.enabled or not cleaned_user_message.strip() or not assistant_response.strip():
             return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
 
-        exchange_hash = self._exchange_hash(session_id, user_message, assistant_response)
+        exchange_hash = self._exchange_hash(session_id, cleaned_user_message, assistant_response)
         if self._event_exists(session_id, exchange_hash):
             return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
 
         recalled_memory_ids = recalled_memory_ids or []
         evaluation, raw_response, error = await self._evaluate_exchange(
-            user_message,
+            cleaned_user_message,
             assistant_response,
             global_state,
             session_state,
@@ -286,7 +290,7 @@ class PersonaStateEngine:
         if evaluation is None:
             self._record_event(
                 session_id=session_id,
-                user_message=user_message,
+                user_message=cleaned_user_message,
                 assistant_response=assistant_response,
                 evaluation={},
                 raw_response=raw_response,
@@ -301,7 +305,7 @@ class PersonaStateEngine:
         session_state = self._apply_session_delta(session_id, session_state, evaluation, now)
         self._record_event(
             session_id=session_id,
-            user_message=user_message,
+            user_message=cleaned_user_message,
             assistant_response=assistant_response,
             evaluation=evaluation,
             raw_response=raw_response,
@@ -311,6 +315,50 @@ class PersonaStateEngine:
             tool_summary=tool_summary,
         )
         return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+
+    def _clean_client_status_lines(self, user_message: str) -> str:
+        lines = []
+        for line in str(user_message or "").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                lines.append(line)
+                continue
+            if self._is_client_status_line(stripped):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _is_client_status_line(self, line: str) -> bool:
+        stripped = str(line or "").strip()
+        if re.fullmatch(r"\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", stripped):
+            return True
+        normalized = re.sub(r"\s+", "", line).lower()
+        if not normalized:
+            return False
+        if re.fullmatch(r"[-*_`~#>\[\]（）()【】{}:：,，.;；|/\\]+", normalized):
+            return False
+
+        has_status_keyword = any(
+            keyword in normalized
+            for keyword in (
+                "时间",
+                "当前时间",
+                "时间戳",
+                "电量",
+                "battery",
+            )
+        )
+        has_battery_percent = re.search(r"(?:^|[^0-9])100%(?:$|[^0-9])", normalized) is not None
+        if not has_status_keyword and not has_battery_percent:
+            return False
+
+        cleaned = re.sub(
+            r"(当前时间|时间戳|时间|电量|battery|100%|[0-9年月日:：/\\.\-+tzapm上午下午,， ]+|[%％℃°])",
+            "",
+            normalized,
+        )
+        cleaned = re.sub(r"[-*_`~#>\[\]（）()【】{}:：,，.;；|/\\=]+", "", cleaned)
+        return not cleaned
 
     def get_current_state(self, session_id: str) -> dict:
         now = self._now()
