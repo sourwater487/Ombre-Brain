@@ -26,11 +26,22 @@ log_level: "INFO"
 # 保存 Persona State 等运行时 SQLite 状态，建议放在 buckets 同步目录外。
 # state_dir: "/path/to/ombre-brain/state"
 
+# --- Identity / 名字口径 ---
+identity:
+  ai_name: "Che"
+  user_name: "Lin"
+  user_display_name: "Lin"
+  user_aliases: []
+
 # --- Merge threshold / 桶合并阈值 ---
 # When storing a new memory, if similarity with an existing bucket exceeds
 # this value (0-100), merge instead of creating a new one
 # 存新记忆时，如果与已有桶的相似度超过此值（0-100），则合并而非新建
 merge_threshold: 75
+
+# --- Write path / 写入路径 ---
+write_path:
+  semantic_search_timeout_seconds: 3
 
 # --- Dehydration API / 脱水压缩 API 配置 ---
 # Uses a cheap LLM for intelligent compression; auto-degrades to local
@@ -142,8 +153,16 @@ gateway:
   dynamic_top_k: 10
   inject_max_cards: 2
   skip_recent_rounds: 5
-  cooldown_hours: 48
+  cooldown_hours: 6
   cooldown_floor: 0.3
+  default_session_id: "lin-main"
+  core_memory_interval_rounds: 0
+  current_inner_state_interval_rounds: 15
+  relationship_weather_interval_rounds: 0
+  favorite_memory_interval_rounds: 0
+  high_confidence_semantic_score: 0.72
+  high_confidence_keyword_score: 0.65
+  high_confidence_cooldown_floor: 0.8
   inject_total_budget: 1200
   core_memory_budget: 500
   recent_context_budget: 300
@@ -222,6 +241,8 @@ reflection:
   enabled: true
   auto_enabled: true
   enrich_on_write: true
+  enrich_backfill_enabled: true
+  enrich_backfill_limit: 5
   base_url: ""                    # empty = persona.base_url
   model: ""                       # empty = persona.model
   thinking_mode: "disabled"
