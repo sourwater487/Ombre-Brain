@@ -165,7 +165,7 @@ gateway:
   inject_total_budget: 1200
   core_memory_budget: 500
   recent_context_budget: 300
-  recent_context_interval_rounds: 5
+  recent_context_interval_rounds: 6
   recalled_memory_budget: 400
   relationship_weather_budget: 220
   favorite_memory_budget: 180
