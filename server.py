@@ -119,6 +119,26 @@ def _split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+async def _hot_update_gateway_config(gateway_body: dict) -> str | None:
+    admin_url = os.environ.get("OMBRE_GATEWAY_ADMIN_URL", "").strip()
+    token = os.environ.get("OMBRE_GATEWAY_TOKEN", "").strip()
+    if not admin_url or not token:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(
+                admin_url,
+                headers={"Authorization": f"Bearer {token}"},
+                json={"gateway": gateway_body},
+            )
+        if response.status_code >= 400:
+            return f"gateway_hot_reload_failed:{response.status_code}"
+        return "gateway_hot_reloaded"
+    except Exception as exc:
+        logger.warning("Gateway hot config update failed: %s", exc)
+        return f"gateway_hot_reload_failed:{type(exc).__name__}"
+
+
 class ChatGptOAuthProvider:
     def __init__(
         self,
@@ -3027,15 +3047,22 @@ async def api_config_update(request):
         updated.append("merge_threshold")
 
     # --- Gateway memory surfacing config ---
+    gateway_hot_update_body = None
     if "gateway" in body:
         g = body["gateway"]
         gateway_cfg = config.setdefault("gateway", {})
+        gateway_hot_update_body = {}
         if "cooldown_hours" in g:
             gateway_cfg["cooldown_hours"] = max(0.0, float(g["cooldown_hours"]))
+            gateway_hot_update_body["cooldown_hours"] = gateway_cfg["cooldown_hours"]
             updated.append("gateway.cooldown_hours")
         if "skip_recent_rounds" in g:
             gateway_cfg["skip_recent_rounds"] = max(0, int(g["skip_recent_rounds"]))
+            gateway_hot_update_body["skip_recent_rounds"] = gateway_cfg["skip_recent_rounds"]
             updated.append("gateway.skip_recent_rounds")
+        hot_update_status = await _hot_update_gateway_config(gateway_hot_update_body)
+        if hot_update_status:
+            updated.append(hot_update_status)
 
     # --- Persist to config.yaml if requested ---
     if body.get("persist", False):

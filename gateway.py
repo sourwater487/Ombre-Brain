@@ -142,6 +142,8 @@ class GatewayService:
                 or (self.upstreams[0]["base_url"] if len(self.upstreams) == 1 else ""),
                 "upstream_default_model": self.upstream_default_model,
                 "upstream_models": self.upstream_models,
+                "cooldown_hours": self.cooldown_hours,
+                "skip_recent_rounds": self.skip_recent_rounds,
                 "upstreams": [
                     {
                         "name": upstream["name"],
@@ -164,6 +166,49 @@ class GatewayService:
             },
             "buckets": stats,
         }
+
+    def _gateway_memory_config_payload(self) -> dict[str, Any]:
+        return {
+            "cooldown_hours": self.cooldown_hours,
+            "skip_recent_rounds": self.skip_recent_rounds,
+        }
+
+    def _apply_gateway_memory_config(self, payload: dict[str, Any]) -> list[str]:
+        updated: list[str] = []
+        if "cooldown_hours" in payload:
+            self.cooldown_hours = max(0.0, float(payload["cooldown_hours"]))
+            self.gateway_cfg["cooldown_hours"] = self.cooldown_hours
+            updated.append("gateway.cooldown_hours")
+        if "skip_recent_rounds" in payload:
+            self.skip_recent_rounds = max(0, int(payload["skip_recent_rounds"]))
+            self.gateway_cfg["skip_recent_rounds"] = self.skip_recent_rounds
+            updated.append("gateway.skip_recent_rounds")
+        return updated
+
+    async def handle_config(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        if request.method == "GET":
+            return JSONResponse({"gateway": self._gateway_memory_config_payload()})
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid config"}, status_code=400)
+
+        payload = body.get("gateway", body)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid gateway config"}, status_code=400)
+        updated = self._apply_gateway_memory_config(payload)
+        return JSONResponse({
+            "ok": True,
+            "updated": updated,
+            "gateway": self._gateway_memory_config_payload(),
+        })
 
     async def handle_health(self, request: Request) -> JSONResponse:
         try:
@@ -2387,10 +2432,14 @@ def create_gateway_app(
     async def models(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_models(request)
 
+    async def config_route(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_config(request)
+
     app = Starlette(
         debug=False,
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/api/config", config_route, methods=["GET", "POST"]),
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),

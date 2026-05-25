@@ -251,6 +251,26 @@ def test_gateway_state_store_cooldown_curve(tmp_path):
     ) == pytest.approx(1.0)
 
 
+def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_config, bucket_mgr):
+    app, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, cooldown_hours=6, skip_recent_rounds=5),
+        bucket_mgr,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/config",
+            headers={"Authorization": "Bearer gateway-secret"},
+            json={"gateway": {"cooldown_hours": 2.5, "skip_recent_rounds": 3}},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["updated"] == ["gateway.cooldown_hours", "gateway.skip_recent_rounds"]
+    assert service.cooldown_hours == pytest.approx(2.5)
+    assert service.skip_recent_rounds == 3
+
+
 def test_gateway_requires_session_id(monkeypatch, test_config, bucket_mgr):
     app, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
     with TestClient(app) as client:
