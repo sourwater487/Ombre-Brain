@@ -1627,7 +1627,7 @@ async function loadBuckets() {
     renderBuckets(allBuckets);
     if (getActiveTab() === 'reflection') renderReflectionReview();
   } catch (e) {
-    document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+    document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -1763,7 +1763,7 @@ function reflectionEntry(bucket, index) {
       '<div class="reflection-entry-meta">' + reflectionEntryMeta(bucket) + '</div>' +
       '<div class="reflection-entry-preview" id="reflection-entry-body-' + index + '" data-bucket-id="' + esc(id) + '">' + esc(bucket.content_preview || '') + '</div>' +
     '</div>' +
-    '<button type="button" class="reflection-entry-action" onclick="showDetail(\'' + id.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')" aria-label="打开详情" title="打开详情">✎</button>' +
+    '<button type="button" class="reflection-entry-action" onclick="showDetail(\'' + jsString(id) + '\')" aria-label="打开详情" title="打开详情">✎</button>' +
   '</div>';
 }
 
@@ -1821,9 +1821,9 @@ function buildFilters() {
     { key: 'archived', label: '📦 归档' },
   ];
   filters.innerHTML = types.map(function(t) {
-    return '<button class="filter-btn ' + (t.key === 'all' ? 'active' : '') + '" data-filter="' + t.key + '">' + t.label + '</button>';
+    return '<button class="filter-btn ' + (t.key === 'all' ? 'active' : '') + '" data-filter="' + escAttr(t.key) + '">' + esc(t.label) + '</button>';
   }).join('') + Array.from(domains).slice(0, 10).map(function(d) {
-    return '<button class="filter-btn" data-filter="domain:' + d + '">' + d + '</button>';
+    return '<button class="filter-btn" data-filter="' + escAttr('domain:' + d) + '">' + esc(d) + '</button>';
   }).join('');
 
   filters.addEventListener('click', function(e) {
@@ -1862,13 +1862,13 @@ function renderBuckets(buckets) {
     var vPos = Math.round(b.valence * 100);
     var modelV = b.model_valence != null ? ' → V' + b.model_valence.toFixed(1) : '';
     var timeAgo = formatTimeAgo(b.last_active || b.created);
-    return '<div class="bucket-row" onclick="showDetail(\'' + b.id + '\')">' +
+    return '<div class="bucket-row" onclick="showDetail(\'' + jsString(b.id) + '\')">' +
       '<span class="icon">' + icon + '</span>' +
       '<span class="name" title="' + esc(b.name) + '">' + esc(b.name) + '</span>' +
-      '<span class="domain">' + (b.domain || []).join(', ') + '</span>' +
+      '<span class="domain">' + esc((b.domain || []).join(', ')) + '</span>' +
       '<span class="emotion"><span class="v-bar"><span class="v-dot" style="left:' + vPos + '%"></span></span>' + modelV + '</span>' +
       '<span class="score">' + b.score.toFixed(2) + '</span>' +
-      '<span class="time">' + timeAgo + '</span>' +
+      '<span class="time">' + esc(timeAgo) + '</span>' +
       '<span class="preview">' + esc(b.content_preview) + '</span>' +
     '</div>';
   }).join('');
@@ -1892,7 +1892,7 @@ async function showDetail(id) {
   panel.classList.add('open');
 
   try {
-    var res = await authFetch(BASE + '/api/bucket/' + id);
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(id));
     if (!res) return;
     var b = await res.json();
     var meta = b.metadata || {};
@@ -1901,8 +1901,10 @@ async function showDetail(id) {
       ? '<div class="detail-comments"><h3>年轮</h3>' + comments.map(function(c) {
           var canDelete = c && c.id && c.author === dashboardCommentAuthor && c.source === 'dashboard';
           var commentTime = c.original_feel_created || c.created || '';
+          var safeBucketId = jsString(id);
+          var safeCommentId = jsString(c.id);
           return '<div class="comment-item">' +
-            (canDelete ? '<button type="button" class="comment-delete-button" title="删除" aria-label="删除" onclick="deleteBucketComment(\'' + id + '\', \'' + esc(c.id) + '\')">×</button>' : '') +
+            (canDelete ? '<button type="button" class="comment-delete-button" title="删除" aria-label="删除" onclick="deleteBucketComment(\'' + safeBucketId + '\', \'' + safeCommentId + '\')">×</button>' : '') +
             '<div class="comment-meta">' +
               '<span class="comment-author">' + esc(commentAuthorName(c)) + '</span>' +
               (commentTime ? '<span class="comment-time">' + esc(commentTime) + '</span>' : '') +
@@ -1912,7 +1914,7 @@ async function showDetail(id) {
         }).join('') + '</div>'
       : '';
     var commentFormHtml =
-      '<form class="comment-form" onsubmit="submitBucketComment(event, \'' + id + '\')">' +
+      '<form class="comment-form" onsubmit="submitBucketComment(event, \'' + jsString(id) + '\')">' +
         '<textarea name="content" placeholder="写一圈新的年轮…" onkeydown="handleCommentKeydown(event)"></textarea>' +
       '</form>';
     content.innerHTML =
@@ -1920,30 +1922,30 @@ async function showDetail(id) {
         '<h2>' + esc(meta.name || id) + '</h2>' +
       '</div>' +
       '<div class="detail-meta">' +
-        '<div class="field"><label>ID</label>' + id + '</div>' +
-        '<div class="field"><label>类型</label>' + (meta.type || 'dynamic') + '</div>' +
-        '<div class="field"><label>域</label>' + (meta.domain || []).join(', ') + '</div>' +
-        '<div class="field"><label>标签</label>' + (meta.tags || []).join(', ') + '</div>' +
+        '<div class="field"><label>ID</label>' + esc(id) + '</div>' +
+        '<div class="field"><label>类型</label>' + esc(meta.type || 'dynamic') + '</div>' +
+        '<div class="field"><label>域</label>' + esc((meta.domain || []).join(', ')) + '</div>' +
+        '<div class="field"><label>标签</label>' + esc((meta.tags || []).join(', ')) + '</div>' +
         '<div class="field"><label>事件效价</label>V' + (meta.valence || 0.5).toFixed(2) + '</div>' +
         '<div class="field"><label>唤醒度</label>A' + (meta.arousal || 0.3).toFixed(2) + '</div>' +
         '<div class="field"><label>模型视角</label>' + (meta.model_valence != null ? 'V' + meta.model_valence.toFixed(2) : '—') + '</div>' +
         '<div class="field"><label>重要度</label>' + (meta.importance || 5) + '/10</div>' +
         '<div class="field"><label>置信度</label>' + (meta.confidence != null ? meta.confidence.toFixed(2) : '—') + '</div>' +
-        '<div class="field"><label>周期</label>' + (meta.period || '—') + '</div>' +
-        '<div class="field"><label>日期</label>' + (meta.date || '—') + '</div>' +
+        '<div class="field"><label>周期</label>' + esc(meta.period || '—') + '</div>' +
+        '<div class="field"><label>日期</label>' + esc(meta.date || '—') + '</div>' +
         '<div class="field"><label>权重分</label>' + b.score.toFixed(4) + '</div>' +
         '<div class="field"><label>激活次数</label>' + (meta.activation_count || 0) + '</div>' +
         '<div class="field"><label>已解决</label>' + (meta.resolved ? '✓' : '—') + '</div>' +
         '<div class="field"><label>已消化</label>' + (meta.digested ? '✓' : '—') + '</div>' +
         '<div class="field"><label>钉选</label>' + (meta.pinned ? '✓' : '—') + '</div>' +
         '<div class="field"><label>Anchor</label>' + (meta.anchor ? '✓' : '—') + '</div>' +
-        '<div class="field"><label>创建</label>' + (meta.created || '—') + '</div>' +
-        '<div class="field"><label>最后活跃</label>' + (meta.last_active || '—') + '</div>' +
+        '<div class="field"><label>创建</label>' + esc(meta.created || '—') + '</div>' +
+        '<div class="field"><label>最后活跃</label>' + esc(meta.last_active || '—') + '</div>' +
       '</div>' +
       '<div class="bucket-content-block">' +
-        '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + id + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
+        '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + jsString(id) + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
         '<div id="bucket-content-view" class="detail-content">' + esc(b.content || '') + '</div>' +
-        '<form id="bucket-content-edit" class="content-edit-form hidden" onsubmit="submitBucketContentEdit(event, \'' + id + '\')">' +
+        '<form id="bucket-content-edit" class="content-edit-form hidden" onsubmit="submitBucketContentEdit(event, \'' + jsString(id) + '\')">' +
           '<textarea name="content">' + esc(b.content || '') + '</textarea>' +
           '<div class="content-edit-actions">' +
             '<button type="button" class="secondary" onclick="cancelBucketContentEdit()">取消</button>' +
@@ -1954,7 +1956,7 @@ async function showDetail(id) {
       commentsHtml +
       commentFormHtml;
   } catch (e) {
-    content.innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+    content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -1994,7 +1996,7 @@ async function submitBucketContentEdit(event, bucketId) {
   button.disabled = true;
   button.textContent = '保存中…';
   try {
-    var res = await authFetch(BASE + '/api/bucket/' + bucketId, {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId), {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({content: newContent})
@@ -2035,7 +2037,7 @@ async function submitBucketComment(event, bucketId) {
   if (button) button.disabled = true;
   textarea.disabled = true;
   try {
-    var res = await authFetch(BASE + '/api/bucket/' + bucketId + '/comments', {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId) + '/comments', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({content: content})
@@ -2057,7 +2059,7 @@ async function submitBucketComment(event, bucketId) {
 
 async function deleteBucketComment(bucketId, commentId) {
   try {
-    var res = await authFetch(BASE + '/api/bucket/' + bucketId + '/comments/' + commentId, {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId) + '/comments/' + encodeURIComponent(commentId), {
       method: 'DELETE'
     });
     if (!res) return;
@@ -2264,7 +2266,7 @@ async function loadPersona(sessionId) {
     personaSelectedSession = data.active_session_id || selected;
     renderPersona(data);
   } catch (e) {
-    content.innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+    content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -2418,6 +2420,15 @@ function escAttr(s) {
   return esc(String(s || '')).replace(/"/g, '&quot;');
 }
 
+function jsString(s) {
+  return String(s || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/</g, '\\x3C');
+}
+
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') closeDetail();
   if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
@@ -2499,7 +2510,7 @@ async function runBreathDebug() {
       '</div>';
     }).join('');
   } catch (e) {
-    results.innerHTML = '<div class="loading">请求失败: ' + e.message + '</div>';
+    results.innerHTML = '<div class="loading">请求失败: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -2527,12 +2538,12 @@ async function loadConfig() {
     document.getElementById('cfg-gateway-rounds').value = (cfg.gateway && cfg.gateway.skip_recent_rounds) ?? 5;
     document.getElementById('cfg-merge').value = cfg.merge_threshold || 75;
     document.getElementById('config-readonly').innerHTML =
-      'Transport: <strong>' + cfg.transport + '</strong><br>' +
-      'Buckets dir: <strong>' + cfg.buckets_dir + '</strong><br>' +
-      'Embedding effective URL: <strong>' + (cfg.embedding.effective_base_url || '未设置') + '</strong>';
+      'Transport: <strong>' + esc(cfg.transport) + '</strong><br>' +
+      'Buckets dir: <strong>' + esc(cfg.buckets_dir) + '</strong><br>' +
+      'Embedding effective URL: <strong>' + esc(cfg.embedding.effective_base_url || '未设置') + '</strong>';
   } catch (e) {
     document.getElementById('config-status').innerHTML =
-      '<span style="color:var(--negative)">加载失败: ' + e.message + '</span>';
+      '<span style="color:var(--negative)">加载失败: ' + esc(e.message) + '</span>';
   }
 }
 
@@ -2571,13 +2582,13 @@ async function saveConfig(persist) {
     if (!res) return;
     var result = await res.json();
     if (result.ok) {
-      status.innerHTML = '<span style="color:var(--positive)">✓ 已更新: ' + result.updated.join(', ') + '</span>';
+      status.innerHTML = '<span style="color:var(--positive)">✓ 已更新: ' + esc((result.updated || []).join(', ')) + '</span>';
       loadConfig();
     } else {
-      status.innerHTML = '<span style="color:var(--negative)">✗ ' + (result.error || '未知错误') + '</span>';
+      status.innerHTML = '<span style="color:var(--negative)">✗ ' + esc(result.error || '未知错误') + '</span>';
     }
   } catch (e) {
-    status.innerHTML = '<span style="color:var(--negative)">✗ 请求失败: ' + e.message + '</span>';
+    status.innerHTML = '<span style="color:var(--negative)">✗ 请求失败: ' + esc(e.message) + '</span>';
   }
 }
 
@@ -2671,24 +2682,28 @@ async function loadImportResults() {
       container.innerHTML = '<p style="color:var(--text-dim)">暂无记忆桶</p>';
       return;
     }
-    container.innerHTML = data.buckets.map(b => `
-      <div id="ir-${b.id}" style="background:var(--surface);border-radius:12px;padding:14px;margin:8px 0;">
+    container.innerHTML = data.buckets.map(b => {
+      const id = String(b.id || '');
+      const safeId = jsString(id);
+      return `
+      <div id="ir-${escAttr(id)}" style="background:var(--surface);border-radius:12px;padding:14px;margin:8px 0;">
         <div style="display:flex;justify-content:space-between;align-items:center;">
-          <b>${b.name || b.id}</b>
-          <span style="font-size:11px;color:var(--text-dim);">${b.type} | ${(b.domain||[]).join(',')} | imp:${b.importance}</span>
+          <b>${esc(b.name || id)}</b>
+          <span style="font-size:11px;color:var(--text-dim);">${esc(b.type || '')} | ${esc((b.domain||[]).join(','))} | imp:${esc(b.importance)}</span>
         </div>
-        <p style="font-size:13px;margin:6px 0;white-space:pre-wrap;">${b.content}</p>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">${(b.tags||[]).map(t=>'#'+t).join(' ')}</div>
+        <p style="font-size:13px;margin:6px 0;white-space:pre-wrap;">${esc(b.content)}</p>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">${esc((b.tags||[]).map(t=>'#'+t).join(' '))}</div>
         <div style="display:flex;gap:8px;">
-          <button onclick="reviewAction('${b.id}','pin')" title="固定为永久记忆">📌 固定</button>
-          <button onclick="reviewAction('${b.id}','anchor')" title="标为长期锚点">⚓ Anchor</button>
-          <button onclick="reviewAction('${b.id}','important')" title="标为重要">⭐ 重要</button>
-          <button onclick="reviewAction('${b.id}','noise')" title="标为噪声并resolve">🗑 噪声</button>
-          <button onclick="if(confirm('确定删除？'))reviewAction('${b.id}','delete')" title="彻底删除" style="color:var(--negative);">✕ 删除</button>
+          <button onclick="reviewAction('${safeId}','pin')" title="固定为永久记忆">📌 固定</button>
+          <button onclick="reviewAction('${safeId}','anchor')" title="标为长期锚点">⚓ Anchor</button>
+          <button onclick="reviewAction('${safeId}','important')" title="标为重要">⭐ 重要</button>
+          <button onclick="reviewAction('${safeId}','noise')" title="标为噪声并resolve">🗑 噪声</button>
+          <button onclick="if(confirm('确定删除？'))reviewAction('${safeId}','delete')" title="彻底删除" style="color:var(--negative);">✕ 删除</button>
         </div>
       </div>
-    `).join('');
-  } catch(e) { container.innerHTML = '<p style="color:var(--negative)">加载失败: ' + e.message + '</p>'; }
+    `;
+    }).join('');
+  } catch(e) { container.innerHTML = '<p style="color:var(--negative)">加载失败: ' + esc(e.message) + '</p>'; }
 }
 
 async function detectPatterns() {
@@ -2699,22 +2714,27 @@ async function detectPatterns() {
     if (!res) return;
     const data = await res.json();
     if (!data.patterns || !data.patterns.length) { container.innerHTML = '<p style="color:var(--text-dim)">未检测到高频模式</p>'; return; }
-    container.innerHTML = data.patterns.map(p => `
+    container.innerHTML = data.patterns.map(p => {
+      const ids = Array.isArray(p.bucket_ids) ? p.bucket_ids : [];
+      const firstId = jsString(ids[0] || '');
+      const idsJson = jsString(JSON.stringify(ids));
+      return `
       <div style="background:var(--surface);border-radius:12px;padding:14px;margin:8px 0;">
         <div style="display:flex;justify-content:space-between;align-items:center;">
-          <b>${p.pattern_name}</b>
-          <span style="font-size:12px;color:var(--text-dim);">出现 ${p.count} 次</span>
+          <b>${esc(p.pattern_name)}</b>
+          <span style="font-size:12px;color:var(--text-dim);">出现 ${esc(p.count)} 次</span>
         </div>
-        <p style="font-size:13px;margin:6px 0;">${p.pattern_content}</p>
+        <p style="font-size:13px;margin:6px 0;">${esc(p.pattern_content)}</p>
         <div style="display:flex;gap:8px;">
-          <button onclick="reviewAction('${p.bucket_ids[0]}','pin')">📌 固定</button>
-          <button onclick="reviewAction('${p.bucket_ids[0]}','anchor')">⚓ Anchor</button>
-          <button onclick="reviewAction('${p.bucket_ids[0]}','important')">⭐ 重要</button>
-          <button onclick="batchReview('${JSON.stringify(p.bucket_ids).replace(/'/g, "\\'").replace(/"/g, '&quot;')}','noise')">🗑 噪声</button>
+          <button onclick="reviewAction('${firstId}','pin')">📌 固定</button>
+          <button onclick="reviewAction('${firstId}','anchor')">⚓ Anchor</button>
+          <button onclick="reviewAction('${firstId}','important')">⭐ 重要</button>
+          <button onclick="batchReview('${idsJson}','noise')">🗑 噪声</button>
         </div>
       </div>
-    `).join('');
-  } catch(e) { container.innerHTML = '<p style="color:var(--negative)">检测失败: ' + e.message + '</p>'; }
+    `;
+    }).join('');
+  } catch(e) { container.innerHTML = '<p style="color:var(--negative)">检测失败: ' + esc(e.message) + '</p>'; }
 }
 
 async function reviewAction(bid, action) {

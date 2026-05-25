@@ -13,16 +13,23 @@ class DummyEmbeddingEngine:
     async def search_similar(self, query: str, top_k: int = 10):
         return []
 
+    def delete_embedding(self, bucket_id: str):
+        return None
+
 
 class CapturingEmbeddingEngine(DummyEmbeddingEngine):
     enabled = True
 
     def __init__(self):
         self.calls = []
+        self.deleted = []
 
     async def generate_and_store(self, bucket_id: str, content: str) -> bool:
         self.calls.append((bucket_id, content))
         return True
+
+    def delete_embedding(self, bucket_id: str):
+        self.deleted.append(bucket_id)
 
 
 class DummyDehydrator:
@@ -407,6 +414,31 @@ async def test_dashboard_comment_delete_only_allows_rain_dashboard_comments(monk
     assert deleted.status_code == 200
     assert remaining_ids == [haven["id"]]
     assert embedding_engine.calls[-1][0] == bucket_id
+
+
+@pytest.mark.asyncio
+async def test_import_review_delete_writes_tombstone_and_clears_embedding(
+    monkeypatch, bucket_mgr, test_config
+):
+    import server
+
+    bucket_id = await bucket_mgr.create(content="导入后复核删除。", name="复核删除")
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    response = await server.api_import_review(
+        DummyRequest({"decisions": [{"bucket_id": bucket_id, "action": "delete"}]})
+    )
+    payload = json.loads(response.body)
+    tombstone_path = os.path.join(test_config["buckets_dir"], ".tombstones", f"{bucket_id}.json")
+
+    assert response.status_code == 200
+    assert payload == {"applied": 1, "errors": 0}
+    assert await bucket_mgr.get(bucket_id) is None
+    assert os.path.exists(tombstone_path)
+    assert embedding_engine.deleted == [bucket_id]
 
 
 @pytest.mark.asyncio

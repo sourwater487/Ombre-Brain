@@ -3299,9 +3299,10 @@ async def api_import_review(request):
             elif action == "noise":
                 await bucket_mgr.update(bid, resolved=True, importance=1)
             elif action == "delete":
-                file_path = bucket_mgr._find_bucket_file(bid)
-                if file_path:
-                    os.remove(file_path)
+                deleted = await bucket_mgr.delete(bid)
+                if not deleted:
+                    raise ValueError("bucket not found")
+                embedding_engine.delete_embedding(bid)
             applied += 1
         except Exception as e:
             logger.warning(f"Review action failed for {bid}: {e}")
