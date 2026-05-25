@@ -381,6 +381,43 @@ def strip_wikilinks(text: str) -> str:
     return re.sub(r"\[\[([^\]]+)\]\]", r"\1", text) if text else text
 
 
+def bucket_text_for_embedding(bucket: dict) -> str:
+    """
+    Build the text sent to the embedding model for a bucket.
+    Include the human title because short title recalls are common.
+    """
+    if not isinstance(bucket, dict):
+        return ""
+
+    meta = bucket.get("metadata", {})
+    if not isinstance(meta, dict):
+        meta = {}
+
+    title = strip_wikilinks(str(meta.get("name") or "")).strip()
+    body = strip_wikilinks(str(bucket.get("content") or "")).strip()
+    comments = meta.get("comments", [])
+    comment_text = ""
+    if isinstance(comments, list):
+        comment_text = "\n".join(
+            strip_wikilinks(str(comment.get("content", ""))).strip()
+            for comment in comments
+            if isinstance(comment, dict) and str(comment.get("content", "")).strip()
+        )
+
+    parts = []
+    if title:
+        parts.append(f"Title: {title}")
+        if body:
+            parts.append(f"Content: {body}")
+    elif body:
+        parts.append(body)
+
+    if comment_text:
+        parts.append(f"Comments:\n{comment_text}" if title else comment_text)
+
+    return "\n".join(parts).strip()
+
+
 def sanitize_name(name: str) -> str:
     """
     Sanitize bucket name, keeping only safe characters.

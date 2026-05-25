@@ -4,7 +4,7 @@ Backfill embeddings for existing buckets.
 为存量桶批量生成 embedding。
 
 Usage:
-    OMBRE_BUCKETS_DIR=/data OMBRE_API_KEY=xxx python backfill_embeddings.py [--batch-size 20] [--dry-run]
+    OMBRE_BUCKETS_DIR=/data OMBRE_API_KEY=xxx python backfill_embeddings.py [--batch-size 20] [--dry-run] [--refresh-all]
 
 Each batch calls Gemini embedding API once per bucket.
 Free tier: 1500 requests/day, so ~75 batches of 20.
@@ -16,12 +16,12 @@ import sys
 import time
 
 sys.path.insert(0, ".")
-from utils import load_config
+from utils import bucket_text_for_embedding, load_config
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
 
 
-async def backfill(batch_size: int = 20, dry_run: bool = False):
+async def backfill(batch_size: int = 20, dry_run: bool = False, refresh_all: bool = False):
     config = load_config()
     bucket_mgr = BucketManager(config)
     engine = EmbeddingEngine(config)
@@ -33,14 +33,15 @@ async def backfill(batch_size: int = 20, dry_run: bool = False):
     all_buckets = await bucket_mgr.list_all(include_archive=True)
     print(f"Total buckets: {len(all_buckets)}")
 
-    # Find buckets without embeddings
+    # Find buckets without embeddings, or refresh all when the embedding text changed.
     missing = []
     for b in all_buckets:
-        emb = await engine.get_embedding(b["id"])
-        if emb is None:
+        emb = None if refresh_all else await engine.get_embedding(b["id"])
+        if refresh_all or emb is None:
             missing.append(b)
 
-    print(f"Missing embeddings: {len(missing)}")
+    label = "Buckets to refresh" if refresh_all else "Missing embeddings"
+    print(f"{label}: {len(missing)}")
 
     if dry_run:
         for b in missing[:10]:
@@ -61,8 +62,8 @@ async def backfill(batch_size: int = 20, dry_run: bool = False):
 
         for b in batch:
             name = b["metadata"].get("name", b["id"])
-            content = b.get("content", "")
-            if not content or not content.strip():
+            content = bucket_text_for_embedding(b)
+            if not content:
                 print(f"  SKIP (empty): {b['id']} ({name})")
                 continue
 
@@ -89,5 +90,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--refresh-all", action="store_true")
     args = parser.parse_args()
-    asyncio.run(backfill(batch_size=args.batch_size, dry_run=args.dry_run))
+    asyncio.run(backfill(batch_size=args.batch_size, dry_run=args.dry_run, refresh_all=args.refresh_all))

@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
 from identity import identity_names
-from utils import load_config, strip_wikilinks
+from utils import bucket_text_for_embedding, load_config
 
 
 RELATIONSHIP_WEATHER_TAGS = {"relationship_weather", "daily_impression", "weekly_impression"}
@@ -62,19 +62,6 @@ def backup_file(path: str, backup_dir: Path) -> str:
         target = backup_dir / f"{source.stem}_{utc_stamp()}{source.suffix}"
     shutil.copy2(source, target)
     return str(target)
-
-
-def bucket_text_for_embedding(bucket: dict) -> str:
-    meta = bucket.get("metadata", {})
-    comments = meta.get("comments", [])
-    comment_text = ""
-    if isinstance(comments, list):
-        comment_text = "\n".join(
-            str(comment.get("content", ""))
-            for comment in comments
-            if isinstance(comment, dict)
-        )
-    return f"{strip_wikilinks(bucket.get('content', '')).strip()}\n{comment_text}".strip()
 
 
 def comment_author_name(config: dict) -> str:

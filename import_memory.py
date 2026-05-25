@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from utils import count_tokens_approx, now_iso
+from utils import bucket_text_for_embedding, count_tokens_approx, now_iso
 
 logger = logging.getLogger("ombre_brain.import")
 
@@ -563,7 +563,16 @@ class ImportEngine:
                     )
                     if self.embedding_engine:
                         try:
-                            await self.embedding_engine.generate_and_store(bucket_id, item["content"])
+                            await self.embedding_engine.generate_and_store(
+                                bucket_id,
+                                bucket_text_for_embedding(
+                                    {
+                                        "id": bucket_id,
+                                        "content": item["content"],
+                                        "metadata": {"name": item.get("name")},
+                                    }
+                                ),
+                            )
                         except Exception:
                             pass
                     self.state.data["memories_raw"] += 1
@@ -696,7 +705,10 @@ class ImportEngine:
                     )
                     if self.embedding_engine:
                         try:
-                            await self.embedding_engine.generate_and_store(bucket["id"], merged)
+                            await self.embedding_engine.generate_and_store(
+                                bucket["id"],
+                                bucket_text_for_embedding({**bucket, "content": merged}),
+                            )
                         except Exception:
                             pass
                     return True
@@ -716,7 +728,16 @@ class ImportEngine:
         )
         if self.embedding_engine:
             try:
-                await self.embedding_engine.generate_and_store(bucket_id, content)
+                await self.embedding_engine.generate_and_store(
+                    bucket_id,
+                    bucket_text_for_embedding(
+                        {
+                            "id": bucket_id,
+                            "content": content,
+                            "metadata": {"name": name},
+                        }
+                    ),
+                )
             except Exception:
                 pass
         return False

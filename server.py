@@ -69,7 +69,14 @@ from memory_edges import MemoryEdgeStore
 from persona_engine import PersonaStateEngine
 from reflection_engine import ReflectionEngine
 from gateway import GatewayService
-from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx, now_iso
+from utils import (
+    bucket_text_for_embedding,
+    count_tokens_approx,
+    load_config,
+    now_iso,
+    setup_logging,
+    strip_wikilinks,
+)
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -1010,7 +1017,7 @@ async def _refresh_bucket_embedding(bucket_id: str) -> bool:
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
         return False
-    return await embedding_engine.generate_and_store(bucket_id, _bucket_text_for_embedding(bucket))
+    return await embedding_engine.generate_and_store(bucket_id, bucket_text_for_embedding(bucket))
 
 
 async def _find_readonly_related_bucket(
@@ -1117,7 +1124,7 @@ async def _merge_or_create(
                 )
                 # --- Update embedding after merge ---
                 try:
-                    await embedding_engine.generate_and_store(bucket["id"], merged)
+                    await _refresh_bucket_embedding(bucket["id"])
                 except Exception:
                     pass
                 return bucket["id"], bucket["metadata"].get("name", bucket["id"]), True, related_bucket
@@ -1135,7 +1142,7 @@ async def _merge_or_create(
     )
     # --- Generate embedding for new bucket ---
     try:
-        await embedding_engine.generate_and_store(bucket_id, content)
+        await _refresh_bucket_embedding(bucket_id)
     except Exception:
         pass
     return bucket_id, name or bucket_id, False, related_bucket
@@ -1875,7 +1882,7 @@ async def hold(
             bucket_type="feel",
         )
         try:
-            await embedding_engine.generate_and_store(bucket_id, content)
+            await _refresh_bucket_embedding(bucket_id)
         except Exception:
             pass
         return f"🫧whisper→{bucket_id}"
@@ -1956,7 +1963,7 @@ async def hold(
             pinned=True,
         )
         try:
-            await embedding_engine.generate_and_store(bucket_id, content)
+            await _refresh_bucket_embedding(bucket_id)
         except Exception:
             pass
         _queue_memory_enrichment(bucket_id)
@@ -2166,10 +2173,10 @@ async def trace(
     if not success:
         return f"修改失败: {bucket_id}"
 
-    # Re-generate embedding if content changed
-    if "content" in updates:
+    # Re-generate embedding if content or title changed.
+    if "content" in updates or "name" in updates:
         try:
-            await embedding_engine.generate_and_store(bucket_id, updates["content"])
+            await _refresh_bucket_embedding(bucket_id)
         except Exception:
             pass
 
@@ -2509,7 +2516,7 @@ async def api_create_memory(request):
         status = "created"
 
     if embedding_engine.enabled:
-        embedding_status = "stored" if await embedding_engine.generate_and_store(bucket_id, content) else "failed"
+        embedding_status = "stored" if await _refresh_bucket_embedding(bucket_id) else "failed"
     else:
         embedding_status = "disabled"
 
