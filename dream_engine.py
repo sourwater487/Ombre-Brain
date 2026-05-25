@@ -239,13 +239,18 @@ class DreamEngine:
 
     def _bucket_created_local(self, bucket: dict) -> datetime | None:
         meta = bucket.get("metadata", {}) or {}
-        raw = meta.get("created") or meta.get("updated_at")
-        if not raw:
+        candidates = []
+        for key in ("created", "updated_at"):
+            raw = meta.get(key)
+            if not raw:
+                continue
+            try:
+                candidates.append(_parse_dt(str(raw)).astimezone(self.tz))
+            except Exception:
+                continue
+        if not candidates:
             return None
-        try:
-            return _parse_dt(str(raw)).astimezone(self.tz)
-        except Exception:
-            return None
+        return max(candidates)
 
     def _is_material_bucket(self, bucket: dict, start: datetime, end: datetime) -> bool:
         meta = bucket.get("metadata", {}) or {}
@@ -272,7 +277,7 @@ class DreamEngine:
         tags = {str(tag).lower() for tag in meta.get("tags", []) or []}
         whisper_bonus = 0.15 if "whisper" in tags else 0.0
         score = 0.45 * recency + 0.30 * arousal + 0.20 * importance + whisper_bonus
-        return (score, str(meta.get("created") or ""))
+        return (score, created.isoformat())
 
     async def select_materials(self, bucket_mgr, now: datetime | None = None) -> tuple[list[dict], dict | None]:
         now_local = self._now(now)

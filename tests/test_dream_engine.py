@@ -107,6 +107,40 @@ async def test_dream_skips_when_recent_materials_are_not_enough(test_config):
 
 
 @pytest.mark.asyncio
+async def test_dream_materials_use_newer_created_or_updated_at_but_not_last_active(test_config):
+    cfg = _dream_config(test_config, min_material_count=5)
+    mgr = BucketManager(cfg)
+    now = datetime(2026, 5, 25, 3, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    for index in range(4):
+        await mgr.create(
+            bucket_id=f"recent-memory-{index}",
+            content=f"最近普通记忆 {index}",
+            created=(now - timedelta(hours=index + 1)).isoformat(timespec="seconds"),
+        )
+    updated_id = await mgr.create(
+        bucket_id="old-created-recent-updated",
+        content="旧记忆刚刚被真正改写，仍可作为白天残留。",
+        created=(now - timedelta(days=10)).isoformat(timespec="seconds"),
+        updated_at=(now - timedelta(hours=1)).isoformat(timespec="seconds"),
+    )
+    last_active_id = await mgr.create(
+        bucket_id="old-created-recent-last-active",
+        content="这条只是最近被召回，不该靠 last_active 进入梦。",
+        created=(now - timedelta(days=10)).isoformat(timespec="seconds"),
+        last_active=(now - timedelta(hours=1)).isoformat(timespec="seconds"),
+        updated_at=(now - timedelta(days=10)).isoformat(timespec="seconds"),
+    )
+
+    materials, _ = await DreamEngine(cfg).select_materials(mgr, now)
+    material_ids = {bucket["id"] for bucket in materials}
+
+    assert updated_id in material_ids
+    assert last_active_id not in material_ids
+    assert len(materials) == 5
+
+
+@pytest.mark.asyncio
 async def test_run_due_skips_outside_east_eight_dream_window(test_config):
     cfg = _dream_config(test_config)
     mgr = BucketManager(cfg)
