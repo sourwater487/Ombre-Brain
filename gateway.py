@@ -425,7 +425,9 @@ class GatewayService:
             )
             if self._should_inject_interval(session_id, self.recent_context_interval_rounds):
                 recent_context, recent_context_ids = await self._build_recent_context_block(
-                    all_buckets, exclude_bucket_ids=recent_bucket_ids
+                    all_buckets,
+                    session_id,
+                    exclude_bucket_ids=recent_bucket_ids,
                 )
             recalled_buckets = await self._select_dynamic_buckets(
                 current_user_query,
@@ -1577,13 +1579,17 @@ class GatewayService:
     async def _build_recent_context_block(
         self,
         all_buckets: list[dict],
+        session_id: str,
         exclude_bucket_ids: set[str] | None = None,
     ) -> tuple[str, list[str]]:
-        cutoff = datetime.now() - timedelta(hours=self.head_recent_hours)
+        now = datetime.now()
+        cutoff = now - timedelta(hours=self.head_recent_hours)
+        window_seconds = max(self.head_recent_hours * 3600.0, 1.0)
         excluded_ids = exclude_bucket_ids or set()
         recent_buckets = []
         for bucket in all_buckets:
-            if bucket.get("id") in excluded_ids:
+            bucket_id = bucket.get("id")
+            if bucket_id in excluded_ids:
                 continue
             meta = bucket.get("metadata", {})
             if meta.get("type") == "feel":
@@ -1592,13 +1598,29 @@ class GatewayService:
                 continue
             created = self._parse_iso(meta.get("created") or meta.get("last_active"))
             if created and created >= cutoff:
-                recent_buckets.append(bucket)
+                freshness_score = self._clamp(
+                    1.0 - (now - created).total_seconds() / window_seconds
+                )
+                cooldown_multiplier = self.state_store.get_cooldown_multiplier(
+                    session_id=session_id,
+                    bucket_id=bucket_id,
+                    cooldown_hours=self.cooldown_hours,
+                    cooldown_floor=self.cooldown_floor,
+                    now=now,
+                )
+                recent_buckets.append(
+                    {
+                        "bucket": bucket,
+                        "score": freshness_score * cooldown_multiplier,
+                        "created": created,
+                    }
+                )
 
         recent_buckets.sort(
-            key=lambda bucket: bucket.get("metadata", {}).get("created", ""),
+            key=lambda item: (item["score"], item["created"]),
             reverse=True,
         )
-        selected = recent_buckets[:6]
+        selected = [item["bucket"] for item in recent_buckets[:6]]
         return (
             await self._summarize_buckets(selected, self.recent_budget),
             [bucket["id"] for bucket in selected],
