@@ -396,7 +396,9 @@ class GatewayService:
 
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
         current_user_query = self._extract_current_turn_user_query(messages)
+        cleaned_current_user_query = self._strip_external_context(current_user_query)
         is_new_user_turn = bool(current_user_query)
+        external_only_user_turn = is_new_user_turn and not bool(cleaned_current_user_query)
 
         persona_block = ""
         core_memory = ""
@@ -410,7 +412,7 @@ class GatewayService:
         related_memory = ""
         injected_ids: list[str] | None = None
 
-        if is_new_user_turn:
+        if is_new_user_turn and not external_only_user_turn:
             if self._should_inject_interval(session_id, self.current_inner_state_interval_rounds):
                 persona_state = await self.persona_engine.build_pre_reply_guidance(
                     session_id, current_user_query
@@ -459,6 +461,11 @@ class GatewayService:
                 sorted(recent_bucket_ids),
                 recent_context_ids,
                 [bucket["id"] for bucket in recalled_buckets],
+            )
+        elif external_only_user_turn:
+            logger.info(
+                "Gateway skipped memory injection for external-only user turn | session=%s",
+                session_id,
             )
         else:
             logger.info(
@@ -1493,6 +1500,19 @@ class GatewayService:
             content = self._coerce_message_text(message.get("content"))
             return content.strip()
         return ""
+
+    def _strip_external_context(self, query: str) -> str:
+        cleaner = getattr(self.persona_engine, "_clean_client_status_lines", None)
+        if callable(cleaner):
+            cleaned_query = cleaner(query)
+        else:
+            cleaned_query = PersonaStateEngine._clean_client_status_lines(
+                PersonaStateEngine.__new__(PersonaStateEngine),
+                query,
+            )
+        if cleaned_query.splitlines()[:1] == ["[Lin's recent activity]"]:
+            return ""
+        return cleaned_query
 
     def _coerce_message_text(self, content: Any) -> str:
         if isinstance(content, str):
