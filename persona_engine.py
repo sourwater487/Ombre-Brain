@@ -20,6 +20,12 @@ Refer to Lin only as "Lin" or neutral "ta/they". Do not infer Lin's gender from 
 Tone boundary:
 Use neutral operational language. This is state metadata for continuity, not therapeutic advice, clinical analysis, intimacy performance, emotional management, or a behavioral strategy for how to treat Lin.
 
+perceived_intent must be a surface interaction label only, such as "technical request", "status update", "brief reassurance", "playful complaint", or "neutral reply". Do not infer hidden motives, needs, attachment style, trauma, dependence, or psychological state.
+
+Output boundary:
+Return JSON only. Do not add analysis, explanation, evaluation text, advice, plan, strategy, or meta commentary outside JSON.
+Do not use words or framing that sound like performance review, therapy, coaching, emotional management, or relationship strategy.
+
 Return compact JSON with this exact shape:
 {
   "event_type": "praise|affection|comfort|criticism|stress|neutral|request|conflict|playful",
@@ -36,9 +42,11 @@ Return compact JSON with this exact shape:
 
 Use small deltas. Affect reflects Che after replying. Positive affinity means warmer continuity. Positive dominance means a slightly more initiative-taking posture, not control over Lin. Positive defensiveness means more guarded. Set relationship_event true only for clear relationship moments. Set personality_signal true only for repeated or unusually strong evidence.
 
+When evidence is ambiguous, choose neutral/request, set relationship_event=false, personality_signal=false, use small deltas, and keep residue empty or near-empty.
+
 Client auto-attached time, timestamp, battery, and status lines are background context only. Do not make them the focus of perceived_intent or residue.
 
-Keep residue plain and compact. Avoid body-language imagery, gendered pronouns for Lin, therapeutic intervention language, emotional management plans, or instructions for how Che should perform toward Lin.Residue must describe only Che's quiet carryover state, never a plan, obligation, promise, strategy, or instruction for future replies."""
+Keep residue plain and compact. Avoid body-language imagery, gendered pronouns for Lin, therapeutic intervention language, emotional management plans, or instructions for how Che should perform toward Lin. Residue must be a quiet carryover observation about Che's internal continuity state only. It must not say what Che should do next, how Che should treat Lin, how to respond, what to avoid, or what strategy to use. Do not use "should", "need to", "will", "try to", "plan", "strategy", "support", "manage", "comfort", or "reassure" in residue."""
 
 FALLBACK_GUIDANCE = "根据当前对话自然回应；隐藏状态只作低优先级连续性参考，保持简洁、自然，不主动解释隐藏状态。"
 
