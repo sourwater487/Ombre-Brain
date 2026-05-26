@@ -86,12 +86,29 @@ class GatewayService:
             0, int(self.gateway_cfg.get("recent_context_interval_rounds", 1))
         )
         self.recalled_budget = int(self.gateway_cfg.get("recalled_memory_budget", 400))
+        self.recalled_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("recalled_memory_interval_rounds", 1))
+        )
         self.relationship_weather_budget = int(self.gateway_cfg.get("relationship_weather_budget", 220))
         self.favorite_memory_budget = int(self.gateway_cfg.get("favorite_memory_budget", 180))
         self.favorite_memory_max_cards = max(0, int(self.gateway_cfg.get("favorite_memory_max_cards", 1)))
 
-        
         self.related_memory_budget = int(self.gateway_cfg.get("related_memory_budget", 220))
+        self.related_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("related_memory_interval_rounds", 1))
+        )
+        self.related_memory_skip_recent_rounds = max(
+            0, int(self.gateway_cfg.get("related_memory_skip_recent_rounds", 12))
+        )
+        self.related_memory_cooldown_hours = max(
+            0.0, float(self.gateway_cfg.get("related_memory_cooldown_hours", 48))
+        )
+        self.related_memory_cooldown_floor = self._clamp(
+            float(self.gateway_cfg.get("related_memory_cooldown_floor", 0.05))
+        )
+        self.related_memory_max_cards = max(
+            0, int(self.gateway_cfg.get("related_memory_max_cards", 1))
+        )
 
         self.core_memory_interval_rounds = max(0, int(self.gateway_cfg.get("core_memory_interval_rounds", 0)))
         self.current_inner_state_interval_rounds = max(
@@ -410,6 +427,7 @@ class GatewayService:
         favorite_memory = ""
         favorite_ids: list[str] = []
         related_memory = ""
+        related_target_ids: list[str] = []
         injected_ids: list[str] | None = None
 
         if is_new_user_turn and not external_only_user_turn:
@@ -431,13 +449,16 @@ class GatewayService:
                     session_id,
                     exclude_bucket_ids=recent_bucket_ids,
                 )
-            recalled_buckets = await self._select_dynamic_buckets(
-                current_user_query,
-                session_id,
-                all_buckets,
-                exclude_bucket_ids=recent_bucket_ids,
-            )
-            recalled_memory = await self._summarize_buckets(recalled_buckets, self.recalled_budget)
+            if self._should_inject_interval(session_id, self.recalled_memory_interval_rounds):
+                recalled_buckets = await self._select_dynamic_buckets(
+                    current_user_query,
+                    session_id,
+                    all_buckets,
+                    exclude_bucket_ids=recent_bucket_ids,
+                )
+                recalled_memory = await self._summarize_buckets(
+                    recalled_buckets, self.recalled_budget
+                )
 
             if self._should_inject_interval(session_id, self.relationship_weather_interval_rounds):
                 relationship_weather = await self._build_relationship_weather_block(all_buckets)
@@ -447,21 +468,12 @@ class GatewayService:
                     all_buckets, session_id
                 )
 
-            related_memory = await self._build_related_memory_block(recalled_buckets, all_buckets)
-            injected_ids = list(
-                dict.fromkeys(
-                    recent_context_ids
-                    + [bucket["id"] for bucket in recalled_buckets]
-                    + favorite_ids
+            if recalled_buckets and self._should_inject_interval(
+                session_id, self.related_memory_interval_rounds
+            ):
+                related_memory, related_target_ids = await self._build_related_memory_block(
+                    recalled_buckets, all_buckets, session_id
                 )
-            )
-            logger.info(
-                "Gateway memory suppression | session=%s recent_suppressed=%s recent_context=%s recalled=%s",
-                session_id,
-                sorted(recent_bucket_ids),
-                recent_context_ids,
-                [bucket["id"] for bucket in recalled_buckets],
-            )
         elif external_only_user_turn:
             logger.info(
                 "Gateway skipped memory injection for external-only user turn | session=%s",
@@ -482,6 +494,28 @@ class GatewayService:
             favorite_memory=favorite_memory,
             related_memory=related_memory,
         )
+        if is_new_user_turn and not external_only_user_turn:
+            related_target_ids = [
+                target_id
+                for target_id in related_target_ids
+                if f"-> {target_id} " in dynamic_context
+            ]
+            injected_ids = list(
+                dict.fromkeys(
+                    recent_context_ids
+                    + [bucket["id"] for bucket in recalled_buckets]
+                    + favorite_ids
+                    + related_target_ids
+                )
+            )
+            logger.info(
+                "Gateway memory suppression | session=%s recent_suppressed=%s recent_context=%s recalled=%s related=%s",
+                session_id,
+                sorted(recent_bucket_ids),
+                recent_context_ids,
+                [bucket["id"] for bucket in recalled_buckets],
+                related_target_ids,
+            )
 
         forward_payload = deepcopy(payload)
         forward_payload["model"] = model
@@ -1753,28 +1787,58 @@ class GatewayService:
         self,
         recalled_buckets: list[dict],
         all_buckets: list[dict],
-    ) -> str:
-        if self.related_memory_budget <= 0 or not recalled_buckets:
-            return ""
+        session_id: str,
+    ) -> tuple[str, list[str]]:
+        if (
+            self.related_memory_budget <= 0
+            or self.related_memory_max_cards <= 0
+            or not recalled_buckets
+        ):
+            return "", []
         recalled_ids = [bucket["id"] for bucket in recalled_buckets if bucket.get("id")]
         edges = self.memory_edge_store.related_edges(
             recalled_ids,
             min_confidence=self.edge_min_confidence,
-            limit_per_source=1,
+            limit_per_source=max(1, len(all_buckets)),
         )
         if not edges:
-            return ""
+            return "", []
         bucket_map = {bucket["id"]: bucket for bucket in all_buckets}
         recalled_set = set(recalled_ids)
-        remaining = self.related_memory_budget
-        parts = []
+        recent_ids = self.state_store.get_recent_bucket_ids(
+            session_id, self.related_memory_skip_recent_rounds
+        )
+        now = datetime.now()
+        candidates = []
         for edge in edges:
             target_id = edge.get("target")
-            if target_id in recalled_set:
+            if target_id in recalled_set or target_id in recent_ids:
+                continue
+            if target_id not in bucket_map:
+                continue
+            cooldown_multiplier = self.state_store.get_cooldown_multiplier(
+                session_id=session_id,
+                bucket_id=target_id,
+                cooldown_hours=self.related_memory_cooldown_hours,
+                cooldown_floor=self.related_memory_cooldown_floor,
+                now=now,
+            )
+            candidates.append(
+                (
+                    float(edge.get("confidence", 0.0)) * cooldown_multiplier,
+                    edge,
+                )
+            )
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        remaining = self.related_memory_budget
+        parts = []
+        related_target_ids = []
+        for _score, edge in candidates:
+            target_id = edge.get("target")
+            if target_id in related_target_ids:
                 continue
             target = bucket_map.get(target_id)
-            if not target:
-                continue
             summary = await self._summarize_bucket(target)
             reason = edge.get("reason") or edge.get("relation_type", "relates_to")
             line = (
@@ -1789,10 +1853,14 @@ class GatewayService:
                 line = self._trim_text(line, remaining)
                 tokens = count_tokens_approx(line)
             parts.append(line)
+            related_target_ids.append(target_id)
             remaining -= tokens
-            if remaining <= 0:
+            if (
+                remaining <= 0
+                or len(related_target_ids) >= self.related_memory_max_cards
+            ):
                 break
-        return "\n".join(parts)
+        return "\n".join(parts), related_target_ids
 
     async def _select_dynamic_buckets(
         self,
