@@ -245,6 +245,8 @@ reflection:
   enrich_backfill_limit: 5
   base_url: ""                    # empty = persona.base_url
   model: ""                       # empty = persona.model
+  low_risk_model: "deepseek-v4-flash"
+  high_risk_model: "deepseek-v4-pro"
   thinking_mode: "disabled"
   # api_key: ""                   # empty = persona.api_key; OMBRE_REFLECTION_API_KEY overrides
   temperature: 0.1

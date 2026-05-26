@@ -165,6 +165,8 @@ def load_config(config_path: str = None) -> dict:
             "enrich_backfill_limit": 5,
             "base_url": "",
             "model": "",
+            "low_risk_model": "",
+            "high_risk_model": "",
             "api_key": "",
             "thinking_mode": "",
             "temperature": 0.1,

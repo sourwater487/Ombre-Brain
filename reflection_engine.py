@@ -163,6 +163,12 @@ class ReflectionEngine:
         self.enrich_on_write = bool(cfg.get("enrich_on_write", True))
         self.base_url = cfg.get("base_url") or persona_cfg.get("base_url") or dehy_cfg.get("base_url", "")
         self.model = cfg.get("model") or persona_cfg.get("model") or dehy_cfg.get("model", "deepseek-chat")
+        self.low_risk_model = (
+            cfg.get("low_risk_model") or cfg.get("model") or dehy_cfg.get("model") or self.model
+        )
+        self.high_risk_model = (
+            cfg.get("high_risk_model") or cfg.get("model") or persona_cfg.get("model") or self.model
+        )
         self.api_key = (
             os.environ.get("OMBRE_REFLECTION_API_KEY", "")
             or cfg.get("api_key", "")
@@ -547,7 +553,7 @@ class ReflectionEngine:
             "candidate_memories": [self._memory_payload(item, content_limit=360) for item in candidates],
         }
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=self.low_risk_model,
             messages=[
                 {"role": "system", "content": CLASSIFY_PROMPT},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -561,7 +567,7 @@ class ReflectionEngine:
     async def _api_reflect(self, period: str, key: str, materials: dict) -> dict:
         payload = {"period": period, "date": key, **materials}
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=self.high_risk_model,
             messages=[
                 {"role": "system", "content": REFLECT_PROMPT},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -773,7 +779,7 @@ class ReflectionEngine:
             }
             try:
                 response = await self.client.chat.completions.create(
-                    model=self.model,
+                    model=self.low_risk_model,
                     messages=[
                         {"role": "system", "content": DIARY_MEMORY_PROMPT},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
