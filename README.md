@@ -691,6 +691,40 @@ breath(domain="whisper", max_tokens=1200)
 3. 联想浮现来自 memory_edges 的显式关系边；embedding 相似边主要用于检索和图谱，不等于手写关系。`memory_nodes.sqlite` 的 facets 目前是规则估算，不是 LLM 提取。
 ```
 
+#### `inspect_diffusion(...) -> dict`
+
+只读诊断某个 query 为什么点亮这些联想记忆。不创建 bucket，不 touch 记忆；会像 `breath(query=...)` 一样刷新 `memory_nodes.sqlite` 里的节点索引，方便查看当前 salience / facets。
+
+输入：
+
+```text
+query: str
+max_seeds: int = 3
+max_hits: int = 5
+edge_min_confidence: float = 0.55
+```
+
+返回：
+
+```json
+{
+  "query_facets": {"affect": {}, "relation": {}, "scene": {}, "topic": {}},
+  "seeds": [
+    {"bucket_id": "...", "seed_score": 1.0, "salience": 1.08, "resonance": 1.0}
+  ],
+  "hits": [
+    {
+      "bucket_id": "...",
+      "score": 0.42,
+      "salience": 1.05,
+      "resonance": 1.12,
+      "path": "seed --supports:0.90--> target",
+      "paths": []
+    }
+  ]
+}
+```
+
 #### `resurface(...) -> str`
 
 输入：

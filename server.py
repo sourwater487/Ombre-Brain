@@ -50,6 +50,7 @@ import re
 import secrets
 import time
 from base64 import b64decode
+from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
@@ -71,6 +72,7 @@ from import_memory import ImportEngine
 from memory_diffusion import (
     diffuse_memory,
     diffusion_options_from_config,
+    format_diffusion_trace,
     path_has_caution,
     seed_scores_for_buckets,
 )
@@ -1412,6 +1414,221 @@ async def _build_mcp_diffused_memory_block(
             continue
 
     return "\n---\n".join(parts)
+
+
+async def _collect_diffusion_seed_buckets(query: str, max_seeds: int) -> tuple[list[dict], list[str]]:
+    warnings = []
+    matches: list[dict] = []
+    matched_ids: set[str] = set()
+    search_limit = max(max_seeds, 20)
+
+    try:
+        for bucket in await bucket_mgr.search(query, limit=search_limit):
+            if not bucket or bucket.get("metadata", {}).get("type") == "feel":
+                continue
+            bucket_id = bucket.get("id")
+            if not bucket_id or bucket_id in matched_ids:
+                continue
+            candidate = dict(bucket)
+            candidate["_inspect_source"] = "keyword"
+            matches.append(candidate)
+            matched_ids.add(bucket_id)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion keyword search failed / 扩散诊断关键词检索失败: {e}")
+        warnings.append(f"keyword_search_failed: {e}")
+
+    try:
+        vector_results = await embedding_engine.search_similar(query, top_k=search_limit)
+        for bucket_id, sim_score in vector_results:
+            if bucket_id in matched_ids:
+                continue
+            if sim_score <= 0.5:
+                continue
+            bucket = await bucket_mgr.get(bucket_id)
+            if not bucket or bucket.get("metadata", {}).get("type") == "feel":
+                continue
+            candidate = dict(bucket)
+            candidate["score"] = round(sim_score * 100, 2)
+            candidate["vector_match"] = True
+            candidate["_inspect_source"] = "vector"
+            matches.append(candidate)
+            matched_ids.add(bucket_id)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion vector search failed / 扩散诊断向量检索失败: {e}")
+        warnings.append(f"vector_search_failed: {e}")
+
+    return matches[:max_seeds], warnings
+
+
+def _inspect_bucket_label(bucket: dict | None, bucket_id: str) -> str:
+    if not bucket:
+        return bucket_id
+    meta = bucket.get("metadata", {}) or {}
+    return str(meta.get("name") or bucket.get("name") or bucket_id)
+
+
+def _inspect_path_payload(path, bucket_map: dict[str, dict]) -> dict:
+    return {
+        "score": round(float(path.score), 4),
+        "trace": format_diffusion_trace(path, bucket_map, use_labels=True),
+        "nodes": list(path.nodes),
+        "steps": [
+            {
+                "source": step.source,
+                "target": step.target,
+                "direction": step.direction,
+                "relation_type": step.relation_type,
+                "confidence": step.confidence,
+                "reason": step.reason,
+            }
+            for step in path.steps
+        ],
+    }
+
+
+@mcp.tool()
+async def inspect_diffusion(
+    query: str,
+    max_seeds: int = 3,
+    max_hits: int = 5,
+    edge_min_confidence: float = 0.55,
+) -> dict:
+    """只读诊断 query 如何沿 memory_edges 点亮联想记忆；不 touch bucket，不创建记忆。"""
+    query = str(query or "").strip()
+    if not query:
+        return {"status": "error", "error": "query_required"}
+
+    max_seeds = _int_between(max_seeds, 3, 1, 20)
+    max_hits = _int_between(max_hits, 5, 0, 20)
+    edge_min_confidence = _float_between(edge_min_confidence, 0.55, 0.0, 1.0)
+    node_facets_enabled = _node_facets_enabled(config)
+    query_facets = {}
+    if node_facets_enabled:
+        try:
+            query_facets = memory_node_store.facets_for_text(query)
+        except Exception as e:
+            logger.warning(f"Inspect diffusion query facets failed / 扩散诊断 query facets 失败: {e}")
+
+    seed_buckets, warnings = await _collect_diffusion_seed_buckets(query, max_seeds)
+    if not seed_buckets:
+        return {
+            "status": "ok",
+            "query": query,
+            "node_facets_enabled": node_facets_enabled,
+            "query_facets": query_facets,
+            "seeds": [],
+            "hits": [],
+            "warnings": warnings,
+        }
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion list buckets failed / 扩散诊断列桶失败: {e}")
+        all_buckets = []
+        warnings.append(f"list_buckets_failed: {e}")
+
+    bucket_map = {bucket["id"]: bucket for bucket in all_buckets if bucket.get("id")}
+    for seed in seed_buckets:
+        if seed.get("id"):
+            bucket_map.setdefault(seed["id"], seed)
+
+    node_salience = None
+    node_resonance = None
+    if node_facets_enabled:
+        try:
+            memory_node_store.bulk_upsert(list(bucket_map.values()))
+            node_salience = _node_salience_lookup
+            node_resonance = _node_resonance_lookup(query_facets)
+        except Exception as e:
+            logger.warning(f"Inspect diffusion node refresh failed / 扩散诊断节点刷新失败: {e}")
+            warnings.append(f"node_refresh_failed: {e}")
+            node_salience = None
+            node_resonance = None
+
+    edges = [
+        edge
+        for edge in memory_edge_store.list_edges()
+        if float(edge.get("confidence", 0.0)) >= edge_min_confidence
+    ]
+    options = replace(diffusion_options_from_config(config), top_k=max_hits)
+    seed_scores = seed_scores_for_buckets(seed_buckets)
+    hits = diffuse_memory(
+        seed_scores,
+        edges,
+        bucket_map,
+        options=options,
+        exclude_ids={bucket["id"] for bucket in seed_buckets if bucket.get("id")},
+        node_salience=node_salience,
+        node_resonance=node_resonance,
+    )
+
+    def node_values(bucket_id: str, bucket: dict | None) -> dict:
+        if not bucket or not node_facets_enabled:
+            return {"salience": None, "resonance": None, "facets": {}}
+        try:
+            node = memory_node_store.get(bucket_id) or memory_node_store.upsert_bucket(bucket)
+            salience = memory_node_store.node_salience(bucket_id, bucket)
+            resonance = (
+                node_resonance(bucket_id, bucket)
+                if node_resonance
+                else 1.0
+            )
+            return {
+                "salience": round(float(salience), 4),
+                "resonance": round(float(resonance), 4),
+                "facets": node.get("facets", {}),
+            }
+        except Exception as e:
+            return {"salience": None, "resonance": None, "facets": {}, "error": str(e)}
+
+    seed_payload = []
+    for bucket in seed_buckets:
+        bucket_id = bucket.get("id", "")
+        values = node_values(bucket_id, bucket)
+        seed_payload.append(
+            {
+                "bucket_id": bucket_id,
+                "name": _inspect_bucket_label(bucket, bucket_id),
+                "source": bucket.get("_inspect_source", "keyword"),
+                "seed_score": round(float(seed_scores.get(bucket_id, 0.0)), 4),
+                **values,
+            }
+        )
+
+    hit_payload = []
+    for hit in hits:
+        bucket = bucket_map.get(hit.bucket_id)
+        values = node_values(hit.bucket_id, bucket)
+        hit_payload.append(
+            {
+                "bucket_id": hit.bucket_id,
+                "name": _inspect_bucket_label(bucket, hit.bucket_id),
+                "score": hit.activation,
+                **values,
+                "path": format_diffusion_trace(hit.best_path, bucket_map, use_labels=True),
+                "path_ids": list(hit.best_path.nodes),
+                "caution": path_has_caution(hit.best_path),
+                "paths": [_inspect_path_payload(path, bucket_map) for path in hit.paths],
+            }
+        )
+
+    return {
+        "status": "ok",
+        "query": query,
+        "node_facets_enabled": node_facets_enabled,
+        "options": {
+            "max_hops": options.max_hops,
+            "top_k": options.top_k,
+            "min_activation": options.min_activation,
+            "edge_min_confidence": edge_min_confidence,
+            "include_incoming": options.include_incoming,
+        },
+        "query_facets": query_facets,
+        "seeds": seed_payload,
+        "hits": hit_payload,
+        "warnings": warnings,
+    }
 
 
 def _node_facets_enabled(cfg: dict | None) -> bool:

@@ -220,6 +220,44 @@ async def test_search_appends_related_memory_and_touches_only_matched_bucket(pat
 
 
 @pytest.mark.asyncio
+async def test_inspect_diffusion_exposes_scores_facets_and_paths(patch_breath):
+    import server
+
+    seed = _bucket("A", "A direct seed", score=10.0, importance=10)
+    target = _bucket("B", "B related 深夜依赖 memory", score=1.0, importance=8)
+    target["metadata"]["tags"] = ["深夜", "依赖"]
+    bucket_mgr = patch_breath(
+        [seed, target],
+        search_ids=["A"],
+        edges=[{"source": "A", "target": "B", "relation_type": "supports", "confidence": 1.0}],
+    )
+
+    result = await server.inspect_diffusion(
+        query="深夜 依赖 哥哥",
+        max_seeds=2,
+        max_hits=3,
+        edge_min_confidence=0.0,
+    )
+
+    assert result["status"] == "ok"
+    assert result["query_facets"]["scene"]["night"] > 0
+    assert result["query_facets"]["affect"]["attachment"] > 0
+    assert result["seeds"][0]["bucket_id"] == "A"
+    assert result["seeds"][0]["seed_score"] == 1.0
+    assert len(result["hits"]) == 1
+    hit = result["hits"][0]
+    assert hit["bucket_id"] == "B"
+    assert hit["score"] > 0
+    assert hit["salience"] > 0
+    assert hit["resonance"] > 1.0
+    assert hit["facets"]["scene"]["night"] > 0
+    assert hit["path_ids"] == ["A", "B"]
+    assert "supports:1.00" in hit["path"]
+    assert hit["paths"][0]["steps"][0]["relation_type"] == "supports"
+    assert bucket_mgr.touched == []
+
+
+@pytest.mark.asyncio
 async def test_search_diffuses_memory_across_two_hops_with_context(patch_breath):
     import server
 
