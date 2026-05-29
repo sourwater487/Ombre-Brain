@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import secrets
 import json
 import codecs
@@ -272,7 +273,9 @@ class GatewayService:
         )
 
         try:
-            persona_user_message = self._extract_last_user_query(payload.get("messages", []))
+            persona_user_message = self._strip_external_context(
+                self._extract_last_user_query(payload.get("messages", []))
+            )
             forward_payload, recalled_ids = await self.prepare_payload(payload, session_id)
         except ValueError as exc:
             return JSONResponse(
@@ -346,7 +349,9 @@ class GatewayService:
         )
 
         try:
-            persona_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
+            persona_user_message = self._strip_external_context(
+                self._extract_last_user_query(openai_payload.get("messages", []))
+            )
             forward_payload, recalled_ids = await self.prepare_payload(openai_payload, session_id)
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -412,10 +417,24 @@ class GatewayService:
         self._get_upstream_for_model(model)
 
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
-        current_user_query = self._extract_current_turn_user_query(messages)
-        cleaned_current_user_query = self._strip_external_context(current_user_query)
-        is_new_user_turn = bool(current_user_query)
-        external_only_user_turn = is_new_user_turn and not bool(cleaned_current_user_query)
+        raw_current_lin_message = self._extract_current_turn_user_query(messages)
+        cleaned_current_lin_message = self._strip_external_context(raw_current_lin_message)
+        is_new_lin_turn = bool(raw_current_lin_message)
+        external_only_lin_turn = is_new_lin_turn and not bool(cleaned_current_lin_message)
+        lin_dynamic_detected, lin_message_detected = self._detect_lin_xml_context(
+            raw_current_lin_message
+        )
+        logger.info(
+            "Gateway Lin query sanitization | session=%s linXmlDynamicContextDetected=%s "
+            "linXmlMessageDetected=%s cleanedCurrentLinMessageEmpty=%s externalOnlyLinTurn=%s "
+            "ombreRecallUsesCleanedLinMessage=%s",
+            session_id,
+            lin_dynamic_detected,
+            lin_message_detected,
+            not bool(cleaned_current_lin_message),
+            external_only_lin_turn,
+            True,
+        )
 
         persona_block = ""
         core_memory = ""
@@ -430,10 +449,10 @@ class GatewayService:
         related_target_ids: list[str] = []
         injected_ids: list[str] | None = None
 
-        if is_new_user_turn and not external_only_user_turn:
+        if is_new_lin_turn and not external_only_lin_turn:
             if self._should_inject_interval(session_id, self.current_inner_state_interval_rounds):
                 persona_state = await self.persona_engine.build_pre_reply_guidance(
-                    session_id, current_user_query
+                    session_id, cleaned_current_lin_message
                 )
                 persona_block = self.persona_engine.format_state_block(persona_state)
 
@@ -451,7 +470,7 @@ class GatewayService:
                 )
             if self._should_inject_interval(session_id, self.recalled_memory_interval_rounds):
                 recalled_buckets = await self._select_dynamic_buckets(
-                    current_user_query,
+                    cleaned_current_lin_message,
                     session_id,
                     all_buckets,
                     exclude_bucket_ids=recent_bucket_ids,
@@ -474,9 +493,9 @@ class GatewayService:
                 related_memory, related_target_ids = await self._build_related_memory_block(
                     recalled_buckets, all_buckets, session_id
                 )
-        elif external_only_user_turn:
+        elif external_only_lin_turn:
             logger.info(
-                "Gateway skipped memory injection for external-only user turn | session=%s",
+                "Gateway skipped memory injection for external-only Lin turn | session=%s",
                 session_id,
             )
         else:
@@ -494,7 +513,7 @@ class GatewayService:
             favorite_memory=favorite_memory,
             related_memory=related_memory,
         )
-        if is_new_user_turn and not external_only_user_turn:
+        if is_new_lin_turn and not external_only_lin_turn:
             related_target_ids = [
                 target_id
                 for target_id in related_target_ids
@@ -737,6 +756,7 @@ class GatewayService:
         assistant_message: dict[str, Any] | None,
         recalled_ids: list[str],
     ) -> None:
+        user_message = self._strip_external_context(user_message)
         if not user_message.strip() or not isinstance(assistant_message, dict):
             return
         tool_calls = assistant_message.get("tool_calls")
@@ -1536,17 +1556,34 @@ class GatewayService:
         return ""
 
     def _strip_external_context(self, query: str) -> str:
+        lin_text, _, _ = self._extract_lin_message_from_wrapped_text(query)
         cleaner = getattr(self.persona_engine, "_clean_client_status_lines", None)
         if callable(cleaner):
-            cleaned_query = cleaner(query)
+            cleaned_query = cleaner(lin_text)
         else:
             cleaned_query = PersonaStateEngine._clean_client_status_lines(
                 PersonaStateEngine.__new__(PersonaStateEngine),
-                query,
+                lin_text,
             )
         if cleaned_query.splitlines()[:1] == ["[Lin's recent activity]"]:
             return ""
         return cleaned_query
+
+    def _extract_lin_message_from_wrapped_text(self, text: str) -> tuple[str, bool, bool]:
+        raw_text = str(text or "")
+        dynamic_pattern = r"<lin_dynamic_context>.*?</lin_dynamic_context>"
+        message_pattern = r"<lin_message>(.*?)</lin_message>"
+        dynamic_detected = re.search(dynamic_pattern, raw_text, flags=re.DOTALL) is not None
+        message_match = re.search(message_pattern, raw_text, flags=re.DOTALL)
+        if message_match is not None:
+            return message_match.group(1).strip(), dynamic_detected, True
+        if dynamic_detected:
+            return re.sub(dynamic_pattern, "", raw_text, flags=re.DOTALL).strip(), True, False
+        return raw_text, False, False
+
+    def _detect_lin_xml_context(self, text: str) -> tuple[bool, bool]:
+        _, dynamic_detected, message_detected = self._extract_lin_message_from_wrapped_text(text)
+        return dynamic_detected, message_detected
 
     def _coerce_message_text(self, content: Any) -> str:
         if isinstance(content, str):
@@ -2139,7 +2176,7 @@ class GatewayService:
             "<ombre_live_context>\n"
             f"{dynamic_context}\n"
             "</ombre_live_context>\n\n"
-            "Current user message:\n"
+            "Current Lin message:\n"
         )
         content = updated.get("content")
         if isinstance(content, str):

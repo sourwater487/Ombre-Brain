@@ -1617,6 +1617,197 @@ def test_gateway_injects_when_no_system_message(monkeypatch, test_config, bucket
     assert messages[0]["content"].endswith("今天怎么样")
 
 
+def test_strip_external_context_supports_lin_xml_wrappers(monkeypatch, test_config, bucket_mgr):
+    _, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+
+    wrapped = (
+        "\n<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "opened a panel\n\n"
+        "[Pending autonomous activity]\n"
+        "pending keepalive\n"
+        "</lin_dynamic_context>\n\n"
+        "<lin_message>\nLin 真正发送的消息\n</lin_message>\n"
+    )
+    assert service._strip_external_context(wrapped) == "Lin 真正发送的消息"
+
+    dynamic_only_with_tail = (
+        "<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "pending keepalive\n"
+        "</lin_dynamic_context>\n\n"
+        "剩余文本"
+    )
+    assert service._strip_external_context(dynamic_only_with_tail) == "剩余文本"
+
+    dynamic_only_empty = (
+        "  <lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "[Pending autonomous activity]\n"
+        "pending keepalive\n"
+        "</lin_dynamic_context>\n"
+    )
+    assert service._strip_external_context(dynamic_only_empty) == ""
+
+    message_only = "\n<lin_message>\n只在 message 里\n</lin_message>\n"
+    assert service._strip_external_context(message_only) == "只在 message 里"
+
+    assert service._strip_external_context("没有 XML 的普通消息") == "没有 XML 的普通消息"
+
+
+def test_gateway_uses_cleaned_lin_message_for_persona_and_recall(
+    monkeypatch, test_config, bucket_mgr, caplog
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            recent_context_interval_rounds=0,
+            recalled_memory_interval_rounds=1,
+            core_memory_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            related_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+    persona_engine = RecordingPersonaEngine()
+    service.persona_engine = persona_engine
+    selected_queries = []
+
+    async def fake_select_dynamic_buckets(
+        query: str,
+        session_id: str,
+        all_buckets: list[dict],
+        exclude_bucket_ids: set[str] | None = None,
+    ) -> list[dict]:
+        selected_queries.append(query)
+        return []
+
+    monkeypatch.setattr(service, "_select_dynamic_buckets", fake_select_dynamic_buckets)
+    caplog.set_level(logging.INFO, logger="ombre_brain.gateway")
+
+    raw_xml = (
+        "<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "leaky activity text\n\n"
+        "[Pending autonomous activity]\n"
+        "pending keepalive text\n"
+        "</lin_dynamic_context>\n\n"
+        "<lin_message>\n今晚想聊海边散步。\n</lin_message>"
+    )
+
+    forward_payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": raw_xml}]},
+            "sess-lin-cleaned",
+        )
+    )
+
+    assert recalled_ids == []
+    assert persona_engine.pre_calls == [
+        {"session_id": "sess-lin-cleaned", "user_message": "今晚想聊海边散步。"}
+    ]
+    assert selected_queries == ["今晚想聊海边散步。"]
+    forwarded_content = forward_payload["messages"][-1]["content"]
+    assert "<lin_dynamic_context>" in forwarded_content
+    assert "</lin_dynamic_context>" in forwarded_content
+    assert "<lin_message>" in forwarded_content
+    assert "</lin_message>" in forwarded_content
+    assert raw_xml in forwarded_content
+    assert "linXmlDynamicContextDetected=True" in caplog.text
+    assert "linXmlMessageDetected=True" in caplog.text
+    assert "ombreRecallUsesCleanedLinMessage=True" in caplog.text
+    assert "leaky activity text" not in caplog.text
+    assert "今晚想聊海边散步" not in caplog.text
+
+
+def test_gateway_external_only_lin_xml_skips_injection_and_preserves_forwarded_xml(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            recent_context_interval_rounds=1,
+            recalled_memory_interval_rounds=1,
+            core_memory_interval_rounds=1,
+        ),
+        bucket_mgr,
+    )
+    persona_engine = RecordingPersonaEngine()
+    service.persona_engine = persona_engine
+
+    async def fail_select_dynamic_buckets(*args, **kwargs):
+        raise AssertionError("external-only Lin turn must not select recall buckets")
+
+    monkeypatch.setattr(service, "_select_dynamic_buckets", fail_select_dynamic_buckets)
+    raw_xml = (
+        "<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "activity-only content\n\n"
+        "[Pending autonomous activity]\n"
+        "pending keepalive content\n"
+        "</lin_dynamic_context>"
+    )
+
+    forward_payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": raw_xml}]},
+            "sess-lin-external-only",
+        )
+    )
+
+    assert recalled_ids is None
+    assert persona_engine.pre_calls == []
+    assert persona_engine.post_calls == []
+    assert forward_payload["messages"] == [{"role": "user", "content": raw_xml}]
+    assert state_store.get_current_round("sess-lin-external-only") == 0
+
+
+def test_gateway_persona_post_update_uses_cleaned_lin_message(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+    persona_engine = RecordingPersonaEngine()
+    service.persona_engine = persona_engine
+    raw_xml = (
+        "<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "post-update activity leak\n"
+        "</lin_dynamic_context>\n\n"
+        "<lin_message>\n把这句用于 persona 更新。\n</lin_message>"
+    )
+    upstream_response = httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "ok",
+                    }
+                }
+            ]
+        },
+    )
+
+    _run(
+        service._update_persona_after_response(
+            "sess-lin-post-update",
+            raw_xml,
+            upstream_response,
+            ["bucket-1"],
+        )
+    )
+
+    assert persona_engine.post_calls == [
+        {"session_id": "sess-lin-post-update", "user_message": "把这句用于 persona 更新。"}
+    ]
+
+
 def test_favorite_memory_is_not_injected_by_default(monkeypatch, test_config, bucket_mgr):
     _create_bucket(
         bucket_mgr,
