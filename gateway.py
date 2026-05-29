@@ -40,6 +40,7 @@ from memory_relevance import (
     memory_relevance_options_from_config,
     query_has_facet,
     recall_rank,
+    recall_search_query,
     relevance_multiplier,
 )
 from memory_nodes import MemoryNodeStore
@@ -2307,11 +2308,17 @@ class GatewayService:
         if not eligible_ids:
             return [], []
 
-        selected_buckets = await self._select_dynamic_buckets(query, session_id, all_buckets)
+        search_query = recall_search_query(query, self.relevance_options)
+        selected_buckets = await self._select_dynamic_buckets(
+            query,
+            session_id,
+            all_buckets,
+            search_query=search_query,
+        )
         selected_bucket_ids = [bucket["id"] for bucket in selected_buckets if bucket.get("id")]
         bucket_boosts = {bucket_id: 1.0 for bucket_id in selected_bucket_ids}
         candidates = self.memory_moment_store.search_moments(
-            query,
+            search_query,
             limit=max(20, self.dynamic_top_k * 2, self.inject_max_cards * 8),
             bucket_boosts=bucket_boosts,
         )
@@ -2393,11 +2400,11 @@ class GatewayService:
             reranked.append(item)
         reranked.sort(
             key=lambda item: (
-                item.get("rerank_score") is not None,
-                item.get("combined_score", item.get("score", 0.0)),
-                item.get("score", 0.0),
+                self._recall_rank(query, item)[0],
+                item.get("rerank_score") is None,
+                -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
+                -self._safe_float(item.get("score"), 0.0),
             ),
-            reverse=True,
         )
         return reranked + tail
 
@@ -2897,7 +2904,7 @@ class GatewayService:
             item["score"] = new_score
             filtered.append(item)
         if adjusted:
-            filtered.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+            filtered.sort(key=lambda item: self._recall_rank(query, item))
         return filtered
 
     async def _build_diffused_memory_block(
@@ -3015,6 +3022,8 @@ class GatewayService:
         query: str,
         session_id: str,
         all_buckets: list[dict],
+        *,
+        search_query: str = "",
     ) -> list[dict]:
         if not query or self.inject_max_cards <= 0:
             return []
@@ -3032,8 +3041,9 @@ class GatewayService:
             return []
 
         bucket_map = {bucket["id"]: bucket for bucket in eligible}
-        keyword_scores = self._get_keyword_candidates(query, eligible)
-        semantic_scores = await self._get_semantic_candidates(query, set(bucket_map))
+        candidate_query = search_query or query
+        keyword_scores = self._get_keyword_candidates(candidate_query, eligible)
+        semantic_scores = await self._get_semantic_candidates(candidate_query, set(bucket_map))
         candidate_ids = set(keyword_scores) | set(semantic_scores)
         if not candidate_ids:
             return []
@@ -3085,7 +3095,13 @@ class GatewayService:
                 }
             )
 
-        scored_candidates.sort(key=lambda item: item["score"], reverse=True)
+        scored_candidates.sort(
+            key=lambda item: self._bucket_recall_rank(
+                query,
+                item["bucket"],
+                item["score"],
+            )
+        )
         scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
         filtered = [item for item in scored_candidates if item["bucket"]["id"] not in recent_ids]
         active_pool = filtered or scored_candidates
@@ -3122,13 +3138,18 @@ class GatewayService:
             reranked.append(new_item)
         reranked.sort(
             key=lambda item: (
-                item.get("rerank_score") is not None,
-                item.get("combined_score", item.get("score", 0.0)),
-                item.get("score", 0.0),
+                self._bucket_recall_rank(query, item["bucket"], item.get("score", 0.0))[0],
+                item.get("rerank_score") is None,
+                -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
+                -self._safe_float(item.get("score"), 0.0),
             ),
-            reverse=True,
         )
         return reranked + tail
+
+    def _bucket_recall_rank(self, query: str, bucket: dict, score: float = 0.0) -> tuple[int, float]:
+        node = self._bucket_relevance_node(bucket)
+        node["score"] = score
+        return recall_rank(query, node, self.relevance_options)
 
     def _bucket_rerank_document(self, bucket: dict) -> str:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}

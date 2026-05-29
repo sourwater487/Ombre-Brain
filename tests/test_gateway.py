@@ -2514,6 +2514,73 @@ def test_gateway_email_query_suppresses_high_score_hardware_protocol(
     assert "ESP32 BLE MPR121" not in injected
 
 
+def test_gateway_context_name_does_not_beat_email_action_intent(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    preference_id = _create_bucket(
+        bucket_mgr,
+        content="小雨沟通偏好：小雨说月亮时进入工作模式，不喜欢模板安慰。",
+        name="小雨沟通偏好",
+        hours_ago=1,
+        importance=10,
+        domain=["personal"],
+        tags=["communication_preference"],
+        bucket_type="permanent",
+    )
+    mail_id = _create_bucket(
+        bucket_mgr,
+        content="QQ邮箱自动收发配置：Haven 可以发邮件，也可以检查收件箱。",
+        name="QQ邮箱自动收发配置",
+        hours_ago=24,
+        importance=4,
+        domain=["communication"],
+        tags=["communication_action"],
+    )
+    embedding_queries: list[str] = []
+    reranker = DummyRerankerEngine(
+        enabled=True,
+        score_by_text={
+            "小雨沟通偏好": 0.99,
+            "QQ邮箱自动收发配置": 0.05,
+        },
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=500,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+            inject_max_cards=1,
+        ),
+        bucket_mgr,
+        embedding_results=[(preference_id, 0.99), (mail_id, 0.72)],
+        embedding_queries=embedding_queries,
+        reranker_engine=reranker,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-context-email-intent",
+            },
+            json={"messages": [{"role": "user", "content": "小雨 发邮件"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert embedding_queries == ["发邮件"]
+    assert reranker.calls
+    assert reranker.calls[0]["query"] == "小雨 发邮件"
+    assert "QQ邮箱自动收发配置" in injected
+    assert "小雨沟通偏好" not in injected
+
+
 def test_gateway_skips_pure_operit_extra_user_when_finding_current_turn(
     monkeypatch,
     test_config,
