@@ -1733,7 +1733,7 @@ def test_gateway_uses_cleaned_lin_message_for_persona_and_recall(
     assert "今晚想聊海边散步" not in caplog.text
 
 
-def test_gateway_injects_ombre_context_after_incoming_cache_control_boundary(
+def test_gateway_merges_ombre_context_into_lin_message_with_incoming_cache_control(
     monkeypatch, test_config, bucket_mgr, caplog
 ):
     _, service, _, _ = _build_service(
@@ -1810,28 +1810,213 @@ def test_gateway_injects_ombre_context_after_incoming_cache_control_boundary(
     ]
 
     messages = forward_payload["messages"]
+    assert len(messages) == 3
     assert messages[0]["content"][0]["text"] == "BP1"
+    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert messages[1]["content"] == "BP2"
-    assert messages[2]["role"] == "system"
-    assert "Core Memory" in messages[2]["content"]
-    assert messages[3]["role"] == "system"
-    assert "Long-term State Summary" in messages[3]["content"]
-    assert messages[4] == {"role": "user", "content": raw_xml}
+    assert messages[1]["cache_control"] == {"type": "ephemeral"}
+    assert messages[2]["role"] == "user"
     assert not _contains_cache_control(messages[2])
-    assert not _contains_cache_control(messages[3])
-    assert "<lin_dynamic_context>" in messages[4]["content"]
-    assert "<lin_message>" in messages[4]["content"]
+    current_content = messages[2]["content"]
+    assert current_content.startswith("<ombre_context>\n")
+    assert "Core Memory" in current_content
+    assert "Long-term State Summary" in current_content
+    assert current_content.index("<ombre_context>") < current_content.index("<lin_dynamic_context>")
+    assert current_content.index("<ombre_context>") < current_content.index("<lin_message>")
+    assert current_content.endswith(raw_xml)
+    assert not _contains_cache_control(messages[2])
+    assert "<lin_dynamic_context>" in current_content
+    assert "<lin_message>" in current_content
 
     assert "OMBRE_GATEWAY_CACHE_BOUNDARY_JSON" in caplog.text
     assert '"incomingCacheControlCount": 2' in caplog.text
     assert '"lastCacheControlMessageIndex": 1' in caplog.text
     assert '"currentLinMessageIndex": 2' in caplog.text
     assert '"ombreInjectionIndex": 2' in caplog.text
-    assert '"cacheBoundaryAction": "inserted_after_cache_boundary"' in caplog.text
+    assert '"cacheBoundaryAction": "merged_ombre_context_into_lin_message"' in caplog.text
     assert '"cacheBoundarySafe": true' in caplog.text
+    assert '"ombreContextMergedIntoLinMessage": true' in caplog.text
+    assert '"addedSystemMessageForOmbreContext": false' in caplog.text
+    assert '"ombreInjectedMessageCount": 0' in caplog.text
+    assert '"hasOmbreContextXml": true' in caplog.text
+    assert '"currentLinMessageHasCacheControl": false' in caplog.text
     assert "SECRET_LIN_TEXT" not in caplog.text
     assert "SECRET_DYNAMIC_CONTEXT" not in caplog.text
     assert "SECRET_MEMORY_TEXT" not in caplog.text
+
+
+def test_strip_external_context_ignores_ombre_context_before_lin_xml(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+
+    wrapped = (
+        "<ombre_context>\nOmbre private context\n</ombre_context>\n\n"
+        "<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "activity text\n"
+        "</lin_dynamic_context>\n\n"
+        "<lin_message>\n只取这里\n</lin_message>"
+    )
+    assert service._strip_external_context(wrapped) == "只取这里"
+
+    no_lin_message = (
+        "<ombre_context>\nOmbre private context\n</ombre_context>\n\n"
+        "没有 Lin XML wrapper 的原文"
+    )
+    assert service._strip_external_context(no_lin_message) == "没有 Lin XML wrapper 的原文"
+
+
+def test_gateway_merges_ombre_context_before_plain_lin_message_with_cache_control(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            core_memory_interval_rounds=0,
+            recent_context_interval_rounds=0,
+            recalled_memory_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            related_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    forward_payload, _ = _run(
+        service.prepare_payload(
+            {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "BP1",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": "plain Lin message"},
+                ]
+            },
+            "sess-cache-plain",
+        )
+    )
+
+    messages = forward_payload["messages"]
+    assert len(messages) == 2
+    assert _contains_cache_control(messages[0])
+    assert not _contains_cache_control(messages[1])
+    assert messages[1]["role"] == "user"
+    assert messages[1]["content"].startswith("<ombre_context>\n")
+    assert "Long-term State Summary" in messages[1]["content"]
+    assert messages[1]["content"].endswith("plain Lin message")
+    assert "<lin_message>" not in messages[1]["content"]
+
+
+def test_gateway_merges_ombre_context_into_text_block_with_cache_control(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            core_memory_interval_rounds=0,
+            recent_context_interval_rounds=0,
+            recalled_memory_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            related_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+    raw_xml = "<lin_message>\nblock Lin message\n</lin_message>"
+
+    forward_payload, _ = _run(
+        service.prepare_payload(
+            {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "BP1",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": raw_xml}],
+                    },
+                ]
+            },
+            "sess-cache-block",
+        )
+    )
+
+    content = forward_payload["messages"][1]["content"]
+    assert content[0]["type"] == "text"
+    assert "cache_control" not in content[0]
+    assert content[0]["text"].startswith("<ombre_context>\n")
+    assert content[0]["text"].endswith(raw_xml)
+
+
+def test_gateway_inserts_ombre_context_text_block_when_no_text_block(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            core_memory_interval_rounds=0,
+            recent_context_interval_rounds=0,
+            recalled_memory_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            related_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    messages, trace = service._inject_context_messages_cache_aware(
+        [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "BP1",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}],
+            },
+        ],
+        "",
+        "Live private context for the current turn.",
+        lin_xml_dynamic_context_detected=False,
+        lin_xml_message_detected=False,
+        external_only_lin_turn=False,
+        cleaned_current_lin_message_empty=False,
+    )
+
+    content = messages[1]["content"]
+    assert content[0]["type"] == "text"
+    assert content[0]["text"].startswith("<ombre_context>\n")
+    assert "Live private context" in content[0]["text"]
+    assert content[1]["type"] == "image_url"
+    assert trace["cacheBoundaryAction"] == "merged_ombre_context_into_lin_message"
+    assert trace["addedSystemMessageForOmbreContext"] is False
 
 
 def test_gateway_without_incoming_cache_control_keeps_existing_injection_behavior(
@@ -1873,6 +2058,49 @@ def test_gateway_without_incoming_cache_control_keeps_existing_injection_behavio
     assert "Current Lin message:" in messages[1]["content"]
     assert "Current user message:" not in messages[1]["content"]
     assert messages[1]["content"].endswith("普通消息")
+
+
+def test_gateway_without_incoming_cache_control_keeps_existing_stable_system_injection(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=0,
+            core_memory_interval_rounds=1,
+            recent_context_interval_rounds=0,
+            recalled_memory_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            related_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    async def fake_core_memory(_all_buckets):
+        return "stable core memory"
+
+    monkeypatch.setattr(service, "_build_core_memory_block", fake_core_memory)
+
+    forward_payload, _ = _run(
+        service.prepare_payload(
+            {
+                "messages": [
+                    {"role": "system", "content": "plain prefix"},
+                    {"role": "user", "content": "普通消息"},
+                ]
+            },
+            "sess-no-cache-stable-system",
+        )
+    )
+
+    messages = forward_payload["messages"]
+    assert len(messages) == 3
+    assert messages[0] == {"role": "system", "content": "plain prefix"}
+    assert messages[1]["role"] == "system"
+    assert "Core Memory" in messages[1]["content"]
+    assert messages[2] == {"role": "user", "content": "普通消息"}
 
 
 def test_gateway_external_only_lin_xml_skips_injection_and_preserves_forwarded_xml(
@@ -2037,13 +2265,14 @@ def test_gateway_strips_cache_control_when_boundary_cannot_be_safely_preserved(
     messages = forward_payload["messages"]
     assert not _contains_cache_control(messages)
     assert messages[0] == {"role": "system", "content": "BP1"}
-    assert messages[1]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    assert messages[1]["content"].startswith("<ombre_context>\n")
     assert "Core Memory" in messages[1]["content"]
-    assert messages[2]["role"] == "system"
-    assert "Long-term State Summary" in messages[2]["content"]
-    assert messages[3] == {"role": "user", "content": raw_xml}
+    assert "Long-term State Summary" in messages[1]["content"]
+    assert messages[1]["content"].endswith(raw_xml)
     assert '"cacheBoundaryAction": "stripped_cache_control_uncertain"' in caplog.text
     assert '"cacheBoundarySafe": false' in caplog.text
+    assert '"ombreContextMergedIntoLinMessage": true' in caplog.text
     assert "fallback Lin message" not in caplog.text
     assert "fallback dynamic context" not in caplog.text
 
