@@ -539,10 +539,18 @@ class GatewayService:
         forward_payload = deepcopy(payload)
         forward_payload["model"] = model
         self._restore_cached_reasoning_content(session_id, forward_payload.get("messages"))
-        forward_payload["messages"] = self._inject_context_messages(
+        forward_payload["messages"], cache_boundary_trace = self._inject_context_messages_cache_aware(
             forward_payload["messages"],
             stable_context,
             dynamic_context,
+            lin_xml_dynamic_context_detected=lin_dynamic_detected,
+            lin_xml_message_detected=lin_message_detected,
+            external_only_lin_turn=external_only_lin_turn,
+            cleaned_current_lin_message_empty=not bool(cleaned_current_lin_message),
+        )
+        logger.info(
+            "OMBRE_GATEWAY_CACHE_BOUNDARY_JSON %s",
+            json.dumps(cache_boundary_trace, ensure_ascii=False, sort_keys=True),
         )
         self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
@@ -2120,6 +2128,160 @@ class GatewayService:
             return self._trim_text(stable_context, self.inject_total_budget), ""
         remaining = max(0, self.inject_total_budget - stable_tokens)
         return stable_context, self._trim_text(dynamic_context, remaining)
+
+    def _cache_control_boundary_info(self, messages: list[dict]) -> dict[str, int | None]:
+        count = 0
+        last_message_index: int | None = None
+        last_block_index: int | None = None
+        for message_index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+            if "cache_control" in message:
+                count += 1
+                last_message_index = message_index
+                last_block_index = None
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block_index, block in enumerate(content):
+                if not isinstance(block, dict):
+                    continue
+                if "cache_control" in block:
+                    count += 1
+                    last_message_index = message_index
+                    last_block_index = block_index
+        return {
+            "count": count,
+            "last_message_index": last_message_index,
+            "last_block_index": last_block_index,
+        }
+
+    def _message_is_after_cache_boundary(
+        self,
+        message_index: int | None,
+        cache_boundary_info: dict[str, int | None],
+    ) -> bool:
+        last_message_index = cache_boundary_info.get("last_message_index")
+        if message_index is None or last_message_index is None:
+            return False
+        return message_index > last_message_index
+
+    def _message_is_before_or_at_cache_boundary(
+        self,
+        message_index: int | None,
+        cache_boundary_info: dict[str, int | None],
+    ) -> bool:
+        last_message_index = cache_boundary_info.get("last_message_index")
+        if message_index is None or last_message_index is None:
+            return False
+        return message_index <= last_message_index
+
+    def _strip_cache_control_from_messages(self, messages: list[dict]) -> list[dict]:
+        stripped = deepcopy(messages)
+        for message in stripped:
+            if not isinstance(message, dict):
+                continue
+            message.pop("cache_control", None)
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+        return stripped
+
+    def _ombre_context_messages(self, stable_context: str, dynamic_context: str) -> list[dict[str, str]]:
+        context_messages: list[dict[str, str]] = []
+        if stable_context.strip():
+            context_messages.append({"role": "system", "content": stable_context})
+        if dynamic_context.strip():
+            context_messages.append({"role": "system", "content": dynamic_context})
+        return context_messages
+
+    def _inject_context_messages_cache_aware(
+        self,
+        messages: list[dict],
+        stable_context: str,
+        dynamic_context: str,
+        *,
+        lin_xml_dynamic_context_detected: bool,
+        lin_xml_message_detected: bool,
+        external_only_lin_turn: bool,
+        cleaned_current_lin_message_empty: bool,
+    ) -> tuple[list[dict], dict[str, Any]]:
+        cache_boundary_info = self._cache_control_boundary_info(messages)
+        current_lin_message_index = self._current_turn_user_index(messages)
+        context_messages = self._ombre_context_messages(stable_context, dynamic_context)
+        injected_message_count = len(context_messages)
+        incoming_cache_control_count = int(cache_boundary_info["count"] or 0)
+
+        trace: dict[str, Any] = {
+            "incomingCacheControlCount": incoming_cache_control_count,
+            "lastCacheControlMessageIndex": cache_boundary_info["last_message_index"],
+            "lastCacheControlBlockIndex": cache_boundary_info["last_block_index"],
+            "currentLinMessageIndex": current_lin_message_index,
+            "ombreStableContextPresent": bool(stable_context.strip()),
+            "ombreDynamicContextPresent": bool(dynamic_context.strip()),
+            "ombreInjectedMessageCount": injected_message_count,
+            "ombreInjectionIndex": None,
+            "ombreInjectedAfterLastCacheControl": injected_message_count == 0,
+            "ombreInjectedBeforeCurrentLinMessage": injected_message_count == 0,
+            "cacheBoundarySafe": True,
+            "cacheBoundaryAction": "no_incoming_cache_control",
+            "linXmlDynamicContextDetected": lin_xml_dynamic_context_detected,
+            "linXmlMessageDetected": lin_xml_message_detected,
+            "externalOnlyLinTurn": external_only_lin_turn,
+            "cleanedCurrentLinMessageEmpty": cleaned_current_lin_message_empty,
+        }
+
+        if incoming_cache_control_count == 0:
+            return (
+                self._inject_context_messages(messages, stable_context, dynamic_context),
+                trace,
+            )
+
+        if injected_message_count == 0:
+            trace["cacheBoundaryAction"] = "no_ombre_context"
+            return deepcopy(messages), trace
+
+        if self._message_is_after_cache_boundary(current_lin_message_index, cache_boundary_info):
+            new_messages = deepcopy(messages)
+            injection_index = int(current_lin_message_index)
+            for offset, context_message in enumerate(context_messages):
+                new_messages.insert(injection_index + offset, context_message)
+            trace["ombreInjectionIndex"] = injection_index
+            trace["ombreInjectedAfterLastCacheControl"] = self._message_is_after_cache_boundary(
+                injection_index,
+                cache_boundary_info,
+            )
+            final_current_lin_message_index = int(current_lin_message_index) + injected_message_count
+            trace["ombreInjectedBeforeCurrentLinMessage"] = (
+                injection_index + injected_message_count - 1 < final_current_lin_message_index
+            )
+            trace["cacheBoundarySafe"] = (
+                trace["ombreInjectedAfterLastCacheControl"]
+                and trace["ombreInjectedBeforeCurrentLinMessage"]
+            )
+            trace["cacheBoundaryAction"] = "inserted_after_cache_boundary"
+            return new_messages, trace
+
+        stripped_messages = self._strip_cache_control_from_messages(messages)
+        if current_lin_message_index is not None:
+            injection_index = int(current_lin_message_index)
+            for offset, context_message in enumerate(context_messages):
+                stripped_messages.insert(injection_index + offset, context_message)
+            trace["ombreInjectionIndex"] = injection_index
+            trace["ombreInjectedBeforeCurrentLinMessage"] = True
+        else:
+            stripped_messages = self._inject_context_messages(
+                stripped_messages,
+                stable_context,
+                dynamic_context,
+            )
+        trace["ombreInjectedAfterLastCacheControl"] = False
+        trace["cacheBoundarySafe"] = False
+        trace["cacheBoundaryAction"] = "stripped_cache_control_uncertain"
+        return stripped_messages, trace
 
     def _inject_context_messages(
         self,

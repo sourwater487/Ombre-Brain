@@ -233,6 +233,16 @@ def _joined_message_content(messages: list[dict]) -> str:
     )
 
 
+def _contains_cache_control(value) -> bool:
+    if isinstance(value, dict):
+        if "cache_control" in value:
+            return True
+        return any(_contains_cache_control(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_cache_control(item) for item in value)
+    return False
+
+
 def test_gateway_state_store_cooldown_curve(tmp_path):
     store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
     origin = datetime(2026, 4, 20, 12, 0, 0)
@@ -1723,6 +1733,148 @@ def test_gateway_uses_cleaned_lin_message_for_persona_and_recall(
     assert "今晚想聊海边散步" not in caplog.text
 
 
+def test_gateway_injects_ombre_context_after_incoming_cache_control_boundary(
+    monkeypatch, test_config, bucket_mgr, caplog
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            core_memory_interval_rounds=1,
+            recent_context_interval_rounds=0,
+            recalled_memory_interval_rounds=1,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            related_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+    persona_engine = RecordingPersonaEngine()
+    service.persona_engine = persona_engine
+    selected_queries = []
+
+    async def fake_core_memory(_all_buckets):
+        return "SECRET_MEMORY_TEXT"
+
+    async def fake_select_dynamic_buckets(
+        query: str,
+        session_id: str,
+        all_buckets: list[dict],
+        exclude_bucket_ids: set[str] | None = None,
+    ) -> list[dict]:
+        selected_queries.append(query)
+        return []
+
+    monkeypatch.setattr(service, "_build_core_memory_block", fake_core_memory)
+    monkeypatch.setattr(service, "_select_dynamic_buckets", fake_select_dynamic_buckets)
+    caplog.set_level(logging.INFO, logger="ombre_brain.gateway")
+    raw_xml = (
+        "<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "SECRET_DYNAMIC_CONTEXT\n"
+        "</lin_dynamic_context>\n\n"
+        "<lin_message>\nSECRET_LIN_TEXT\n</lin_message>"
+    )
+
+    forward_payload, recalled_ids = _run(
+        service.prepare_payload(
+            {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "BP1",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "system",
+                        "content": "BP2",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {"role": "user", "content": raw_xml},
+                ]
+            },
+            "sess-cache-boundary",
+        )
+    )
+
+    assert recalled_ids == []
+    assert selected_queries == ["SECRET_LIN_TEXT"]
+    assert persona_engine.pre_calls == [
+        {"session_id": "sess-cache-boundary", "user_message": "SECRET_LIN_TEXT"}
+    ]
+
+    messages = forward_payload["messages"]
+    assert messages[0]["content"][0]["text"] == "BP1"
+    assert messages[1]["content"] == "BP2"
+    assert messages[2]["role"] == "system"
+    assert "Core Memory" in messages[2]["content"]
+    assert messages[3]["role"] == "system"
+    assert "Long-term State Summary" in messages[3]["content"]
+    assert messages[4] == {"role": "user", "content": raw_xml}
+    assert not _contains_cache_control(messages[2])
+    assert not _contains_cache_control(messages[3])
+    assert "<lin_dynamic_context>" in messages[4]["content"]
+    assert "<lin_message>" in messages[4]["content"]
+
+    assert "OMBRE_GATEWAY_CACHE_BOUNDARY_JSON" in caplog.text
+    assert '"incomingCacheControlCount": 2' in caplog.text
+    assert '"lastCacheControlMessageIndex": 1' in caplog.text
+    assert '"currentLinMessageIndex": 2' in caplog.text
+    assert '"ombreInjectionIndex": 2' in caplog.text
+    assert '"cacheBoundaryAction": "inserted_after_cache_boundary"' in caplog.text
+    assert '"cacheBoundarySafe": true' in caplog.text
+    assert "SECRET_LIN_TEXT" not in caplog.text
+    assert "SECRET_DYNAMIC_CONTEXT" not in caplog.text
+    assert "SECRET_MEMORY_TEXT" not in caplog.text
+
+
+def test_gateway_without_incoming_cache_control_keeps_existing_injection_behavior(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            core_memory_interval_rounds=0,
+            recent_context_interval_rounds=0,
+            recalled_memory_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            related_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    forward_payload, _ = _run(
+        service.prepare_payload(
+            {
+                "messages": [
+                    {"role": "system", "content": "plain prefix"},
+                    {"role": "user", "content": "普通消息"},
+                ]
+            },
+            "sess-no-cache-boundary",
+        )
+    )
+
+    messages = forward_payload["messages"]
+    assert len(messages) == 2
+    assert messages[0] == {"role": "system", "content": "plain prefix"}
+    assert messages[1]["role"] == "user"
+    assert "<ombre_live_context>" in messages[1]["content"]
+    assert "Long-term State Summary" in messages[1]["content"]
+    assert "Current Lin message:" in messages[1]["content"]
+    assert "Current user message:" not in messages[1]["content"]
+    assert messages[1]["content"].endswith("普通消息")
+
+
 def test_gateway_external_only_lin_xml_skips_injection_and_preserves_forwarded_xml(
     monkeypatch, test_config, bucket_mgr
 ):
@@ -1765,6 +1917,135 @@ def test_gateway_external_only_lin_xml_skips_injection_and_preserves_forwarded_x
     assert persona_engine.post_calls == []
     assert forward_payload["messages"] == [{"role": "user", "content": raw_xml}]
     assert state_store.get_current_round("sess-lin-external-only") == 0
+
+
+def test_gateway_external_only_lin_xml_with_cache_control_keeps_prefix_and_skips_injection(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            recent_context_interval_rounds=1,
+            recalled_memory_interval_rounds=1,
+            core_memory_interval_rounds=1,
+        ),
+        bucket_mgr,
+    )
+    persona_engine = RecordingPersonaEngine()
+    service.persona_engine = persona_engine
+
+    async def fail_select_dynamic_buckets(*args, **kwargs):
+        raise AssertionError("external-only Lin turn must not select recall buckets")
+
+    monkeypatch.setattr(service, "_select_dynamic_buckets", fail_select_dynamic_buckets)
+    raw_xml = (
+        "<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "activity-only content\n"
+        "</lin_dynamic_context>"
+    )
+
+    forward_payload, recalled_ids = _run(
+        service.prepare_payload(
+            {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "BP1",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": raw_xml},
+                ]
+            },
+            "sess-lin-external-cache",
+        )
+    )
+
+    assert recalled_ids is None
+    assert persona_engine.pre_calls == []
+    assert persona_engine.post_calls == []
+    assert forward_payload["messages"] == [
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "BP1",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        },
+        {"role": "user", "content": raw_xml},
+    ]
+    assert state_store.get_current_round("sess-lin-external-cache") == 0
+
+
+def test_gateway_strips_cache_control_when_boundary_cannot_be_safely_preserved(
+    monkeypatch, test_config, bucket_mgr, caplog
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            core_memory_interval_rounds=1,
+            recent_context_interval_rounds=0,
+            recalled_memory_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            related_memory_interval_rounds=0,
+        ),
+        bucket_mgr,
+    )
+
+    async def fake_core_memory(_all_buckets):
+        return "fallback core"
+
+    monkeypatch.setattr(service, "_build_core_memory_block", fake_core_memory)
+    caplog.set_level(logging.INFO, logger="ombre_brain.gateway")
+    raw_xml = (
+        "<lin_dynamic_context>\n"
+        "[Lin's recent activity]\n"
+        "fallback dynamic context\n"
+        "</lin_dynamic_context>\n\n"
+        "<lin_message>\nfallback Lin message\n</lin_message>"
+    )
+
+    forward_payload, _ = _run(
+        service.prepare_payload(
+            {
+                "messages": [
+                    {"role": "system", "content": "BP1"},
+                    {
+                        "role": "user",
+                        "content": raw_xml,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ]
+            },
+            "sess-cache-fallback",
+        )
+    )
+
+    messages = forward_payload["messages"]
+    assert not _contains_cache_control(messages)
+    assert messages[0] == {"role": "system", "content": "BP1"}
+    assert messages[1]["role"] == "system"
+    assert "Core Memory" in messages[1]["content"]
+    assert messages[2]["role"] == "system"
+    assert "Long-term State Summary" in messages[2]["content"]
+    assert messages[3] == {"role": "user", "content": raw_xml}
+    assert '"cacheBoundaryAction": "stripped_cache_control_uncertain"' in caplog.text
+    assert '"cacheBoundarySafe": false' in caplog.text
+    assert "fallback Lin message" not in caplog.text
+    assert "fallback dynamic context" not in caplog.text
 
 
 def test_gateway_persona_post_update_uses_cleaned_lin_message(
