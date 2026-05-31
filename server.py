@@ -2748,6 +2748,45 @@ async def api_bucket_update(request):
     })
 
 
+@mcp.custom_route("/api/bucket/{bucket_id}/archive", methods=["POST"])
+async def api_bucket_archive(request):
+    """Archive a resolved bucket from the dashboard without deleting content or embeddings."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    bucket_id = request.path_params["bucket_id"]
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    meta = bucket.get("metadata", {})
+    bucket_type = meta.get("type", "dynamic")
+    if bucket_type == "archived":
+        return JSONResponse({"error": "bucket already archived"}, status_code=400)
+    if bucket_type == "permanent":
+        return JSONResponse({"error": "permanent bucket cannot be archived from dashboard"}, status_code=400)
+    if meta.get("pinned"):
+        return JSONResponse({"error": "pinned bucket cannot be archived"}, status_code=400)
+    if meta.get("protected"):
+        return JSONResponse({"error": "protected bucket cannot be archived"}, status_code=400)
+    if meta.get("anchor"):
+        return JSONResponse({"error": "anchor bucket cannot be archived"}, status_code=400)
+    if not meta.get("resolved", False):
+        return JSONResponse({"error": "only resolved buckets can be archived"}, status_code=400)
+
+    ok = await bucket_mgr.archive(bucket_id)
+    if not ok:
+        return JSONResponse({"error": "archive failed"}, status_code=500)
+
+    return JSONResponse({"status": "archived", "id": bucket_id})
+
+
 @mcp.custom_route("/api/search", methods=["GET"])
 async def api_search(request):
     """Search buckets by query."""

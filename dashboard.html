@@ -315,7 +315,8 @@
     cursor: pointer;
     transition: all 0.18s ease;
   }
-  .detail-edit-button {
+  .detail-edit-button,
+  .detail-archive-button {
     width: 32px;
     height: 32px;
     padding: 0;
@@ -331,12 +332,17 @@
     justify-content: center;
     transition: color 0.18s ease, background-color 0.18s ease;
   }
+  .detail-archive-button svg {
+    width: 1em;
+    height: 1em;
+  }
   .content-edit-actions button:hover,
   .comment-delete-button:hover {
     color: var(--accent-dark);
     box-shadow: 3px 3px 8px var(--shadow-dark-subtle), -3px -3px 8px var(--shadow-light);
   }
-  .detail-edit-button:hover {
+  .detail-edit-button:hover,
+  .detail-archive-button:hover {
     color: var(--accent-dark);
     background: var(--accent-glow);
   }
@@ -351,6 +357,11 @@
     position: absolute;
     top: -38px;
     right: 2px;
+  }
+  .bucket-content-block .detail-archive-button {
+    position: absolute;
+    top: -38px;
+    right: 40px;
   }
   .content-edit-form {
     margin-top: 12px;
@@ -1897,6 +1908,28 @@ async function showDetail(id) {
     var b = await res.json();
     var meta = b.metadata || {};
     var comments = Array.isArray(meta.comments) ? meta.comments : [];
+    var bucketType = meta.type || b.type || 'dynamic';
+    var isResolved = meta.resolved === true || b.resolved === true;
+    var canArchive = isResolved &&
+      bucketType !== 'permanent' &&
+      bucketType !== 'archived' &&
+      !meta.pinned &&
+      !b.pinned &&
+      !meta.protected &&
+      !b.protected &&
+      !meta.anchor &&
+      !b.anchor;
+    var archiveButtonHtml = canArchive
+      ? '<button id="bucket-content-archive-button" type="button" class="detail-archive-button" onclick="archiveBucket(\'' + jsString(id) + '\')" aria-label="归档已解决" title="归档已解决">' +
+          '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+            '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5">' +
+              '<path stroke-linejoin="round" d="M4.382 8.813v8.5c0 .845.344 1.656.957 2.253a3.305 3.305 0 0 0 2.308.934h8.706c.866 0 1.696-.336 2.308-.934a3.15 3.15 0 0 0 .957-2.253v-8.5m0-5.313H4.382c-.901 0-1.632.714-1.632 1.594v2.125c0 .88.73 1.593 1.632 1.593h15.236c.901 0 1.632-.713 1.632-1.593V5.094c0-.88-.73-1.594-1.632-1.594"/>' +
+              '<path stroke-miterlimit="10" d="M12 17v-5"/>' +
+              '<path stroke-linejoin="round" d="m9.707 14.895l1.967 1.967a.458.458 0 0 0 .652 0l1.967-1.967"/>' +
+            '</g>' +
+          '</svg>' +
+        '</button>'
+      : '';
     var commentsHtml = comments.length
       ? '<div class="detail-comments"><h3>年轮</h3>' + comments.map(function(c) {
           var canDelete = c && c.id;
@@ -1943,6 +1976,7 @@ async function showDetail(id) {
         '<div class="field"><label>最后活跃</label>' + esc(meta.last_active || '—') + '</div>' +
       '</div>' +
       '<div class="bucket-content-block">' +
+        archiveButtonHtml +
         '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + jsString(id) + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
         '<div id="bucket-content-view" class="detail-content">' + esc(b.content || '') + '</div>' +
         '<form id="bucket-content-edit" class="content-edit-form hidden" onsubmit="submitBucketContentEdit(event, \'' + jsString(id) + '\')">' +
@@ -1964,10 +1998,12 @@ function startBucketContentEdit(bucketId) {
   var view = document.getElementById('bucket-content-view');
   var form = document.getElementById('bucket-content-edit');
   var editButton = document.getElementById('bucket-content-edit-button');
+  var archiveButton = document.getElementById('bucket-content-archive-button');
   if (!view || !form) return;
   view.classList.add('hidden');
   form.classList.remove('hidden');
   if (editButton) editButton.classList.add('hidden');
+  if (archiveButton) archiveButton.classList.add('hidden');
   var textarea = form.querySelector('textarea[name="content"]');
   if (textarea) {
     textarea.focus();
@@ -1980,10 +2016,33 @@ function cancelBucketContentEdit() {
   var view = document.getElementById('bucket-content-view');
   var form = document.getElementById('bucket-content-edit');
   var editButton = document.getElementById('bucket-content-edit-button');
+  var archiveButton = document.getElementById('bucket-content-archive-button');
   if (!view || !form) return;
   form.classList.add('hidden');
   view.classList.remove('hidden');
   if (editButton) editButton.classList.remove('hidden');
+  if (archiveButton) archiveButton.classList.remove('hidden');
+}
+
+async function archiveBucket(bucketId) {
+  if (!confirm('确定归档这条已解决记忆吗？它不会被删除，只会移入 archived。')) return;
+  var button = document.getElementById('bucket-content-archive-button');
+  if (button) button.disabled = true;
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId) + '/archive', {
+      method: 'POST'
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '归档失败');
+    }
+    await loadBuckets();
+    await showDetail(bucketId);
+  } catch (e) {
+    alert('归档失败: ' + e.message);
+    if (button) button.disabled = false;
+  }
 }
 
 async function submitBucketContentEdit(event, bucketId) {

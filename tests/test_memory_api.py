@@ -578,6 +578,138 @@ async def test_dashboard_content_api_edits_body_preserves_comments(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_dashboard_archive_requires_auth(monkeypatch, bucket_mgr, decay_eng):
+    import server
+    from starlette.responses import JSONResponse
+
+    bucket_id = await bucket_mgr.create(
+        content="Resolved operational note that should stay active without auth.",
+        name="archive-auth-check",
+        domain=["operations"],
+        resolved=True,
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(
+        server,
+        "_require_dashboard_auth",
+        lambda request: JSONResponse({"error": "unauthorized"}, status_code=401),
+    )
+
+    response = await server.api_bucket_archive(DummyRequest(path_params={"bucket_id": bucket_id}))
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert response.status_code == 401
+    assert bucket["metadata"]["type"] == "dynamic"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_archive_archives_resolved_dynamic_bucket(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="Completed operations item ready for archive.",
+        name="archive-resolved-dynamic",
+        domain=["operations"],
+        resolved=True,
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_bucket_archive(DummyRequest(path_params={"bucket_id": bucket_id}))
+    payload = json.loads(response.body)
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert response.status_code == 200
+    assert payload == {"status": "archived", "id": bucket_id}
+    assert bucket["metadata"]["type"] == "archived"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_archive_rejects_unresolved_bucket(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="Open operations item that should remain active.",
+        name="archive-unresolved-reject",
+        domain=["operations"],
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_bucket_archive(DummyRequest(path_params={"bucket_id": bucket_id}))
+    payload = json.loads(response.body)
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert response.status_code == 400
+    assert payload["error"] == "only resolved buckets can be archived"
+    assert bucket["metadata"]["type"] == "dynamic"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_archive_rejects_pinned_protected_permanent_anchor_bucket(
+    monkeypatch, bucket_mgr, decay_eng
+):
+    import server
+
+    cases = [
+        ("pinned", {"pinned": True}),
+        ("protected", {"protected": True}),
+        ("permanent", {"bucket_type": "permanent"}),
+        ("anchor", {"anchor": True}),
+    ]
+    bucket_ids = []
+    for label, kwargs in cases:
+        bucket_id = await bucket_mgr.create(
+            content=f"Resolved {label} operations note that should not archive.",
+            name=f"archive-{label}-reject",
+            domain=["operations"],
+            resolved=True,
+            **kwargs,
+        )
+        bucket_ids.append((label, bucket_id))
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    for label, bucket_id in bucket_ids:
+        response = await server.api_bucket_archive(DummyRequest(path_params={"bucket_id": bucket_id}))
+        payload = json.loads(response.body)
+        bucket = await bucket_mgr.get(bucket_id)
+
+        assert response.status_code == 400
+        assert "cannot be archived" in payload["error"]
+        assert bucket["metadata"]["type"] == ("permanent" if label == "permanent" else "dynamic")
+
+
+@pytest.mark.asyncio
+async def test_dashboard_archive_does_not_delete_embedding(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="Resolved note with existing vector data.",
+        name="archive-embedding-preserve",
+        domain=["operations"],
+        resolved=True,
+    )
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    response = await server.api_bucket_archive(DummyRequest(path_params={"bucket_id": bucket_id}))
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert response.status_code == 200
+    assert bucket["metadata"]["type"] == "archived"
+    assert embedding_engine.deleted == []
+
+
+@pytest.mark.asyncio
 async def test_dashboard_comment_delete_can_delete_dashboard_source_comment(monkeypatch, bucket_mgr, decay_eng):
     import server
 
