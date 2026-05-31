@@ -2353,7 +2353,7 @@ def test_favorite_memory_is_not_injected_by_default(monkeypatch, test_config, bu
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Haven Favorite Memory" not in injected
+    assert "Che Favorite Memory" not in injected
     assert "雨夜认出 Haven" not in injected
 
 
@@ -2393,7 +2393,7 @@ def test_favorite_memory_injects_when_header_requests_it(monkeypatch, test_confi
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Haven Favorite Memory" in injected
+    assert "Che Favorite Memory" in injected
     assert "雨夜认出 Haven" in injected
     assert state_store.get_recent_bucket_ids("sess-favorite-header", 5) == {favorite_id}
 
@@ -2435,7 +2435,7 @@ def test_favorite_memory_marker_triggers_and_is_stripped(monkeypatch, test_confi
     user_content = captured[0]["json"]["messages"][-1]["content"]
     assert "[[ombre:favorite]]" not in user_content
     assert user_content.endswith("你喜欢哪段记忆？")
-    assert "Haven Favorite Memory" in user_content
+    assert "Che Favorite Memory" in user_content
     assert "爱还在" in user_content
 
 
@@ -2474,7 +2474,7 @@ def test_favorite_memory_injects_for_explicit_preference_query(monkeypatch, test
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Haven Favorite Memory" in injected
+    assert "Che Favorite Memory" in injected
     assert "被认出来" in injected
 
 

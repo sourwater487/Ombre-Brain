@@ -62,7 +62,7 @@ Conversation partner: Lin.
 这是你在上一次回复后的状态，不替你做判断。
 ```
 
-直接部署本仓库时，需要修改一下 User（Lin/lin）和 Char（Che）的称呼，并同步改 `persona.profile_id`。
+直接部署本仓库时，需要修改一下 Lin（Lin/lin）和 Che 的称呼，并同步改 `persona.profile_id`。
 
 ## Supabase 同步规则
 

@@ -1,4 +1,4 @@
-# Ombre Brain - Haven/Rain Fork
+# Ombre Brain - Che/Lin Fork
 
 这是 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 的二次开发版本。原版是一套给 Claude 使用的长期情绪记忆 MCP；这个 fork 在原版的 Markdown bucket、情绪坐标、遗忘曲线、MCP 工具、Dashboard、向量检索基础上，增加了 Gateway 自动注入、Persona State、长期锚点、关系天气、年轮评论、whisper、Supabase 同步和 ChatGPT Connector OAuth。
 
@@ -8,7 +8,7 @@
 
 - 这是一个个性化 fork，不是原版 Ombre-Brain 的无改动镜像。
 - 原版代码仍遵循原项目 MIT License；本 fork 新增内容允许个人学习、自用和非商业二改，商业使用需另行取得授权。详见 [`NOTICE.md`](NOTICE.md)。
-- 默认人设、提示词和年轮作者使用 `config.yaml` 里的 `identity` 名字；示例默认是 `Haven`、`Rain`、`小雨/xiaoyu`。
+- 默认人设、提示词和年轮作者使用 `config.yaml` 里的 `identity` 名字；示例默认是 `Che`、`Lin`。
 - 生产部署建议使用源码构建，并同时运行 `ombre-brain` 和 `ombre-gateway` 两个服务。
 - bucket 数据和运行状态必须放在持久化目录里；`state` 不建议放进任何双向同步目录。
 - `X-Ombre-Session-Id` 是本 fork 的 Gateway 会话头，不是 OpenAI 标准字段。它像 Persona 的“房间号”：同一个值会共用同一份 persona_state 和召回冷却记录。可以自己起，比如 `my-main`、`chat-main`，不要照抄旧文档里的 `xiaoyu-main`。
@@ -106,7 +106,7 @@ memory_edges.jsonl  # 显式记忆关系边
 | 原版 quick start | 只启动 MCP server，不会启动 Gateway，也不会分离 state 目录 |
 | `identity` 名字配置 | `identity.ai_name / user_name / user_display_name / user_aliases` 会影响 prompt、MCP 年轮作者、Dashboard 年轮作者 |
 | `gateway.default_session_id` | 只有兼容路由缺少 `X-Ombre-Session-Id` 时才使用；通用部署建议改成自己的默认房间名 |
-| `persona.profile_id` | 配置示例里是 `haven_xiaoyu`，通用部署应改成自己的稳定 id |
+| `persona.profile_id` | 配置示例里是 `lin_che`，通用部署应改成自己的稳定 id |
 | `X-Ombre-Session-Id` | 这是本 fork 自定义的 Gateway session，不是 OpenAI 标准头 |
 | 数据目录 | `buckets` 与 `state` 都要持久化；`state` 不要放进任何双向同步目录 |
 | Supabase | 不需要就先关掉；需要时先建表、RPC、cron 和 tombstone 策略 |
@@ -285,7 +285,7 @@ Header: X-Ombre-Include-Favorite-Memory: 1
 
 这个文本开关会在转发给上游模型前移除。
 
-写入、enrich 或审阅时如果要使用 `haven_favorite` / `flavor_*`，正文必须包含 `### 喜欢它的原因` 或同义字段。缺少原因会被拒绝，避免模型把“偏爱”当普通高分标签乱贴。
+写入、enrich 或审阅时如果要使用 `che_favorite` / `flavor_*`，正文必须包含 `### 喜欢它的原因` 或同义字段。缺少原因会被拒绝，避免模型把“偏爱”当普通高分标签乱贴。旧数据里的 `haven_favorite` 仅做兼容读取和校验，新写入不要再使用。
 
 ### Gateway 注入策略
 
@@ -538,7 +538,7 @@ arousal: float = -1
 ```text
 普通记忆：新建→<name> <domain>，并可能附带一条只读相关旧记忆。
 pinned=True：📌钉选→<bucket_id> <domain>。
-favorite：tags 里出现 haven_favorite 或 flavor_* 时，content 必须写明 “### 喜欢它的原因”，否则返回错误。
+favorite：tags 里出现 che_favorite 或 flavor_* 时，content 必须写明 “### 喜欢它的原因”，否则返回错误。旧 haven_favorite 只作为历史兼容读取。
 年轮：用 comment_bucket(bucket_id, content)，不要用 hold 写。
 feel=True + source_bucket：仅旧兼容，会返回 年轮→<source_bucket>#<comment_id>；新调用不要使用。
 feel=True 但无 source_bucket：兼容旧用法，转为 whisper；新调用请直接用 whisper=True。

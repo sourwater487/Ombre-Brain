@@ -681,9 +681,11 @@ def _select_anchor_buckets(all_buckets: list[dict], limit: int = 2) -> list[dict
 
 
 def _has_favorite_tag(tags: list | set | tuple | None) -> bool:
-    return any(
-        tag == "haven_favorite" or tag.startswith("flavor_")
-        for tag in {str(item) for item in (tags or [])}
+    tag_set = {str(item) for item in (tags or [])}
+    return (
+        "che_favorite" in tag_set
+        or "haven_favorite" in tag_set  # legacy compatibility; new writes use che_favorite
+        or any(tag.startswith("flavor_") for tag in tag_set)
     )
 
 
@@ -1692,7 +1694,10 @@ async def breath(
                     clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
                     summary = await dehydrator.dehydrate(_bucket_text_for_embedding(b), clean_meta)
                     dormant_days = _bucket_days_since_last_active(b["metadata"])
-                    entry = f"[surface_type: resurface, dormant_days={dormant_days:.0f}]\n{summary}"
+                    entry = (
+                        f"[surface_type: resurface | bucket_id:{b['id']} | "
+                        f"dormant_days:{dormant_days:.0f}]\n{summary}"
+                    )
                     entry_tokens = count_tokens_approx(entry)
                     if entry_tokens > drift_remaining:
                         break
@@ -1969,11 +1974,11 @@ async def hold(
     arousal: float = -1,
 ) -> str:
     """写入一条长期记忆卡,不是聊天流水、运维记录或整篇日记。写前应先用 breath/read_bucket 查重。
-    普通事实: hold(content="YYYY-MM-DD, 当前用户...", tags="relationship_event 或 project_event", importance=5-7)。
+    普通事实: hold(content="YYYY-MM-DD, Lin...", tags="relationship_event 或 project_event", importance=5-7)。
     承诺/待办: tags 传 "commitment,todo" 或 "commitment,wish"; content 写清谁答应了什么、何时/什么条件下要继续。
     给旧记忆写年轮/再次阅读感受: 优先用 comment_bucket(bucket_id="...", content="...", kind="feel", valence=0.x, arousal=0.x)。
     无源记忆的碎碎念/悄悄话: 用 hold(content="...", whisper=True, valence=0.x, arousal=0.x),会存为独立 feel 并打 whisper 标签。
-    新记忆本身值得偏爱: tags 可传 "haven_favorite,flavor_偏爱"; content 必须包含很短的 "### 喜欢它的原因" 段落。
+    新记忆本身值得偏爱: tags 可传 "che_favorite,flavor_偏爱"; content 必须包含很短的 "### 喜欢它的原因" 段落。
     普通写入会新建 bucket,写 embedding,后台触发 ReflectionEngine 补 tags/confidence/memory_edges,并返回一条只读相关旧记忆。
     pinned=True 只给极少数核心准则,技术进度和运维细节不要钉选。
     feel=True 且带 source_bucket 是旧兼容入口,新调用不要使用；feel=True 但没有 source_bucket 会转为 whisper。
@@ -2223,7 +2228,7 @@ async def trace(
     resolved=1 或 digested=1 让旧事/已完成事项沉底; pinned=1 只给核心准则; anchor=1 只给经过时间验证且未来长期需要的锚点(受数量和年龄限制)。
     tags/domain/content 是替换不是追加: 改 tags 或正文前先 read_bucket,保留旧值后再传完整新值。
     给旧记忆补 "喜欢它的原因" 或 affect_anchor: 先 read_bucket,再 trace(content="旧正文 + 新段落")。
-    标记偏爱: 先 read_bucket 取现有 tags,再 trace(tags="原tag,haven_favorite,flavor_...")。
+    标记偏爱: 先 read_bucket 取现有 tags,再 trace(tags="原tag,che_favorite,flavor_...")。
     delete=True 删除。只传需要改的字段,-1或空=不改。
     """
 

@@ -1785,7 +1785,7 @@ class GatewayService:
         for bucket in all_buckets:
             meta = bucket.get("metadata", {})
             tags = {str(tag) for tag in meta.get("tags", [])}
-            if "che_favorite" not in tags:
+            if not ({"che_favorite", "haven_favorite"} & tags):
                 continue
             if meta.get("resolved") or meta.get("digested"):
                 continue
@@ -1796,12 +1796,14 @@ class GatewayService:
 
         active_pool = [bucket for bucket in candidates if bucket.get("id") not in recent_ids] or candidates
 
-        def favorite_key(bucket: dict) -> tuple[int, int, int, str]:
+        def favorite_key(bucket: dict) -> tuple[int, int, int, int, str]:
             meta = bucket.get("metadata", {})
             tags = {str(tag) for tag in meta.get("tags", [])}
+            tag_priority = 1 if "che_favorite" in tags else 0
             flavor_count = sum(1 for tag in tags if tag.startswith("flavor_"))
             protected = 1 if (meta.get("anchor") or meta.get("pinned") or meta.get("protected")) else 0
             return (
+                tag_priority,
                 protected,
                 flavor_count,
                 int(meta.get("importance", 5)),
@@ -1815,15 +1817,18 @@ class GatewayService:
         selected_ids = []
         for bucket in selected:
             summary = await self._summarize_bucket(bucket)
-            tokens = count_tokens_approx(summary)
+            line = self._format_bucket_summary(bucket, summary)
+            tokens = count_tokens_approx(line)
             if tokens <= 0:
                 continue
             if tokens > remaining and parts:
                 break
             if tokens > remaining:
-                summary = self._trim_text(summary, remaining)
-                tokens = count_tokens_approx(summary)
-            parts.append(f"- {summary}")
+                prefix_tokens = count_tokens_approx(self._bucket_id_prefix(bucket))
+                summary = self._trim_text(summary, max(0, remaining - prefix_tokens))
+                line = self._format_bucket_summary(bucket, summary)
+                tokens = count_tokens_approx(line)
+            parts.append(f"- {line}")
             selected_ids.append(bucket["id"])
             remaining -= tokens
             if remaining <= 0:
@@ -1887,6 +1892,7 @@ class GatewayService:
                 continue
             target = bucket_map.get(target_id)
             summary = await self._summarize_bucket(target)
+            summary = self._format_bucket_summary(target, summary)
             reason = edge.get("reason") or edge.get("relation_type", "relates_to")
             line = (
                 f"- {edge.get('source')} -> {target_id} "
@@ -2038,21 +2044,31 @@ class GatewayService:
         parts = []
         for bucket in buckets:
             summary = await self._summarize_bucket(bucket)
-            summary_tokens = count_tokens_approx(summary)
-            if summary_tokens <= 0:
+            line = self._format_bucket_summary(bucket, summary)
+            line_tokens = count_tokens_approx(line)
+            if line_tokens <= 0:
                 continue
-            if summary_tokens > remaining and parts:
+            if line_tokens > remaining and parts:
                 break
-            if summary_tokens > remaining:
-                summary = self._trim_text(summary, remaining)
-                summary_tokens = count_tokens_approx(summary)
-            if summary_tokens <= 0:
+            if line_tokens > remaining:
+                prefix_tokens = count_tokens_approx(self._bucket_id_prefix(bucket))
+                summary = self._trim_text(summary, max(0, remaining - prefix_tokens))
+                line = self._format_bucket_summary(bucket, summary)
+                line_tokens = count_tokens_approx(line)
+            if line_tokens <= 0:
                 continue
-            parts.append(f"- {summary}")
-            remaining -= summary_tokens
+            parts.append(f"- {line}")
+            remaining -= line_tokens
             if remaining <= 0:
                 break
         return "\n".join(parts)
+
+    def _bucket_id_prefix(self, bucket: dict) -> str:
+        bucket_id = str(bucket.get("id") or "").strip()
+        return f"[bucket_id:{bucket_id}] " if bucket_id else ""
+
+    def _format_bucket_summary(self, bucket: dict, summary: str) -> str:
+        return f"{self._bucket_id_prefix(bucket)}{summary}".strip()
 
     async def _summarize_bucket(self, bucket: dict) -> str:
         metadata = {

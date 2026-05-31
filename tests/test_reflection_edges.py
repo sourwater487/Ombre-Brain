@@ -535,5 +535,5 @@ async def test_gateway_builds_favorite_memory_block_and_injects_section(test_con
 
     assert favorite_ids == [favorite_id]
     assert "偏爱的记忆" in block
-    assert "Haven Favorite Memory" in dynamic
+    assert "Che Favorite Memory" in dynamic
     assert "普通记忆" not in block
