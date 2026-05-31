@@ -2076,7 +2076,7 @@ class GatewayService:
             return ""
         cutoff = datetime.now() - timedelta(hours=self.head_recent_hours)
         enforce_topic = (
-            self._query_requires_topic_evidence(query_text)
+            self._recent_context_requires_topic_evidence(query_text)
             and not self._query_wants_body_chain(query_text)
         )
         recent_buckets = []
@@ -2728,6 +2728,9 @@ class GatewayService:
 
     def _auto_query_too_vague(self, query: str) -> bool:
         return self.recall_policy.is_auto_query_too_vague(query)
+
+    def _recent_context_requires_topic_evidence(self, query: str) -> bool:
+        return self.recall_policy.is_auto_concrete_topic_query(query)
 
     def _moment_has_query_topic_evidence(self, query: str, moment: dict) -> bool:
         return self.recall_policy.moment_has_topic_evidence(query, moment)

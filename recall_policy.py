@@ -191,6 +191,45 @@ class RecallPolicy:
             return False
         return not self._auto_query_has_concrete_anchor(text)
 
+    def is_auto_concrete_topic_query(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text or self.is_auto_query_too_vague(text):
+            return False
+        if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
+            return True
+        compact = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", text)
+        candidate = compact
+        for prefix in ("最近", "今天", "昨天", "明天", "之前", "刚才", "刚刚", "这次", "当前", "现在"):
+            if candidate.startswith(prefix) and len(candidate) > len(prefix):
+                candidate = candidate[len(prefix):]
+                break
+        candidate = candidate.strip("的")
+        if not re.fullmatch(r"[\u4e00-\u9fff]{2,12}", candidate):
+            return False
+        context_terms = {str(term).lower() for term in self.options.context_terms}
+        if candidate.lower() in context_terms:
+            return False
+        blockers = (
+            "我",
+            "你",
+            "他",
+            "她",
+            "它",
+            "这",
+            "那",
+            "什么",
+            "怎么",
+            "怎样",
+            "为什么",
+            "是不是",
+            "有没有",
+            "想起",
+            "想起来",
+            "记忆",
+            "上下文",
+        )
+        return not any(marker in candidate for marker in blockers)
+
     def _auto_query_has_concrete_anchor(self, query: str) -> bool:
         if re.search(r"\b[A-Za-z][A-Za-z0-9_.:/-]{2,}\b", query):
             return True
