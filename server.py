@@ -1915,7 +1915,7 @@ async def api_bucket_comment(request):
 
 @mcp.custom_route("/api/bucket/{bucket_id}/comments/{comment_id}", methods=["DELETE"])
 async def api_bucket_comment_delete(request):
-    """Delete a dashboard-authenticated user comment from a bucket."""
+    """Delete a comment from a bucket via the authenticated dashboard."""
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -1931,16 +1931,11 @@ async def api_bucket_comment_delete(request):
     if not await bucket_mgr.get(bucket_id):
         return JSONResponse({"error": "not found", "id": bucket_id}, status_code=404)
 
-    result = await bucket_mgr.delete_comment(
-        bucket_id,
-        comment_id,
-        allowed_author=_dashboard_author_name(),
-        allowed_source="dashboard",
-    )
+    result = await bucket_mgr.delete_comment(bucket_id, comment_id)
     if result.get("status") == "not_found":
         return JSONResponse({"error": "comment not found"}, status_code=404)
     if result.get("status") == "forbidden":
-        return JSONResponse({"error": "only dashboard user comments can be deleted"}, status_code=403)
+        return JSONResponse({"error": "dashboard comment delete forbidden"}, status_code=403)
     if result.get("status") != "deleted":
         return JSONResponse({"error": "delete failed"}, status_code=500)
 

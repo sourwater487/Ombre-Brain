@@ -454,23 +454,35 @@ async def test_comment_bucket_uses_configured_ai_author(monkeypatch, bucket_mgr,
 
 
 @pytest.mark.asyncio
-async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr, decay_eng):
+async def test_dashboard_comment_api_writes_configured_default_user_author(monkeypatch, bucket_mgr, decay_eng):
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="小雨想在前端补一句评论。",
-        name="前端评论",
-        domain=["恋爱"],
+        content="Dashboard detail page needs an added note.",
+        name="frontend-comment",
+        domain=["operations"],
     )
     monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(server, "decay_engine", decay_eng)
     monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(
+        server,
+        "config",
+        {
+            **server.config,
+            "identity": {
+                "ai_name": "AssistantA",
+                "user_name": "OperatorA",
+                "user_display_name": "Operator A",
+            },
+        },
+    )
     embedding_engine = CapturingEmbeddingEngine()
     monkeypatch.setattr(server, "embedding_engine", embedding_engine)
 
     response = await server.api_bucket_comment(
         DummyRequest(
-            {"content": "这句是小雨从前端补的。", "author": "Haven"},
+            {"content": "This note was added from the dashboard.", "author": "IgnoredAuthor"},
             path_params={"bucket_id": bucket_id},
         )
     )
@@ -481,9 +493,9 @@ async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr,
 
     assert response.status_code == 200
     assert payload["status"] == "commented"
-    assert comment["author"] == "Rain"
+    assert comment["author"] == "OperatorA"
     assert comment["source"] == "dashboard"
-    assert comment["content"] == "这句是小雨从前端补的。"
+    assert comment["content"] == "This note was added from the dashboard."
     assert embedding_call[0] == bucket_id
 
 
@@ -566,26 +578,152 @@ async def test_dashboard_content_api_edits_body_preserves_comments(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_dashboard_comment_delete_only_allows_rain_dashboard_comments(monkeypatch, bucket_mgr, decay_eng):
+async def test_dashboard_comment_delete_can_delete_dashboard_source_comment(monkeypatch, bucket_mgr, decay_eng):
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="源记忆。",
-        name="年轮删除",
-        domain=["恋爱"],
+        content="Source record for dashboard comment deletion.",
+        name="comment-delete",
+        domain=["operations"],
     )
-    rain = await bucket_mgr.add_comment(
+    comment = await bucket_mgr.add_comment(
         bucket_id,
-        "小雨从前端写的年轮。",
-        author="Rain",
+        "Dashboard-authored note for deletion.",
+        author="OperatorA",
         source="dashboard",
         touch=False,
     )
-    haven = await bucket_mgr.add_comment(
+    other = await bucket_mgr.add_comment(
         bucket_id,
-        "Haven 写的年轮。",
-        author="Haven",
-        source="hold(feel=True)",
+        "Separate note that should remain.",
+        author="AssistantA",
+        source="comment_bucket",
+        touch=False,
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    deleted = await server.api_bucket_comment_delete(
+        DummyRequest(path_params={"bucket_id": bucket_id, "comment_id": comment["id"]})
+    )
+    bucket = await bucket_mgr.get(bucket_id)
+    remaining_ids = [comment["id"] for comment in bucket["metadata"]["comments"]]
+
+    assert deleted.status_code == 200
+    assert remaining_ids == [other["id"]]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_comment_delete_can_delete_comment_bucket_source_comment(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="Source record with tool-authored note.",
+        name="tool-comment-delete",
+        domain=["operations"],
+    )
+    comment = await bucket_mgr.add_comment(
+        bucket_id,
+        "Tool-authored note for deletion.",
+        author="AssistantA",
+        source="comment_bucket",
+        touch=False,
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    deleted = await server.api_bucket_comment_delete(
+        DummyRequest(path_params={"bucket_id": bucket_id, "comment_id": comment["id"]})
+    )
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert deleted.status_code == 200
+    assert bucket["metadata"]["comments"] == []
+
+
+@pytest.mark.asyncio
+async def test_dashboard_comment_delete_can_delete_feel_comment_backfill_source_comment(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="Source record with migrated note.",
+        name="migrated-comment-delete",
+        domain=["operations"],
+    )
+    comment = await bucket_mgr.add_comment(
+        bucket_id,
+        "Migrated note for deletion.",
+        author="ImporterA",
+        source="feel_comment_backfill",
+        touch=False,
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    deleted = await server.api_bucket_comment_delete(
+        DummyRequest(path_params={"bucket_id": bucket_id, "comment_id": comment["id"]})
+    )
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert deleted.status_code == 200
+    assert bucket["metadata"]["comments"] == []
+
+
+@pytest.mark.asyncio
+async def test_dashboard_comment_delete_still_requires_dashboard_auth(monkeypatch, bucket_mgr, decay_eng):
+    import server
+    from starlette.responses import JSONResponse
+
+    bucket_id = await bucket_mgr.create(
+        content="Source record for auth check.",
+        name="auth-comment-delete",
+        domain=["operations"],
+    )
+    comment = await bucket_mgr.add_comment(
+        bucket_id,
+        "Note that should remain without auth.",
+        author="OperatorA",
+        source="dashboard",
+        touch=False,
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(
+        server,
+        "_require_dashboard_auth",
+        lambda request: JSONResponse({"error": "unauthorized"}, status_code=401),
+    )
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    response = await server.api_bucket_comment_delete(
+        DummyRequest(path_params={"bucket_id": bucket_id, "comment_id": comment["id"]})
+    )
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert response.status_code == 401
+    assert bucket["metadata"]["comments"][0]["id"] == comment["id"]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_comment_delete_queues_embedding_refresh(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="Source record for embedding refresh check.",
+        name="embedding-refresh-comment-delete",
+        domain=["operations"],
+    )
+    comment = await bucket_mgr.add_comment(
+        bucket_id,
+        "Deleted note should refresh derived embedding text.",
+        author="AssistantA",
+        source="comment_bucket",
         touch=False,
     )
     monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
@@ -594,19 +732,14 @@ async def test_dashboard_comment_delete_only_allows_rain_dashboard_comments(monk
     embedding_engine = CapturingEmbeddingEngine()
     monkeypatch.setattr(server, "embedding_engine", embedding_engine)
 
-    forbidden = await server.api_bucket_comment_delete(
-        DummyRequest(path_params={"bucket_id": bucket_id, "comment_id": haven["id"]})
-    )
     deleted = await server.api_bucket_comment_delete(
-        DummyRequest(path_params={"bucket_id": bucket_id, "comment_id": rain["id"]})
+        DummyRequest(path_params={"bucket_id": bucket_id, "comment_id": comment["id"]})
     )
-    bucket = await bucket_mgr.get(bucket_id)
-    remaining_ids = [comment["id"] for comment in bucket["metadata"]["comments"]]
+    payload = json.loads(deleted.body)
     embedding_call = await wait_for_embedding_call(embedding_engine, bucket_id)
 
-    assert forbidden.status_code == 403
     assert deleted.status_code == 200
-    assert remaining_ids == [haven["id"]]
+    assert payload["embedding_queued"] is True
     assert embedding_call[0] == bucket_id
 
 

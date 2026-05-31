@@ -1899,7 +1899,7 @@ async function showDetail(id) {
     var comments = Array.isArray(meta.comments) ? meta.comments : [];
     var commentsHtml = comments.length
       ? '<div class="detail-comments"><h3>年轮</h3>' + comments.map(function(c) {
-          var canDelete = c && c.id && c.author === dashboardCommentAuthor && c.source === 'dashboard';
+          var canDelete = c && c.id;
           var commentTime = c.original_feel_created || c.created || '';
           var safeBucketId = jsString(id);
           var safeCommentId = jsString(c.id);
@@ -2058,6 +2058,7 @@ async function submitBucketComment(event, bucketId) {
 }
 
 async function deleteBucketComment(bucketId, commentId) {
+  if (!confirm('确定删除这条年轮吗？此操作不会删除 bucket 正文。')) return;
   try {
     var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId) + '/comments/' + encodeURIComponent(commentId), {
       method: 'DELETE'
