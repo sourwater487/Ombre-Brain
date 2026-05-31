@@ -1867,6 +1867,57 @@ def test_strip_external_context_ignores_ombre_context_before_lin_xml(
     assert service._strip_external_context(no_lin_message) == "没有 Lin XML wrapper 的原文"
 
 
+def test_strip_external_context_ignores_ombre_live_context_before_lin_xml(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            current_inner_state_interval_rounds=1,
+            recent_context_interval_rounds=1,
+            recalled_memory_interval_rounds=1,
+            core_memory_interval_rounds=1,
+        ),
+        bucket_mgr,
+    )
+    persona_engine = RecordingPersonaEngine()
+    service.persona_engine = persona_engine
+
+    wrapped = (
+        "<ombre_live_context>\nLive private context\n</ombre_live_context>\n\n"
+        "<lin_dynamic_context>\n[Lin's recent activity]\nactivity text\n</lin_dynamic_context>\n\n"
+        "<lin_message>\n只取 Lin 消息\n</lin_message>"
+    )
+    assert service._strip_external_context(wrapped) == "只取 Lin 消息"
+
+    live_context_with_tail = (
+        "<ombre_live_context>\nLive private context\n</ombre_live_context>\n\n"
+        "普通文本"
+    )
+    assert service._strip_external_context(live_context_with_tail) == "普通文本"
+
+    live_context_only = "<ombre_live_context>\nLive private context\n</ombre_live_context>"
+    assert service._strip_external_context(live_context_only) == ""
+
+    async def fail_select_dynamic_buckets(*args, **kwargs):
+        raise AssertionError("external-only Ombre live context must not select recall buckets")
+
+    monkeypatch.setattr(service, "_select_dynamic_buckets", fail_select_dynamic_buckets)
+    forward_payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": live_context_only}]},
+            "sess-ombre-live-external-only",
+        )
+    )
+
+    assert recalled_ids is None
+    assert persona_engine.pre_calls == []
+    assert persona_engine.post_calls == []
+    assert forward_payload["messages"] == [{"role": "user", "content": live_context_only}]
+    assert state_store.get_current_round("sess-ombre-live-external-only") == 0
+
+
 def test_gateway_merges_ombre_context_before_plain_lin_message_with_cache_control(
     monkeypatch, test_config, bucket_mgr
 ):

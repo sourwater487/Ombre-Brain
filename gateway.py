@@ -1579,7 +1579,7 @@ class GatewayService:
 
     def _extract_lin_message_from_wrapped_text(self, text: str) -> tuple[str, bool, bool]:
         raw_text = str(text or "")
-        ombre_pattern = r"<ombre_context>.*?</ombre_context>"
+        ombre_pattern = r"<ombre(?:_live)?_context>.*?</ombre(?:_live)?_context>"
         raw_text = re.sub(ombre_pattern, "", raw_text, flags=re.DOTALL).strip()
         dynamic_pattern = r"<lin_dynamic_context>.*?</lin_dynamic_context>"
         message_pattern = r"<lin_message>(.*?)</lin_message>"
