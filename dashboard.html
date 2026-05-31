@@ -573,7 +573,12 @@
     border-radius: 20px;
     border: 1px solid var(--border);
     box-shadow: inset 4px 4px 10px var(--shadow-dark-subtle), inset -4px -4px 10px var(--shadow-light);
+    display: block;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
   }
+  #network-view { position: relative; }
   .network-legend {
     display: flex;
     gap: 20px;
@@ -588,6 +593,48 @@
     border-radius: 50%;
     display: inline-block;
     box-shadow: 0 1px 3px var(--shadow-dark-subtle);
+  }
+  .network-popover {
+    position: absolute;
+    z-index: 20;
+    width: min(280px, calc(100vw - 32px));
+    padding: 14px 16px;
+    border-radius: 16px;
+    background: rgba(247, 242, 232, 0.96);
+    border: 1px solid var(--border-strong);
+    box-shadow: 8px 8px 20px var(--shadow-dark-subtle), -6px -6px 16px var(--shadow-light);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.55;
+    backdrop-filter: blur(12px);
+  }
+  .network-popover.hidden { display: none; }
+  .network-popover h4 {
+    color: var(--accent);
+    font-size: 14px;
+    margin-bottom: 6px;
+    overflow-wrap: anywhere;
+  }
+  .network-popover .network-popover-meta {
+    color: var(--text-dim);
+    overflow-wrap: anywhere;
+  }
+  .network-popover .network-popover-preview {
+    margin-top: 8px;
+    color: var(--text);
+    max-height: 96px;
+    overflow: hidden;
+  }
+  .network-popover button {
+    margin-top: 12px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--accent-glow);
+    color: var(--accent);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
   }
 
   .persona-shell {
@@ -700,6 +747,10 @@
   }
   .persona-guidance {
     margin-top: 24px;
+    display: grid;
+    gap: 10px;
+  }
+  .persona-guidance-box {
     padding: 16px 18px;
     border-radius: 18px;
     background: rgba(253, 252, 240, 0.52);
@@ -707,6 +758,14 @@
     color: var(--text);
     font-size: 13px;
     line-height: 1.8;
+  }
+  .persona-guidance-box label {
+    display: block;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
   }
   .persona-status-line {
     display: flex;
@@ -1331,6 +1390,7 @@
     <div class="legend-item"><span class="legend-dot" style="background:#B0A590"></span> archived</div>
   </div>
   <canvas id="network-canvas"></canvas>
+  <div id="network-popover" class="network-popover hidden"></div>
 </div>
 
 <div class="content" id="import-view" style="display:none">
@@ -1610,6 +1670,10 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
+    if (target !== 'network') {
+      hideNetworkPopover();
+      stopNetworkAnimation();
+    }
     if (target === 'reflection') renderReflectionReview();
     if (target === 'persona') loadPersona();
     if (target === 'network') loadNetwork();
@@ -2139,148 +2203,530 @@ function closeDetail() {
 }
 
 var networkData = null;
+var networkState = {
+  canvas: null,
+  ctx: null,
+  width: 0,
+  height: 0,
+  data: { nodes: [], edges: [] },
+  positions: {},
+  edgeMap: {},
+  nodeMap: {},
+  view: { x: 0, y: 0 },
+  scale: 1,
+  drag: null,
+  hoverId: null,
+  selectedId: null,
+  animationFrame: null,
+  popover: null
+};
+
 async function loadNetwork() {
   var canvas = document.getElementById('network-canvas');
   var ctx = canvas.getContext('2d');
-  canvas.width = canvas.offsetWidth * window.devicePixelRatio;
-  canvas.height = canvas.offsetHeight * window.devicePixelRatio;
-  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-  var W = canvas.offsetWidth, H = canvas.offsetHeight;
-
-  ctx.fillStyle = '#FDFCF0';
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#8A8070';
-  ctx.font = '14px Inter, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('加载记忆网络…', W/2, H/2);
+  networkState.canvas = canvas;
+  networkState.ctx = ctx;
+  networkState.popover = document.getElementById('network-popover');
+  bindNetworkCanvas(canvas);
+  stopNetworkAnimation();
+  hideNetworkPopover();
+  resizeNetworkCanvas();
+  drawNetworkMessage('加载记忆网络…');
 
   try {
     var res = await authFetch(BASE + '/api/network');
     if (!res) return;
     networkData = await res.json();
-    drawNetwork(ctx, W, H, networkData);
+    initNetworkState(networkData);
+    scheduleNetworkDraw();
   } catch(e) {
-    ctx.fillText('加载失败: ' + e.message, W/2, H/2 + 24);
+    drawNetworkMessage('加载失败: ' + e.message);
   }
 }
 
+function bindNetworkCanvas(canvas) {
+  if (canvas.dataset.networkBound === '1') return;
+  canvas.dataset.networkBound = '1';
+  canvas.addEventListener('pointerdown', onNetworkPointerDown);
+  canvas.addEventListener('pointermove', onNetworkPointerMove);
+  canvas.addEventListener('pointerup', onNetworkPointerUp);
+  canvas.addEventListener('pointercancel', onNetworkPointerCancel);
+  canvas.addEventListener('pointerleave', function(event) {
+    if (!networkState.drag) {
+      networkState.hoverId = null;
+      updateNetworkCursor();
+    }
+  });
+  window.addEventListener('resize', function() {
+    if (!networkState.canvas || getActiveTab() !== 'network') return;
+    resizeNetworkCanvas();
+    clampNetworkView();
+    hideNetworkPopover();
+    scheduleNetworkDraw();
+  });
+}
+
+function resizeNetworkCanvas() {
+  var canvas = networkState.canvas;
+  if (!canvas) return;
+  var ratio = window.devicePixelRatio || 1;
+  networkState.width = canvas.offsetWidth;
+  networkState.height = canvas.offsetHeight;
+  canvas.width = Math.max(1, Math.floor(networkState.width * ratio));
+  canvas.height = Math.max(1, Math.floor(networkState.height * ratio));
+  networkState.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+}
+
+function drawNetworkMessage(message) {
+  var ctx = networkState.ctx;
+  if (!ctx) return;
+  ctx.fillStyle = '#FDFCF0';
+  ctx.fillRect(0, 0, networkState.width, networkState.height);
+  ctx.fillStyle = '#8A8070';
+  ctx.font = '14px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(message, networkState.width / 2, networkState.height / 2);
+}
+
+function initNetworkState(data) {
+  var nodes = Array.isArray(data.nodes) ? data.nodes : [];
+  var edges = Array.isArray(data.edges) ? data.edges : [];
+  networkState.data = { nodes: nodes, edges: edges };
+  networkState.positions = initialNetworkLayout(nodes, edges);
+  networkState.edgeMap = buildNetworkEdgeMap(edges);
+  networkState.nodeMap = {};
+  nodes.forEach(function(node) {
+    networkState.nodeMap[node.id] = node;
+  });
+  networkState.view = { x: networkState.width / 2, y: networkState.height / 2 };
+  networkState.scale = 1;
+  networkState.drag = null;
+  networkState.hoverId = null;
+  networkState.selectedId = null;
+  clampNetworkView();
+  updateNetworkCursor();
+}
+
+function buildNetworkEdgeMap(edges) {
+  var edgeMap = {};
+  edges.forEach(function(edge) {
+    if (!edgeMap[edge.source]) edgeMap[edge.source] = [];
+    if (!edgeMap[edge.target]) edgeMap[edge.target] = [];
+    edgeMap[edge.source].push(edge);
+    edgeMap[edge.target].push(edge);
+  });
+  return edgeMap;
+}
+
+function initialNetworkLayout(nodes, edges) {
+  var positions = {};
+  if (!nodes.length) return positions;
+  var count = nodes.length;
+  var baseRadius = Math.max(180, Math.min(760, 120 + Math.sqrt(count) * 82 + count * 3));
+  var golden = Math.PI * (3 - Math.sqrt(5));
+  nodes.forEach(function(node, index) {
+    var ring = Math.sqrt((index + 0.5) / count);
+    var angle = index * golden;
+    var jitter = 10 * Math.sin(index * 12.9898);
+    positions[node.id] = {
+      x: Math.cos(angle) * baseRadius * ring + jitter,
+      y: Math.sin(angle) * baseRadius * ring + 10 * Math.cos(index * 78.233)
+    };
+  });
+  relaxNetworkLayout(nodes, edges, positions, baseRadius);
+  return positions;
+}
+
+function relaxNetworkLayout(nodes, edges, positions, baseRadius) {
+  var iterations = Math.min(120, 55 + nodes.length);
+  var preferred = Math.max(130, Math.min(260, 150 + nodes.length * 1.6));
+  for (var iter = 0; iter < iterations; iter++) {
+    for (var i = 0; i < nodes.length; i++) {
+      for (var j = i + 1; j < nodes.length; j++) {
+        var a = positions[nodes[i].id];
+        var b = positions[nodes[j].id];
+        var dx = b.x - a.x;
+        var dy = b.y - a.y;
+        var dist = Math.max(8, Math.sqrt(dx * dx + dy * dy));
+        var force = Math.min(4.5, 3600 / (dist * dist));
+        var fx = (dx / dist) * force;
+        var fy = (dy / dist) * force;
+        a.x -= fx;
+        a.y -= fy;
+        b.x += fx;
+        b.y += fy;
+      }
+    }
+    edges.forEach(function(edge) {
+      var a = positions[edge.source];
+      var b = positions[edge.target];
+      if (!a || !b) return;
+      var dx = b.x - a.x;
+      var dy = b.y - a.y;
+      var dist = Math.max(8, Math.sqrt(dx * dx + dy * dy));
+      var similarity = Number(edge.similarity || 0.45);
+      var target = edge.kind === 'memory_edge' ? preferred * 0.95 : preferred;
+      var force = Math.max(-2.2, Math.min(2.2, (dist - target) * 0.012 * similarity));
+      var fx = (dx / dist) * force;
+      var fy = (dy / dist) * force;
+      a.x += fx;
+      a.y += fy;
+      b.x -= fx;
+      b.y -= fy;
+    });
+    nodes.forEach(function(node) {
+      var p = positions[node.id];
+      var dist = Math.max(1, Math.sqrt(p.x * p.x + p.y * p.y));
+      var softLimit = baseRadius * 1.08;
+      if (dist > softLimit) {
+        var pull = (dist - softLimit) * 0.018;
+        p.x -= (p.x / dist) * pull;
+        p.y -= (p.y / dist) * pull;
+      }
+    });
+  }
+}
+
+function stopNetworkAnimation() {
+  if (networkState.animationFrame) {
+    cancelAnimationFrame(networkState.animationFrame);
+    networkState.animationFrame = null;
+  }
+}
+
+function scheduleNetworkDraw() {
+  if (networkState.animationFrame) return;
+  networkState.animationFrame = requestAnimationFrame(function() {
+    networkState.animationFrame = null;
+    drawNetwork(networkState.ctx, networkState.width, networkState.height, networkState.data);
+  });
+}
+
 function drawNetwork(ctx, W, H, data) {
-  var nodes = data.nodes, edges = data.edges;
+  var nodes = data.nodes || [];
+  var edges = data.edges || [];
+  ctx.fillStyle = '#FDFCF0';
+  ctx.fillRect(0, 0, W, H);
   if (!nodes.length) {
-    ctx.fillStyle = '#8A8070';
-    ctx.fillText('没有记忆桶', W/2, H/2);
+    drawNetworkMessage('没有记忆桶');
     return;
   }
 
-  var positions = {};
-  var cx = W / 2, cy = H / 2;
-  nodes.forEach(function(n, i) {
-    var angle = (i / nodes.length) * Math.PI * 2;
-    var r = Math.min(W, H) * 0.35;
-    positions[n.id] = {
-      x: cx + Math.cos(angle) * r + (Math.random() - 0.5) * 50,
-      y: cy + Math.sin(angle) * r + (Math.random() - 0.5) * 50,
-    };
+  edges.forEach(function(edge) {
+    drawNetworkEdge(ctx, edge);
   });
-
-  var edgeMap = {};
-  edges.forEach(function(e) {
-    if (!edgeMap[e.source]) edgeMap[e.source] = [];
-    if (!edgeMap[e.target]) edgeMap[e.target] = [];
-    edgeMap[e.source].push(e.target);
-    edgeMap[e.target].push(e.source);
+  nodes.forEach(function(node) {
+    drawNetworkNode(ctx, node);
   });
+}
 
-  for (var iter = 0; iter < 80; iter++) {
-    for (var i = 0; i < nodes.length; i++) {
-      for (var j = i + 1; j < nodes.length; j++) {
-        var a = positions[nodes[i].id], b = positions[nodes[j].id];
-        var dx = b.x - a.x, dy = b.y - a.y;
-        var dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
-        var force = 800 / (dist * dist);
-        dx = (dx / dist) * force;
-        dy = (dy / dist) * force;
-        a.x -= dx; a.y -= dy;
-        b.x += dx; b.y += dy;
-      }
-    }
-    edges.forEach(function(e) {
-      var a = positions[e.source], b = positions[e.target];
-      if (!a || !b) return;
-      var dx = b.x - a.x, dy = b.y - a.y;
-      var dist = Math.sqrt(dx*dx + dy*dy);
-      var force = (dist - 100) * 0.01 * (e.similarity || 0.5);
-      dx = (dx / Math.max(1,dist)) * force;
-      dy = (dy / Math.max(1,dist)) * force;
-      a.x += dx; a.y += dy;
-      b.x -= dx; b.y -= dy;
-    });
-    nodes.forEach(function(n) {
-      var p = positions[n.id];
-      p.x += (cx - p.x) * 0.01;
-      p.y += (cy - p.y) * 0.01;
-    });
+function drawNetworkEdge(ctx, edge) {
+  var a = networkState.positions[edge.source];
+  var b = networkState.positions[edge.target];
+  if (!a || !b) return;
+  var sa = networkWorldToScreen(a);
+  var sb = networkWorldToScreen(b);
+  var selectedId = networkState.selectedId;
+  var related = selectedId && (edge.source === selectedId || edge.target === selectedId);
+  var isMemoryEdge = edge.kind === 'memory_edge';
+  var similarity = Number(edge.similarity || 0.45);
+
+  ctx.beginPath();
+  ctx.moveTo(sa.x, sa.y);
+  ctx.lineTo(sb.x, sb.y);
+  ctx.strokeStyle = related
+    ? (isMemoryEdge ? 'rgba(154, 123, 79, 0.72)' : 'rgba(47, 79, 79, 0.46)')
+    : (isMemoryEdge ? 'rgba(154, 123, 79, 0.24)' : 'rgba(47, 79, 79, ' + Math.max(0.05, similarity * 0.12) + ')');
+  ctx.lineWidth = related ? 1.45 : (isMemoryEdge ? 0.95 : Math.max(0.35, similarity * 0.72));
+  ctx.stroke();
+
+  if (isMemoryEdge && edge.relation_type && related) {
+    ctx.fillStyle = '#9A7B4F';
+    ctx.font = '10px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(edge.relation_type, (sa.x + sb.x) / 2, (sa.y + sb.y) / 2);
+  }
+}
+
+function drawNetworkNode(ctx, node) {
+  var p = networkState.positions[node.id];
+  if (!p) return;
+  var s = networkWorldToScreen(p);
+  var selected = networkState.selectedId === node.id;
+  var dragging = networkState.drag && networkState.drag.mode === 'node' && networkState.drag.id === node.id;
+  var hovered = networkState.hoverId === node.id;
+  var colors = { dynamic: '#2F4F4F', permanent: '#9A7B4F', feel: '#8B6A6A', archived: '#B0A590' };
+  var color = colors[node.type] || '#2F4F4F';
+  var r = networkNodeRadius(node);
+  var degree = (networkState.edgeMap[node.id] || []).length;
+
+  ctx.beginPath();
+  ctx.arc(s.x, s.y, r + (selected || dragging ? 8 : hovered ? 6 : 4), 0, Math.PI * 2);
+  ctx.fillStyle = selected || dragging ? 'rgba(154, 123, 79, 0.18)' : color + '14';
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+  ctx.fillStyle = node.resolved ? color + '70' : color;
+  ctx.fill();
+
+  if (node.pinned || selected || dragging) {
+    ctx.strokeStyle = selected || dragging ? '#9A7B4F' : '#9A7B4F';
+    ctx.lineWidth = selected || dragging ? 2.2 : 1.8;
+    ctx.stroke();
+  }
+  if (node.anchor) {
+    ctx.strokeStyle = '#2F4F4F';
+    ctx.lineWidth = 2.6;
+    ctx.stroke();
   }
 
-  ctx.fillStyle = '#FDFCF0';
-  ctx.fillRect(0, 0, W, H);
+  if (selected || hovered || nodesShouldShowLabel(node, degree)) {
+    var name = String(node.name || node.id || '');
+    if (name.length > 12) name = name.slice(0, 12) + '…';
+    ctx.fillStyle = selected ? '#2F4F4F' : '#3A3530';
+    ctx.font = selected ? '600 11px Inter, sans-serif' : '11px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(name, s.x, s.y + r + 8);
+  }
+}
 
-  edges.forEach(function(e) {
-    var a = positions[e.source], b = positions[e.target];
-    if (!a || !b) return;
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    var isMemoryEdge = e.kind === 'memory_edge';
-    ctx.strokeStyle = isMemoryEdge
-      ? 'rgba(154, 123, 79, 0.72)'
-      : 'rgba(47, 79, 79, ' + ((e.similarity || 0.5) * 0.18) + ')';
-    ctx.lineWidth = isMemoryEdge ? 2.2 : Math.max(0.4, (e.similarity || 0.5) * 1.2);
-    ctx.stroke();
-    if (isMemoryEdge && e.relation_type) {
-      ctx.fillStyle = '#9A7B4F';
-      ctx.font = '10px Inter, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(e.relation_type, (a.x + b.x) / 2, (a.y + b.y) / 2);
-    }
+function nodesShouldShowLabel(node, degree) {
+  var total = (networkState.data.nodes || []).length;
+  return total <= 36 || node.pinned || node.anchor || node.type === 'feel' || degree >= 3;
+}
+
+function networkNodeRadius(node) {
+  var score = Number(node.score || 0);
+  if (!Number.isFinite(score)) score = 0;
+  return Math.max(5, Math.min(15, 5 + score * 0.55));
+}
+
+function networkWorldToScreen(point) {
+  return {
+    x: point.x * networkState.scale + networkState.view.x,
+    y: point.y * networkState.scale + networkState.view.y
+  };
+}
+
+function networkScreenToWorld(point) {
+  return {
+    x: (point.x - networkState.view.x) / networkState.scale,
+    y: (point.y - networkState.view.y) / networkState.scale
+  };
+}
+
+function getNetworkPointerPoint(event) {
+  var rect = networkState.canvas.getBoundingClientRect();
+  var screen = {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top
+  };
+  return {
+    screen: screen,
+    world: networkScreenToWorld(screen)
+  };
+}
+
+function hitNetworkNode(worldPoint) {
+  var nodes = networkState.data.nodes || [];
+  for (var i = nodes.length - 1; i >= 0; i--) {
+    var node = nodes[i];
+    var p = networkState.positions[node.id];
+    if (!p) continue;
+    var dx = worldPoint.x - p.x;
+    var dy = worldPoint.y - p.y;
+    var radius = (networkNodeRadius(node) + 7) / networkState.scale;
+    if (dx * dx + dy * dy <= radius * radius) return node;
+  }
+  return null;
+}
+
+function onNetworkPointerDown(event) {
+  if (!networkState.data.nodes.length) return;
+  var point = getNetworkPointerPoint(event);
+  var hit = hitNetworkNode(point.world);
+  var isTouch = event.pointerType === 'touch';
+  try {
+    networkState.canvas.setPointerCapture(event.pointerId);
+  } catch (e) {}
+  hideNetworkPopover();
+  if (hit) {
+    networkState.selectedId = hit.id;
+    networkState.drag = {
+      mode: 'node',
+      id: hit.id,
+      pointerId: event.pointerId,
+      startScreen: point.screen,
+      lastWorld: point.world,
+      moved: false,
+      threshold: isTouch ? 8 : 4
+    };
+  } else {
+    networkState.selectedId = null;
+    networkState.drag = {
+      mode: 'pan',
+      pointerId: event.pointerId,
+      startScreen: point.screen,
+      startView: { x: networkState.view.x, y: networkState.view.y },
+      moved: false,
+      threshold: isTouch ? 8 : 4
+    };
+  }
+  updateNetworkCursor();
+  scheduleNetworkDraw();
+}
+
+function onNetworkPointerMove(event) {
+  var point = getNetworkPointerPoint(event);
+  if (!networkState.drag) {
+    var hit = hitNetworkNode(point.world);
+    networkState.hoverId = hit ? hit.id : null;
+    updateNetworkCursor();
+    scheduleNetworkDraw();
+    return;
+  }
+  if (event.pointerId !== networkState.drag.pointerId) return;
+  var drag = networkState.drag;
+  var dxScreen = point.screen.x - drag.startScreen.x;
+  var dyScreen = point.screen.y - drag.startScreen.y;
+  if (Math.sqrt(dxScreen * dxScreen + dyScreen * dyScreen) > drag.threshold) drag.moved = true;
+
+  if (drag.mode === 'node') {
+    var p = networkState.positions[drag.id];
+    if (!p) return;
+    var dx = point.world.x - drag.lastWorld.x;
+    var dy = point.world.y - drag.lastWorld.y;
+    p.x += dx;
+    p.y += dy;
+    elasticFollowNetworkNeighbors(drag.id, dx, dy);
+    drag.lastWorld = point.world;
+  } else {
+    networkState.view.x = drag.startView.x + dxScreen;
+    networkState.view.y = drag.startView.y + dyScreen;
+  }
+  updateNetworkCursor();
+  scheduleNetworkDraw();
+}
+
+function onNetworkPointerUp(event) {
+  var drag = networkState.drag;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  try {
+    networkState.canvas.releasePointerCapture(event.pointerId);
+  } catch (e) {}
+  networkState.drag = null;
+  updateNetworkCursor();
+  if (drag.mode === 'node' && !drag.moved) {
+    networkState.selectedId = drag.id;
+    showNetworkPopover(drag.id);
+  } else if (drag.mode === 'pan' && !drag.moved) {
+    networkState.selectedId = null;
+    hideNetworkPopover();
+  }
+  scheduleNetworkDraw();
+}
+
+function onNetworkPointerCancel(event) {
+  var drag = networkState.drag;
+  if (drag && event.pointerId === drag.pointerId) {
+    networkState.drag = null;
+    hideNetworkPopover();
+    updateNetworkCursor();
+    scheduleNetworkDraw();
+  }
+}
+
+function elasticFollowNetworkNeighbors(nodeId, dx, dy) {
+  var edges = networkState.edgeMap[nodeId] || [];
+  edges.forEach(function(edge) {
+    var neighborId = edge.source === nodeId ? edge.target : edge.source;
+    var p = networkState.positions[neighborId];
+    if (!p) return;
+    var similarity = Number(edge.similarity || 0.45);
+    var follow = Math.min(0.12, 0.045 + similarity * 0.045);
+    p.x += dx * follow;
+    p.y += dy * follow;
   });
+}
 
-  var colors = { dynamic: '#2F4F4F', permanent: '#9A7B4F', feel: '#8B6A6A', archived: '#B0A590' };
-  nodes.forEach(function(n) {
-    var p = positions[n.id];
-    var r = Math.max(4, Math.min(14, n.score * 0.8));
-    var color = colors[n.type] || '#2F4F4F';
+function updateNetworkCursor() {
+  var canvas = networkState.canvas;
+  if (!canvas) return;
+  if (networkState.drag) {
+    canvas.style.cursor = 'grabbing';
+  } else if (networkState.hoverId) {
+    canvas.style.cursor = 'pointer';
+  } else {
+    canvas.style.cursor = 'grab';
+  }
+}
 
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r + 4, 0, Math.PI * 2);
-    ctx.fillStyle = color + '15';
-    ctx.fill();
+function showNetworkPopover(nodeId) {
+  var popover = networkState.popover;
+  var node = networkState.nodeMap[nodeId];
+  var p = networkState.positions[nodeId];
+  if (!popover || !node || !p) return;
+  var tags = Array.isArray(node.tags) ? node.tags : [];
+  var domain = Array.isArray(node.domain) ? node.domain : [];
+  var preview = node.preview || node.content_preview || '';
+  var metaBits = [];
+  if (node.type) metaBits.push('type ' + node.type);
+  if (node.score !== undefined && node.score !== null) {
+    var score = Number(node.score);
+    metaBits.push('score ' + (Number.isFinite(score) ? score.toFixed(2) : String(node.score)));
+  }
+  if (domain.length) metaBits.push('domain ' + domain.slice(0, 3).join(', '));
+  if (tags.length) metaBits.push('tags ' + tags.slice(0, 4).join(', '));
+  popover.innerHTML =
+    '<h4>' + esc(node.name || node.id || '') + '</h4>' +
+    '<div class="network-popover-meta">id ' + esc(node.id || '') + '</div>' +
+    '<div class="network-popover-meta">' + esc(metaBits.join(' · ') || 'metadata unset') + '</div>' +
+    (preview ? '<div class="network-popover-preview">' + esc(preview) + '</div>' : '') +
+    (typeof showDetail === 'function' ? '<button type="button" onclick="showDetail(\'' + jsString(node.id || '') + '\')">打开详情</button>' : '');
+  popover.classList.remove('hidden');
+  positionNetworkPopover(popover, networkWorldToScreen(p));
+}
 
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = n.resolved ? color + '70' : color;
-    ctx.fill();
+function positionNetworkPopover(popover, screenPoint) {
+  var container = document.getElementById('network-view');
+  var canvasRect = networkState.canvas.getBoundingClientRect();
+  var containerRect = container.getBoundingClientRect();
+  var left = canvasRect.left - containerRect.left + screenPoint.x + 14;
+  var top = canvasRect.top - containerRect.top + screenPoint.y + 14;
+  var maxLeft = container.clientWidth - popover.offsetWidth - 12;
+  var maxTop = container.clientHeight - popover.offsetHeight - 12;
+  popover.style.left = Math.max(12, Math.min(left, maxLeft)) + 'px';
+  popover.style.top = Math.max(12, Math.min(top, maxTop)) + 'px';
+}
 
-    if (n.pinned) {
-      ctx.strokeStyle = '#9A7B4F';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-    if (n.anchor) {
-      ctx.strokeStyle = '#2F4F4F';
-      ctx.lineWidth = 3;
-      ctx.stroke();
-    }
+function hideNetworkPopover() {
+  var popover = networkState.popover || document.getElementById('network-popover');
+  if (popover) popover.classList.add('hidden');
+}
 
-    var degree = (edgeMap[n.id] || []).length;
-    if (nodes.length <= 45 || n.pinned || n.anchor || n.type === 'feel' || degree >= 2) {
-      var name = n.name.length > 10 ? n.name.slice(0, 10) + '…' : n.name;
-      ctx.fillStyle = '#3A3530';
-      ctx.font = '11px Inter, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(name, p.x, p.y + r + 14);
-    }
+function clampNetworkView() {
+  if (!networkState.data.nodes.length) return;
+  var xs = [];
+  var ys = [];
+  networkState.data.nodes.forEach(function(node) {
+    var p = networkState.positions[node.id];
+    if (!p) return;
+    xs.push(p.x);
+    ys.push(p.y);
   });
+  if (!xs.length) return;
+  var minX = Math.min.apply(null, xs);
+  var maxX = Math.max.apply(null, xs);
+  var minY = Math.min.apply(null, ys);
+  var maxY = Math.max.apply(null, ys);
+  var centerX = (minX + maxX) / 2;
+  var centerY = (minY + maxY) / 2;
+  networkState.view.x = networkState.width / 2 - centerX * networkState.scale;
+  networkState.view.y = networkState.height / 2 - centerY * networkState.scale;
 }
 
 function esc(s) {
@@ -2353,7 +2799,10 @@ function renderPersona(data) {
           '</div>' +
         '</div>' +
         '<div>' +
-          '<div class="persona-guidance">' + esc((affect && affect.residue) || '当前没有明显余味。') + '</div>' +
+          '<div class="persona-guidance">' +
+            '<div class="persona-guidance-box"><label>回应提示</label><div>' + esc((affect && affect.reply_guidance) || '当前没有特别提示。') + '</div></div>' +
+            '<div class="persona-guidance-box"><label>余味</label><div>' + esc((affect && affect.residue) || '当前没有明显余味。') + '</div></div>' +
+          '</div>' +
           '<div class="persona-status-line">' +
             '<span class="persona-pill">' + (cfg.enabled ? 'engine on' : 'engine paused') + '</span>' +
             '<span class="persona-pill">' + (cfg.api_ready ? 'LLM ready' : 'fallback state') + '</span>' +
