@@ -51,6 +51,30 @@ def test_apply_feel_comment_backfill_comment_author_reads_identity(test_config):
     assert comment_author_name(cfg) == "Echo"
 
 
+def test_apply_feel_comment_backfill_load_mappings_accepts_legacy_format(tmp_path):
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        json.dumps({"mappings": [{"feel_id": "feel-a", "source_bucket_id": "source-a"}]}),
+        encoding="utf-8",
+    )
+
+    assert load_mappings(str(mapping_path)) == [
+        {"feel_id": "feel-a", "source_bucket_id": "source-a", "action": "comment"}
+    ]
+
+
+def test_apply_feel_comment_backfill_load_mappings_preserves_whisper_action(tmp_path):
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        json.dumps({"mappings": [{"feel_id": "feel-a", "action": "whisper", "note": "keep"}]}),
+        encoding="utf-8",
+    )
+
+    assert load_mappings(str(mapping_path)) == [
+        {"feel_id": "feel-a", "action": "whisper", "note": "keep", "source_bucket_id": ""}
+    ]
+
+
 @pytest.mark.asyncio
 async def test_apply_feel_comment_backfill_adds_comment_with_origin(test_config, tmp_path):
     mgr = BucketManager(test_config)
@@ -104,6 +128,112 @@ async def test_apply_feel_comment_backfill_adds_comment_with_origin(test_config,
 
 
 @pytest.mark.asyncio
+async def test_apply_feel_comment_backfill_builds_whisper_without_source(test_config):
+    mgr = BucketManager(test_config)
+    feel_id = await mgr.create(
+        content="这条旧 feel 应该保留为 whisper。",
+        name="旧 whisper",
+        bucket_type="feel",
+    )
+
+    actions, errors = await build_actions(mgr, [{"feel_id": feel_id, "action": "whisper"}])
+
+    assert not errors
+    assert actions[0]["action"] == "whisper"
+    assert actions[0]["feel_id"] == feel_id
+    assert actions[0]["source_bucket_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_apply_feel_comment_backfill_dry_run_whisper_writes_nothing(test_config, tmp_path):
+    mgr = BucketManager(test_config)
+    feel_id = await mgr.create(
+        content="这条旧 feel 只是预演 whisper。",
+        name="预演 whisper",
+        bucket_type="feel",
+    )
+    actions, errors = await build_actions(mgr, [{"feel_id": feel_id, "action": "whisper"}])
+
+    results = await apply_actions(
+        mgr,
+        actions,
+        author="Echo",
+        apply=False,
+        archive_feel=False,
+        backup_dir=tmp_path / "backup",
+    )
+    feel = await mgr.get(feel_id)
+
+    assert not errors
+    assert results[0]["status"] == "dry_run"
+    assert "whisper" not in feel["metadata"].get("tags", [])
+
+
+@pytest.mark.asyncio
+async def test_apply_feel_comment_backfill_apply_whisper_tags_original_feel_idempotently(test_config, tmp_path):
+    mgr = BucketManager(test_config)
+    feel_id = await mgr.create(
+        content="这条旧 feel 应该成为 whisper。",
+        name="旧 whisper",
+        tags=["old_tag"],
+        bucket_type="feel",
+    )
+    actions, errors = await build_actions(mgr, [{"feel_id": feel_id, "action": "whisper"}])
+
+    first = await apply_actions(
+        mgr,
+        actions,
+        author="Echo",
+        apply=True,
+        archive_feel=False,
+        backup_dir=tmp_path / "backup",
+    )
+    second_actions, second_errors = await build_actions(mgr, [{"feel_id": feel_id, "action": "whisper"}])
+    second = await apply_actions(
+        mgr,
+        second_actions,
+        author="Echo",
+        apply=True,
+        archive_feel=False,
+        backup_dir=tmp_path / "backup",
+    )
+    feel = await mgr.get(feel_id)
+
+    assert not errors
+    assert not second_errors
+    assert first[0]["status"] == "applied"
+    assert second[0]["status"] == "applied"
+    assert feel["metadata"]["type"] == "feel"
+    assert feel["metadata"]["tags"].count("whisper") == 1
+    assert "old_tag" in feel["metadata"]["tags"]
+
+
+@pytest.mark.asyncio
+async def test_apply_feel_comment_backfill_skip_writes_nothing(test_config, tmp_path):
+    mgr = BucketManager(test_config)
+    source_id = await mgr.create(content="源记忆", name="源记忆")
+    feel_id = await mgr.create(content="旧 feel", name="旧 feel", bucket_type="feel")
+    actions, errors = await build_actions(mgr, [{"feel_id": feel_id, "action": "skip"}])
+
+    results = await apply_actions(
+        mgr,
+        actions,
+        author="Echo",
+        apply=True,
+        archive_feel=True,
+        backup_dir=tmp_path / "backup",
+    )
+    source = await mgr.get(source_id)
+    feel = await mgr.get(feel_id)
+
+    assert not errors
+    assert results[0]["status"] == "skipped"
+    assert not source["metadata"].get("comments")
+    assert feel["metadata"]["type"] == "feel"
+    assert "whisper" not in feel["metadata"].get("tags", [])
+
+
+@pytest.mark.asyncio
 async def test_apply_feel_comment_backfill_can_refresh_source_embedding(test_config, tmp_path):
     mgr = BucketManager(test_config)
     source_id = await mgr.create(
@@ -138,7 +268,7 @@ async def test_apply_feel_comment_backfill_can_refresh_source_embedding(test_con
     assert embedding_engine.calls[0][0] == source_id
     assert "Title: 源记忆" in embedding_engine.calls[0][1]
     assert "源记忆正文" in embedding_engine.calls[0][1]
-    assert "多了一圈年轮" in embedding_engine.calls[0][1]
+    assert "多了一圈年轮" not in embedding_engine.calls[0][1]
 
 
 @pytest.mark.asyncio
