@@ -241,6 +241,8 @@ reflection:
   enabled: true
   auto_enabled: true
   enrich_on_write: true
+  memory_affect_anchor_enabled: true
+  relationship_weather_affect_anchor_enabled: true
   enrich_backfill_enabled: true
   enrich_backfill_limit: 5
   base_url: ""                    # empty = persona.base_url

@@ -166,6 +166,10 @@ class ReflectionEngine:
         self.enabled = bool(cfg.get("enabled", True))
         self.auto_enabled = bool(cfg.get("auto_enabled", True))
         self.enrich_on_write = bool(cfg.get("enrich_on_write", True))
+        self.memory_affect_anchor_enabled = bool(cfg.get("memory_affect_anchor_enabled", True))
+        self.relationship_weather_affect_anchor_enabled = bool(
+            cfg.get("relationship_weather_affect_anchor_enabled", True)
+        )
         self.base_url = cfg.get("base_url") or persona_cfg.get("base_url") or dehy_cfg.get("base_url", "")
         self.model = cfg.get("model") or persona_cfg.get("model") or dehy_cfg.get("model", "deepseek-chat")
         self.low_risk_model = (
@@ -345,11 +349,12 @@ class ReflectionEngine:
         content = str(result.get("content") or "").strip()
         if not content:
             content = self._fallback_reflection(period, key, materials)["content"]
-        content = self._append_affect_anchor(
-            content,
-            self._normalize_affect_anchor(result.get("affect_anchor"))
-            or self._fallback_reflection(period, key, materials).get("affect_anchor", {}),
-        )
+        if self.relationship_weather_affect_anchor_enabled:
+            content = self._append_affect_anchor(
+                content,
+                self._normalize_affect_anchor(result.get("affect_anchor"))
+                or self._fallback_reflection(period, key, materials).get("affect_anchor", {}),
+            )
         tags = list(
             dict.fromkeys(
                 [
@@ -997,6 +1002,8 @@ class ReflectionEngine:
         confidence: float,
         result: dict,
     ) -> bool:
+        if not self.memory_affect_anchor_enabled:
+            return False
         content = bucket.get("content", "")
         if self._has_affect_anchor(content):
             return False

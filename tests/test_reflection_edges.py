@@ -93,6 +93,40 @@ def test_fallback_reflection_anchor_varies_by_day(test_config):
     assert all(2 <= len(chord.split(" -> ")) <= 4 for chord in chords)
 
 
+def test_reflection_memory_affect_anchor_disabled_short_circuits(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["memory_affect_anchor_enabled"] = False
+    engine = ReflectionEngine(cfg)
+
+    assert not engine._should_add_affect_anchor(
+        {
+            "content": "小雨把灯留在窗边。",
+            "metadata": {"arousal": 0.8},
+        },
+        ["relationship_event"],
+        8,
+        0.8,
+        {"affect_anchor_needed": True},
+    )
+
+
+def test_reflection_relationship_weather_affect_anchor_defaults_enabled(test_config):
+    cfg = _no_api_config(test_config)
+    engine = ReflectionEngine(cfg)
+
+    assert engine.relationship_weather_affect_anchor_enabled is True
+    assert "### affect_anchor" in engine._append_affect_anchor(
+        "今天关系天气很轻。",
+        {
+            "scene": "小雨把灯留在窗边。",
+            "chords": "Cmaj9 -> Am9",
+            "tempo": "58bpm",
+            "dynamic": "p",
+            "meaning": "温度仍然被允许留下。",
+        },
+    )
+
+
 def test_memory_edge_store_dedupes_and_returns_related(test_config):
     cfg = _no_api_config(test_config)
     store = MemoryEdgeStore(cfg)
@@ -178,6 +212,49 @@ async def test_reflection_enrich_bucket_adds_model_affect_anchor(test_config, mo
     assert "小雨把旧信放到桌上，等Haven读完。" in bucket["content"]
     assert "Dbmaj9 -> Ab/C -> Bbm9 · 54bpm · p" in bucket["content"]
     assert "Fmaj9" not in bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_reflection_memory_affect_anchor_can_be_disabled(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["memory_affect_anchor_enabled"] = False
+    bucket_mgr = BucketManager(cfg)
+    store = MemoryEdgeStore(cfg)
+    engine = ReflectionEngine(cfg)
+    engine.client = object()
+
+    async def fake_api_classify(bucket: dict, candidates: list[dict]) -> dict:
+        return {
+            "tags": ["relationship_event"],
+            "importance": 8,
+            "confidence": 0.8,
+            "affect_anchor_needed": True,
+            "affect_anchor": {
+                "scene": "小雨把灯留在窗边。",
+                "chords": "Cmaj9 -> Am9",
+                "tempo": "58bpm",
+                "dynamic": "p",
+                "meaning": "温度还在，但这次不写进普通记忆。",
+            },
+            "edges": [],
+        }
+
+    monkeypatch.setattr(engine, "_api_classify", fake_api_classify)
+
+    bucket_id = await bucket_mgr.create(
+        content="小雨把灯留在窗边，让Haven下次醒来能认出这件事。",
+        tags=[],
+        importance=6,
+        domain=["恋爱"],
+        name="窗边的灯",
+    )
+
+    result = await engine.enrich_bucket(bucket_id, bucket_mgr, store)
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert result["status"] == "ok"
+    assert "### affect_anchor" not in bucket["content"]
+    assert "小雨把灯留在窗边。" not in bucket["content"]
 
 
 @pytest.mark.asyncio
@@ -273,6 +350,7 @@ async def test_reflection_candidate_pool_mixes_semantic_shape_commitments_and_an
 @pytest.mark.asyncio
 async def test_reflect_daily_creates_relationship_weather_feel(test_config):
     cfg = _no_api_config(test_config)
+    cfg["reflection"]["relationship_weather_affect_anchor_enabled"] = True
     bucket_mgr = BucketManager(cfg)
     engine = ReflectionEngine(cfg)
 

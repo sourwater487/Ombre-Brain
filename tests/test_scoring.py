@@ -239,6 +239,44 @@ class TestDecayScoreOrdering:
 class TestSearchScoring:
     """Verify search scoring produces correct rankings."""
 
+    def test_topic_score_ignores_comment_text(self, bucket_mgr):
+        score = bucket_mgr._calc_topic_score(
+            "commentonlytoken987",
+            {
+                "content": "",
+                "metadata": {
+                    "name": "",
+                    "domain": [],
+                    "tags": [],
+                    "comments": [{"content": "commentonlytoken987"}],
+                },
+            },
+        )
+
+        assert score == 0
+
+    def test_topic_score_ignores_affect_anchor_text(self, bucket_mgr):
+        score = bucket_mgr._calc_topic_score(
+            "anchoronlytoken987",
+            {
+                "content": "### affect_anchor\n\n> anchoronlytoken987",
+                "metadata": {"name": "", "domain": [], "tags": []},
+            },
+        )
+
+        assert score == 0
+
+    def test_topic_score_matches_body_text(self, bucket_mgr):
+        score = bucket_mgr._calc_topic_score(
+            "bodyonlytoken987",
+            {
+                "content": "正文 bodyonlytoken987",
+                "metadata": {"name": "", "domain": [], "tags": []},
+            },
+        )
+
+        assert score > 0
+
     @pytest.mark.asyncio
     async def test_exact_topic_match_ranks_first(self, populated_env):
         bm, de, ids = populated_env

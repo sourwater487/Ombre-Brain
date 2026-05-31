@@ -395,6 +395,20 @@ def strip_wikilinks(text: str) -> str:
     return re.sub(r"\[\[([^\]]+)\]\]", r"\1", text) if text else text
 
 
+def strip_affect_anchor(text: str) -> str:
+    """
+    Remove the Markdown affect_anchor section while preserving following sections.
+    删除 affect_anchor Markdown 小节，保留后续小节。
+    """
+    if not text:
+        return text
+    return re.sub(
+        r"(?ims)^[ \t]{0,3}#{1,6}\s*affect_anchor\s*$[\s\S]*?(?=^[ \t]{0,3}#{1,6}\s+\S|\Z)",
+        "",
+        text,
+    ).strip()
+
+
 def bucket_text_for_embedding(bucket: dict) -> str:
     """
     Build the text sent to the embedding model for a bucket.
@@ -408,15 +422,7 @@ def bucket_text_for_embedding(bucket: dict) -> str:
         meta = {}
 
     title = strip_wikilinks(str(meta.get("name") or "")).strip()
-    body = strip_wikilinks(str(bucket.get("content") or "")).strip()
-    comments = meta.get("comments", [])
-    comment_text = ""
-    if isinstance(comments, list):
-        comment_text = "\n".join(
-            strip_wikilinks(str(comment.get("content", ""))).strip()
-            for comment in comments
-            if isinstance(comment, dict) and str(comment.get("content", "")).strip()
-        )
+    body = strip_affect_anchor(strip_wikilinks(str(bucket.get("content") or ""))).strip()
 
     parts = []
     if title:
@@ -425,9 +431,6 @@ def bucket_text_for_embedding(bucket: dict) -> str:
             parts.append(f"Content: {body}")
     elif body:
         parts.append(body)
-
-    if comment_text:
-        parts.append(f"Comments:\n{comment_text}" if title else comment_text)
 
     return "\n".join(parts).strip()
 

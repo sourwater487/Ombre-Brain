@@ -24,9 +24,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from utils import bucket_text_for_embedding, count_tokens_approx, now_iso
+from utils import bucket_text_for_embedding, count_tokens_approx, now_iso, strip_affect_anchor
 
 logger = logging.getLogger("ombre_brain.import")
+
+
+def _import_similarity_text(text: str) -> str:
+    """Text shape used only for import duplicate/similarity comparison."""
+    return strip_affect_anchor(str(text or "")).strip()
 
 
 # ============================================================
@@ -663,6 +668,7 @@ class ImportEngine:
     async def _merge_or_create_item(self, item: dict) -> bool:
         """Try to merge with existing bucket, or create new. Returns is_merged."""
         content = item["content"]
+        comparison_content = _import_similarity_text(content)
         domain = item.get("domain", ["未分类"])
         tags = item.get("tags", [])
         importance = item.get("importance", 5)
@@ -672,7 +678,7 @@ class ImportEngine:
 
         try:
             existing = await self.bucket_mgr.search(
-                content,
+                comparison_content,
                 limit=1,
                 domain_filter=domain or None,
                 include_archive=False,
