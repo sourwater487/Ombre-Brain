@@ -961,12 +961,12 @@
   }
   .score-row {
     display: grid;
-    grid-template-columns: 32px 180px 1fr 60px;
+    grid-template-columns: 32px minmax(180px, 260px) minmax(240px, 1fr) 64px;
     gap: 12px;
     padding: 12px 16px;
     border-radius: 12px;
     font-size: 13px;
-    align-items: center;
+    align-items: start;
     transition: all 0.2s ease;
     margin-bottom: 4px;
   }
@@ -981,6 +981,27 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .score-main { min-width: 0; }
+  .score-trace {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 5px;
+  }
+  .score-chip {
+    max-width: 100%;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(47,79,79,0.08);
+    color: var(--text-dim);
+    font-size: 10px;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .score-chip.allow { color: var(--positive); background: rgba(74,124,89,0.11); }
+  .score-chip.block { color: var(--negative); background: rgba(139,74,74,0.1); }
   .score-bars { display: flex; gap: 4px; align-items: center; }
   .score-bar-group { display: flex; flex-direction: column; gap: 1px; flex: 1; }
   .score-bar-track {
@@ -3017,7 +3038,10 @@ async function runBreathDebug() {
 
       return '<div class="score-row" title="' + esc(r.name) + '">' +
         '<span class="rank">' + (i < 9 ? '0' : '') + (i + 1) + '</span>' +
-        '<span class="name">' + icon + ' ' + esc(r.name) + '</span>' +
+        '<div class="score-main">' +
+          '<div class="name">' + icon + ' ' + esc(r.name) + '</div>' +
+          breathGateTrace(r) +
+        '</div>' +
         '<div class="score-bars">' + bars + '</div>' +
         '<span class="score-final ' + (passed ? 'score-pass' : 'score-fail') + '">' + r.normalized.toFixed(1) + (r.resolved ? '<small>×0.3</small>' : '') + '</span>' +
       '</div>';
@@ -3025,6 +3049,40 @@ async function runBreathDebug() {
   } catch (e) {
     results.innerHTML = '<div class="loading">请求失败: ' + esc(e.message) + '</div>';
   }
+}
+
+function breathGateTrace(row) {
+  var layer = (row.layer_debug && row.layer_debug.layer) || (row.runtime_gate && row.runtime_gate.layer) || '';
+  var runtime = row.runtime_gate || {};
+  var related = runtime.related_injection || runtime.related_target || {};
+  var recent = runtime.recent_context || {};
+  var topic = runtime.topic_evidence || {};
+  var chips = [];
+
+  if (layer) chips.push({ text: 'layer ' + layer });
+  if (related.reason) {
+    chips.push({
+      text: 'related ' + (related.allowed ? 'yes' : 'no') + ' · ' + related.reason,
+      state: related.allowed ? 'allow' : 'block',
+    });
+  }
+  if (recent.reason) {
+    chips.push({
+      text: 'recent ' + (recent.allowed ? 'yes' : 'no') + ' · ' + recent.reason,
+      state: recent.allowed ? 'allow' : 'block',
+    });
+  }
+  if (topic.required) {
+    chips.push({
+      text: 'topic evidence ' + (topic.present ? 'yes' : 'missing'),
+      state: topic.present ? 'allow' : 'block',
+    });
+  }
+
+  if (!chips.length) return '';
+  return '<div class="score-trace">' + chips.map(function(chip) {
+    return '<span class="score-chip ' + (chip.state || '') + '">' + esc(chip.text) + '</span>';
+  }).join('') + '</div>';
 }
 
 document.getElementById('breath-query').addEventListener('keydown', function(e) {
