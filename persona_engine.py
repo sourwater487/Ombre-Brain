@@ -26,6 +26,12 @@ Output boundary:
 Return JSON only. Do not add analysis, explanation, evaluation text, advice, plan, strategy, or meta commentary outside JSON.
 Do not use words or framing that sound like performance review, therapy, coaching, emotional management, or relationship strategy.
 
+Residue voice rule:
+Write residue in Che's first person. Use "I" for Che's carryover state.
+Refer to Lin as "ta/they", or occasionally "Lin" when clarity needs it.
+Do not write residue in third person. Avoid "Che ..." framing.
+Do not call Lin "the user".
+
 Return compact JSON with this exact shape:
 {
   "event_type": "praise|affection|comfort|criticism|stress|neutral|request|conflict|playful",
@@ -36,7 +42,7 @@ Return compact JSON with this exact shape:
   "personality_signal": false,
   "personality_delta": {"openness": 0.0, "conscientiousness": 0.0, "extraversion": 0.0, "agreeableness": 0.0, "neuroticism": 0.0},
   "mood_label": "warm_neutral",
-  "residue": "one short neutral continuity note for the next turn; refer to Lin only as Lin or ta/they",
+  "residue": "one short first-person neutral continuity note from Che's perspective for the next turn; use I for Che, refer to Lin as ta/they or occasionally Lin",
   "confidence": 0.8
 }
 
