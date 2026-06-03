@@ -452,6 +452,63 @@
     line-height: 1;
     padding: 0;
   }
+  .detail-moments {
+    margin-top: 18px;
+  }
+  .detail-moments h3 {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    margin: 0 0 10px;
+  }
+  .moment-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-bottom: 10px;
+  }
+  .moment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .moment-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 12px 14px;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .moment-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: flex-start;
+    margin-bottom: 7px;
+  }
+  .moment-title {
+    color: var(--accent);
+    font-weight: 500;
+    min-width: 0;
+  }
+  .moment-source {
+    color: var(--text-light);
+    font-size: 10px;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+  }
+  .moment-body {
+    white-space: pre-wrap;
+    color: var(--text);
+    max-height: 170px;
+    overflow-y: auto;
+    padding-top: 7px;
+    border-top: 1px solid var(--border);
+  }
 
   .config-section {
     margin-bottom: 28px;
@@ -2179,11 +2236,95 @@ async function showDetail(id) {
           '</div>' +
         '</form>' +
       '</div>' +
+      '<div id="bucket-moments-block" class="detail-moments" data-bucket-id="' + escAttr(id) + '">' +
+        '<h3>Moments</h3>' +
+        '<div class="loading">解析 moments…</div>' +
+      '</div>' +
       commentsHtml +
       commentFormHtml;
+    loadBucketMoments(id);
   } catch (e) {
     content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
+}
+
+async function loadBucketMoments(bucketId) {
+  var block = document.getElementById('bucket-moments-block');
+  if (!block) return;
+  try {
+    var res = await authFetch(BASE + '/api/moments?bucket_id=' + encodeURIComponent(bucketId) + '&limit=40');
+    if (!res) return;
+    var data = await res.json();
+    if (!block || block.getAttribute('data-bucket-id') !== bucketId) return;
+    block.innerHTML = renderBucketMoments(data);
+  } catch (e) {
+    if (block && block.getAttribute('data-bucket-id') === bucketId) {
+      block.innerHTML = '<h3>Moments</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
+    }
+  }
+}
+
+function renderBucketMoments(data) {
+  if (!data || data.status !== 'ok') {
+    return '<h3>Moments</h3><div class="loading">无 moment 诊断数据</div>';
+  }
+  var layer = data.bucket_layer_debug || {};
+  var moments = Array.isArray(data.moments) ? data.moments : [];
+  var chips = [
+    { text: 'bucket layer ' + (layer.layer || 'unknown') },
+    { text: 'direct ' + (layer.can_direct_seed ? 'yes' : 'no'), state: layer.can_direct_seed ? 'allow' : 'block' },
+    { text: 'diffuse ' + (layer.can_diffuse ? 'yes' : 'no'), state: layer.can_diffuse ? 'allow' : 'block' },
+    { text: 'related ' + (layer.can_related_target ? 'yes' : 'no'), state: layer.can_related_target ? 'allow' : 'block' },
+    { text: moments.length + ' moments' },
+  ];
+  if (data.edge_count != null) chips.push({ text: data.edge_count + ' edges' });
+  var body = moments.length
+    ? '<div class="moment-list">' + moments.map(renderMomentItem).join('') + '</div>'
+    : '<div class="loading">这条 bucket 暂时没有拆出 moment。</div>';
+  return '<h3>Moments</h3>' + renderMomentChips(chips) + body;
+}
+
+function renderMomentItem(moment, index) {
+  var m = moment || {};
+  var layer = m.layer_debug || {};
+  var gate = m.runtime_gate || {};
+  var direct = gate.direct_seed || {};
+  var related = gate.related_target || {};
+  var recall = gate.recall_context || {};
+  var chips = [
+    { text: 'layer ' + (layer.layer || gate.layer || 'unknown') },
+    { text: 'section ' + (m.section || 'moment') },
+    { text: 'direct ' + (direct.allowed ? 'yes' : 'no') + (direct.reason ? ' · ' + direct.reason : ''), state: direct.allowed ? 'allow' : 'block' },
+    { text: 'related ' + (related.allowed ? 'yes' : 'no') + (related.reason ? ' · ' + related.reason : ''), state: related.allowed ? 'allow' : 'block' },
+    { text: 'context ' + (recall.allowed ? 'yes' : 'no'), state: recall.allowed ? 'allow' : 'block' },
+  ];
+  if (layer.context_only) chips.push({ text: 'context-only', state: 'block' });
+  var source = formatMomentSource(m.metadata && m.metadata.source_ref);
+  var text = m.text || m.text_preview || '';
+  return '<div class="moment-item">' +
+    '<div class="moment-head">' +
+      '<div class="moment-title">#' + (index + 1) + ' ' + esc(m.moment_id || '') + '</div>' +
+      (source ? '<div class="moment-source">' + esc(source) + '</div>' : '') +
+    '</div>' +
+    renderMomentChips(chips) +
+    '<div class="moment-body">' + esc(text) + '</div>' +
+  '</div>';
+}
+
+function renderMomentChips(chips) {
+  return '<div class="moment-summary">' + chips.map(function(chip) {
+    return '<span class="score-chip ' + (chip.state || '') + '">' + esc(chip.text) + '</span>';
+  }).join('') + '</div>';
+}
+
+function formatMomentSource(ref) {
+  if (!ref || typeof ref !== 'object') return '';
+  var path = ref.path ? String(ref.path).split(/[\\/]/).pop() : '';
+  var source = ref.source || 'bucket_content';
+  var start = ref.start_line || ref.content_start_line || '';
+  var end = ref.end_line || '';
+  var line = start ? ':' + start + (end && end !== start ? '-' + end : '') : '';
+  return (path ? path + ' · ' : '') + source + line;
 }
 
 function startBucketContentEdit(bucketId) {

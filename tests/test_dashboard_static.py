@@ -26,6 +26,19 @@ def test_dashboard_comment_enter_submit_has_no_visible_send_key():
     assert 'aria-label="发送"' not in form_block
 
 
+def test_dashboard_bucket_detail_loads_moment_diagnostics():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    detail_block = html.split("async function showDetail", 1)[1].split("function startBucketContentEdit", 1)[0]
+
+    assert 'id="bucket-moments-block"' in detail_block
+    assert "loadBucketMoments(id);" in detail_block
+    assert "BASE + '/api/moments?bucket_id='" in html
+    assert "function renderBucketMoments(data)" in html
+    assert "function renderMomentItem(moment, index)" in html
+    assert "runtime_gate" in html
+    assert ".detail-moments" in html
+
+
 def test_dashboard_exposes_gateway_memory_cooldown_settings():
     html = Path("dashboard.html").read_text(encoding="utf-8")
 

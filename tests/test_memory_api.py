@@ -109,11 +109,12 @@ class DummyDreamEngine:
 
 
 class DummyRequest:
-    def __init__(self, body=None, headers=None, cookies=None, path_params=None):
+    def __init__(self, body=None, headers=None, cookies=None, path_params=None, query_params=None):
         self._body = body
         self.headers = headers or {}
         self.cookies = cookies or {}
         self.path_params = path_params or {}
+        self.query_params = query_params or {}
 
     async def json(self):
         return self._body
@@ -438,6 +439,39 @@ async def test_read_bucket_returns_exact_content_without_touching(monkeypatch, b
     assert payload["content"] == "小雨说她想把这一刻留下来。"
     assert payload["metadata"]["tags"] == ["haven_favorite"]
     assert after["metadata"]["last_active"] == before["metadata"]["last_active"]
+
+
+@pytest.mark.asyncio
+async def test_api_moments_returns_bucket_layer_and_gate_debug(monkeypatch, bucket_mgr, test_config):
+    import server
+    from memory_moments import MemoryMomentStore
+
+    bucket_id = await bucket_mgr.create(
+        content="## original\n小雨喜欢蓝色，也希望这件事被记住。",
+        name="蓝色偏好",
+        tags=["relationship_event"],
+        domain=["恋爱"],
+        importance=7,
+    )
+    moment_store = MemoryMomentStore(test_config)
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "memory_moment_store", moment_store)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_moments(
+        DummyRequest(query_params={"bucket_id": bucket_id, "limit": "5"})
+    )
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["status"] == "ok"
+    assert payload["mode"] == "bucket"
+    assert payload["bucket_id"] == bucket_id
+    assert payload["bucket_layer_debug"]["layer"] == "dynamic_memory"
+    assert payload["count"] == 1
+    assert payload["moments"][0]["text"] == "小雨喜欢蓝色，也希望这件事被记住。"
+    assert payload["moments"][0]["runtime_gate"]["direct_seed"]["allowed"] is True
+    assert payload["moments"][0]["layer_debug"]["can_direct_seed"] is True
 
 
 @pytest.mark.asyncio

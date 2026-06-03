@@ -5245,6 +5245,23 @@ async def api_bucket_detail(request):
     return JSONResponse(_bucket_read_payload(bucket))
 
 
+@mcp.custom_route("/api/moments", methods=["GET"])
+async def api_moments(request):
+    """Return dashboard diagnostics for indexed memory moments."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    bucket_id = str(request.query_params.get("bucket_id", "") or "").strip()
+    limit = _int_between(request.query_params.get("limit"), 20, 1, 200)
+    payload = await inspect_moments(bucket_id=bucket_id, limit=limit)
+    if payload.get("status") == "error":
+        status_code = 404 if payload.get("error") == "not_found" else 400
+        return JSONResponse(payload, status_code=status_code)
+    return JSONResponse(payload)
+
+
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH"])
 async def api_bucket_update(request):
     """Update dashboard-editable bucket body fields."""

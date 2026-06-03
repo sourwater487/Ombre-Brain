@@ -861,9 +861,14 @@ source_ref:
 - VPS `/dashboard` HTML 已包含 `score-trace` / `breathGateTrace`。
 - VPS 容器内认证后调用 `/api/breath-debug?q=说教` 成功返回 layer/runtime gate 字段。
 
+第二片已完成。新增：
+
+- Dashboard bucket 详情页新增 `Moments` 只读面板。
+- 新增 `/api/moments?bucket_id=...&limit=...`，复用 `inspect_moments` 的 payload，显示 bucket layer、moment layer、direct/related/context gate 和源正文行号。
+- 该面板只刷新 `${state_dir}/memory_moments.sqlite` 观察索引，不修改 bucket，不改变 recall / gateway 注入行为。
+
 还可以继续扩成只读面板：
 
-- bucket moments。
 - moment_edges。
 - query 命中哪个 moment。
 - 扩散路径。

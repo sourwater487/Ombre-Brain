@@ -121,7 +121,7 @@ Query-level gates are planned once by `RecallPolicy.plan_query()`. The plan carr
 
 This separation is important. A moment can be searchable context without being allowed to prove the current topic.
 
-Debug surfaces should expose the same runtime decision. `inspect_moments`, `inspect_diffusion`, `/api/breath-debug`, and Gateway injection debug include:
+Debug surfaces should expose the same runtime decision. `inspect_moments`, `/api/moments`, `inspect_diffusion`, `/api/breath-debug`, and Gateway injection debug include:
 
 - `layer_debug`: the inferred layer, writer hint, and static layer policy.
 - `runtime_gate`: the per-query decision for direct seed, related injection, recent context, topic evidence, and the reason an item would or would not appear.
