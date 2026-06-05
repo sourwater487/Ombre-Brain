@@ -122,11 +122,20 @@ def test_dashboard_exposes_profile_fact_page():
     assert "renderProfileFactCard" in html
     assert "runProfileFactAction" in html
     assert "editProfileFact" in html
+    assert "generateProfileFactProposals" in html
+    assert "confirmProfileFactProposal" in html
     assert "BASE + '/api/profile-facts'" in html
     assert "BASE + '/api/profile-facts/'" in html
+    assert "BASE + '/api/profile-fact-proposals'" in html
+    assert "BASE + '/api/profile-fact-proposals/confirm'" in html
+    assert 'id="profile-proposal-bucket-id"' in html
+    assert 'id="profile-proposal-list"' in html
     assert "打开证据" in html
+    assert "生成候选" in html
+    assert "确认写入" in html
     assert "Profile Facts" in html
     assert ".profile-card" in html
+    assert ".profile-proposal-panel" in html
 
 
 def test_dashboard_exposes_gateway_memory_cooldown_settings():

@@ -1244,6 +1244,146 @@ async def test_api_profile_fact_update_edits_and_deprecates(monkeypatch, bucket_
 
 
 @pytest.mark.asyncio
+async def test_api_profile_fact_proposals_filters_to_evidence_bound_candidates(monkeypatch, bucket_mgr):
+    import server
+
+    evidence_id = await bucket_mgr.create(
+        content="小雨说她讨厌被催促做决定。",
+        name="催促雷点",
+        tags=["relationship_event"],
+    )
+    await bucket_mgr.create(
+        content="### fact\n小雨喜欢绿色。",
+        tags=["profile_fact"],
+        bucket_type="permanent",
+        extra_metadata={"profile_kind": "preference"},
+    )
+
+    async def fake_proposal_model(**kwargs):
+        return json.dumps(
+            [
+                {
+                    "fact": "小雨讨厌被催促做决定。",
+                    "profile_kind": "boundary",
+                    "subject": "user",
+                    "predicate": "dislikes_pressure",
+                    "object": "被催促做决定",
+                    "evidence_bucket_id": evidence_id,
+                    "confidence": 0.84,
+                    "reason": "证据桶明确写到讨厌被催促。",
+                },
+                {
+                    "fact": "小雨喜欢绿色。",
+                    "profile_kind": "preference",
+                    "subject": "user",
+                    "predicate": "likes_color",
+                    "object": "green",
+                    "evidence_bucket_id": evidence_id,
+                    "confidence": 0.8,
+                    "reason": "重复事实。",
+                },
+                {
+                    "fact": "小雨喜欢蓝色。",
+                    "profile_kind": "preference",
+                    "subject": "user",
+                    "predicate": "likes_color",
+                    "object": "blue",
+                    "evidence_bucket_id": "wrong",
+                    "confidence": 0.8,
+                    "reason": "证据不匹配。",
+                },
+            ],
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "_call_profile_fact_proposal_model", fake_proposal_model)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_profile_fact_proposals(
+        DummyRequest(body={"bucket_id": evidence_id})
+    )
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["status"] == "ok"
+    assert payload["evidence"]["bucket_id"] == evidence_id
+    assert len(payload["proposals"]) == 1
+    assert payload["proposals"][0]["fact"] == "小雨讨厌被催促做决定。"
+    assert payload["proposals"][0]["evidence_bucket_id"] == evidence_id
+    assert {item["reason"] for item in payload["rejected"]} == {
+        "duplicate profile fact",
+        "evidence_bucket_id mismatch",
+    }
+
+
+def test_profile_fact_proposal_prompt_format_preserves_json_example():
+    import server
+
+    prompt = server.PROFILE_FACT_PROPOSAL_PROMPT_TEMPLATE.format(
+        user_display_name="小雨",
+        ai_name="Haven",
+    )
+
+    assert "当前用户：小雨" in prompt
+    assert "当前 AI：Haven" in prompt
+    assert '"fact": "一句可读中文事实"' in prompt
+    assert '"evidence_bucket_id": "必须等于给定 bucket id"' in prompt
+
+
+@pytest.mark.asyncio
+async def test_api_profile_fact_proposal_confirm_writes_profile_fact(monkeypatch, bucket_mgr, test_config, tmp_path):
+    import server
+    from memory_edges import MemoryEdgeStore
+    from memory_moments import MemoryMomentStore
+
+    evidence_id = await bucket_mgr.create(
+        content="小雨说她讨厌被催促做决定。",
+        name="催促雷点",
+        tags=["relationship_event"],
+    )
+    edge_store = MemoryEdgeStore(
+        {
+            "state_dir": str(tmp_path / "state"),
+            "buckets_dir": str(tmp_path / "buckets"),
+        }
+    )
+    embedding_engine = CapturingEmbeddingEngine()
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    monkeypatch.setattr(server, "memory_moment_store", MemoryMomentStore(test_config))
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_profile_fact_proposal_confirm(
+        DummyRequest(
+            body={
+                "fact": "小雨讨厌被催促做决定。",
+                "profile_kind": "boundary",
+                "subject": "user",
+                "predicate": "dislikes_pressure",
+                "object": "被催促做决定",
+                "evidence_bucket_id": evidence_id,
+                "confidence": 0.84,
+                "reason": "证据桶明确写到讨厌被催促。",
+            }
+        )
+    )
+    payload = json.loads(response.body)
+    created = await bucket_mgr.get(payload["id"])
+
+    assert response.status_code == 200
+    assert payload["status"] == "created"
+    assert payload["fact"]["fact"] == "小雨讨厌被催促做决定。"
+    assert created["metadata"]["profile_kind"] == "boundary"
+    assert created["metadata"]["predicate"] == "dislikes_pressure"
+    assert created["metadata"]["evidence"][0]["bucket_id"] == evidence_id
+    assert edge_store.list_edges()[0]["relation_type"] == "evidenced_by"
+    await wait_for_embedding_call(embedding_engine, payload["id"])
+
+
+@pytest.mark.asyncio
 async def test_streamable_http_startup_helper_starts_decay_engine(monkeypatch):
     import server
 

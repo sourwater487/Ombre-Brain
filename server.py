@@ -1120,6 +1120,166 @@ def _profile_fact_tags(current_tags: list | tuple | set | None, kind: str, predi
     return list(dict.fromkeys(tags))
 
 
+PROFILE_FACT_PROPOSAL_PROMPT_TEMPLATE = """你是一个证据化用户画像候选生成器。请只根据给定证据桶提出可能值得长期保存的画像事实。
+
+身份：
+- 当前用户：{user_display_name}
+- 当前 AI：{ai_name}
+
+边界：
+1. 只能提出能被证据直接支持的事实，不要补常识，不要推测。
+2. 不要提出 root prompt、pinned、protected、Core Memory 更新。
+3. 不要把短期情绪当长期画像，除非证据明确显示稳定偏好、边界、习惯、关系锚点或重要日期。
+4. 如果证据不足，返回 []。
+5. 只输出 JSON 数组，不要 markdown，不要解释。
+
+每个候选必须包含：
+{{
+  "fact": "一句可读中文事实",
+  "profile_kind": "preference|boundary|habit|identity|relationship_anchor|life_fact|work_state|other",
+  "subject": "user|ai|relationship",
+  "predicate": "snake_case_or_short_key",
+  "object": "事实对象，允许中文",
+  "evidence_bucket_id": "必须等于给定 bucket id",
+  "evidence_moment_id": "可为空",
+  "confidence": 0.0,
+  "reason": "为什么这条证据足够支撑"
+}}
+
+最多返回 3 条。"""
+
+
+def _strip_json_wrapper(raw: str) -> str:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return text
+
+
+async def _call_profile_fact_proposal_model(
+    *,
+    bucket: dict,
+    evidence_moment_id: str = "",
+    max_proposals: int = 3,
+) -> str:
+    if not getattr(dehydrator, "api_available", False) or not getattr(dehydrator, "client", None):
+        raise RuntimeError("dehydration API is not configured")
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    identity = _identity()
+    prompt = PROFILE_FACT_PROPOSAL_PROMPT_TEMPLATE.format(
+        user_display_name=identity.get("user_display_name") or identity.get("user_name") or "用户",
+        ai_name=identity.get("ai_name") or "AI",
+    )
+    content = strip_wikilinks(bucket.get("content", ""))
+    if evidence_moment_id:
+        try:
+            moments = memory_moment_store.upsert_bucket(bucket)
+            selected = next(
+                (moment for moment in moments if str(moment.get("moment_id") or "") == evidence_moment_id),
+                None,
+            )
+            if selected:
+                content = selected.get("source_window") or selected.get("text") or content
+        except Exception as e:
+            logger.warning("Profile fact proposal moment lookup failed: %s", e)
+    evidence_payload = {
+        "bucket_id": bucket.get("id", ""),
+        "bucket_name": meta.get("name", bucket.get("id", "")),
+        "bucket_tags": meta.get("tags", []),
+        "bucket_domain": meta.get("domain", []),
+        "evidence_moment_id": evidence_moment_id,
+        "content": content[:5000],
+        "max_proposals": max(1, min(3, int(max_proposals))),
+    }
+    response = await dehydrator.client.chat.completions.create(
+        model=dehydrator.model,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": _json_lib.dumps(evidence_payload, ensure_ascii=False)},
+        ],
+        **dehydrator._completion_options(max_tokens=900, temperature=0.0),
+    )
+    if not response.choices:
+        return "[]"
+    return response.choices[0].message.content or "[]"
+
+
+def _normalize_profile_fact_proposal(
+    item: dict,
+    *,
+    evidence_bucket_id: str,
+    evidence_moment_id: str = "",
+    existing_keys: set[str] | None = None,
+) -> tuple[dict | None, str]:
+    if not isinstance(item, dict):
+        return None, "proposal is not an object"
+    fact = str(item.get("fact") or "").strip()
+    if not fact:
+        return None, "missing fact"
+    candidate_evidence = str(item.get("evidence_bucket_id") or "").strip()
+    if candidate_evidence != evidence_bucket_id:
+        return None, "evidence_bucket_id mismatch"
+    candidate_moment = str(item.get("evidence_moment_id") or evidence_moment_id or "").strip()
+    if candidate_moment and not MEMORY_ID_RE.fullmatch(candidate_moment):
+        return None, "invalid evidence_moment_id"
+    key = _normalize_profile_fact_key(fact)
+    if existing_keys and key in existing_keys:
+        return None, "duplicate profile fact"
+    proposal = {
+        "fact": fact,
+        "profile_kind": _profile_key(item.get("profile_kind"), "other"),
+        "subject": _profile_key(item.get("subject"), "user"),
+        "predicate": _profile_key(item.get("predicate"), "related_to"),
+        "object": str(item.get("object") or "").strip()[:160],
+        "evidence_bucket_id": evidence_bucket_id,
+        "evidence_moment_id": candidate_moment,
+        "confidence": _float_between(item.get("confidence"), 0.7, 0.0, 1.0),
+        "reason": _clip_text(str(item.get("reason") or "").strip(), 240),
+    }
+    return proposal, ""
+
+
+def _parse_profile_fact_proposals(
+    raw: str,
+    *,
+    evidence_bucket_id: str,
+    evidence_moment_id: str = "",
+    existing_keys: set[str] | None = None,
+    max_proposals: int = 3,
+) -> tuple[list[dict], list[dict]]:
+    rejected: list[dict] = []
+    try:
+        parsed = _json_lib.loads(_strip_json_wrapper(raw))
+    except (TypeError, ValueError, _json_lib.JSONDecodeError):
+        return [], [{"reason": "invalid json", "raw": _clip_text(str(raw or ""), 240)}]
+    if isinstance(parsed, dict) and isinstance(parsed.get("proposals"), list):
+        parsed = parsed["proposals"]
+    if not isinstance(parsed, list):
+        return [], [{"reason": "json root is not a list"}]
+
+    proposals: list[dict] = []
+    seen: set[str] = set()
+    for item in parsed:
+        proposal, reason = _normalize_profile_fact_proposal(
+            item,
+            evidence_bucket_id=evidence_bucket_id,
+            evidence_moment_id=evidence_moment_id,
+            existing_keys=existing_keys,
+        )
+        if not proposal:
+            rejected.append({"reason": reason, "proposal": item if isinstance(item, dict) else str(item)})
+            continue
+        key = _normalize_profile_fact_key(proposal["fact"])
+        if key in seen:
+            rejected.append({"reason": "duplicate in response", "proposal": proposal})
+            continue
+        seen.add(key)
+        proposals.append(proposal)
+        if len(proposals) >= max(1, min(3, int(max_proposals))):
+            break
+    return proposals, rejected
+
+
 def _queue_memory_enrichment(bucket_id: str, *, force: bool = False) -> None:
     if not bucket_id:
         return
@@ -6044,6 +6204,129 @@ async def api_profile_fact_update(request):
         "status": action,
         "id": bucket_id,
         "fact": await _profile_fact_payload(updated_bucket),
+    })
+
+
+@mcp.custom_route("/api/profile-fact-proposals", methods=["POST"])
+async def api_profile_fact_proposals(request):
+    """Generate evidence-bound profile fact proposals from one bucket."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    bucket_id = str(body.get("bucket_id") or body.get("evidence_bucket_id") or "").strip()
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+    evidence_moment_id = str(body.get("evidence_moment_id") or body.get("moment_id") or "").strip()
+    if evidence_moment_id and not MEMORY_ID_RE.fullmatch(evidence_moment_id):
+        return JSONResponse({"error": "invalid evidence_moment_id"}, status_code=400)
+    max_proposals = _int_between(body.get("max_proposals"), 3, 1, 3)
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if _is_profile_fact_bucket(bucket):
+        return JSONResponse({"error": "profile_fact bucket cannot be evidence for proposal"}, status_code=400)
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        raw = await _call_profile_fact_proposal_model(
+            bucket=bucket,
+            evidence_moment_id=evidence_moment_id,
+            max_proposals=max_proposals,
+        )
+        proposals, rejected = _parse_profile_fact_proposals(
+            raw,
+            evidence_bucket_id=bucket_id,
+            evidence_moment_id=evidence_moment_id,
+            existing_keys=_existing_profile_fact_keys(all_buckets),
+            max_proposals=max_proposals,
+        )
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=503)
+    except Exception as e:
+        logger.warning("Profile fact proposal failed: %s", e, exc_info=True)
+        return JSONResponse({"error": f"proposal failed: {type(e).__name__}"}, status_code=502)
+
+    meta = bucket.get("metadata", {})
+    return JSONResponse({
+        "status": "ok",
+        "evidence": {
+            "bucket_id": bucket_id,
+            "moment_id": evidence_moment_id,
+            "name": meta.get("name", bucket_id),
+        },
+        "proposals": proposals,
+        "rejected": rejected,
+        "model": getattr(dehydrator, "model", ""),
+    })
+
+
+@mcp.custom_route("/api/profile-fact-proposals/confirm", methods=["POST"])
+async def api_profile_fact_proposal_confirm(request):
+    """Confirm one proposal by writing through the existing profile_fact path."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    evidence_bucket_id = str(body.get("evidence_bucket_id") or "").strip()
+    if not evidence_bucket_id or not MEMORY_ID_RE.fullmatch(evidence_bucket_id):
+        return JSONResponse({"error": "invalid evidence_bucket_id"}, status_code=400)
+    evidence_moment_id = str(body.get("evidence_moment_id") or "").strip()
+    if evidence_moment_id and not MEMORY_ID_RE.fullmatch(evidence_moment_id):
+        return JSONResponse({"error": "invalid evidence_moment_id"}, status_code=400)
+
+    bucket = await bucket_mgr.get(evidence_bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "evidence bucket not found"}, status_code=404)
+
+    proposal, reason = _normalize_profile_fact_proposal(
+        body,
+        evidence_bucket_id=evidence_bucket_id,
+        evidence_moment_id=evidence_moment_id,
+        existing_keys=_existing_profile_fact_keys(await bucket_mgr.list_all(include_archive=True)),
+    )
+    if not proposal:
+        return JSONResponse({"error": reason or "invalid proposal"}, status_code=400)
+
+    result = await profile_fact(
+        fact=proposal["fact"],
+        evidence_bucket_id=proposal["evidence_bucket_id"],
+        profile_kind=proposal["profile_kind"],
+        subject=proposal["subject"],
+        predicate=proposal["predicate"],
+        object_value=proposal["object"],
+        evidence_moment_id=proposal["evidence_moment_id"],
+        evidence_context=proposal["reason"],
+        reflection="",
+        followup="",
+        confidence=proposal["confidence"],
+    )
+    if not result.startswith("profile_fact→"):
+        return JSONResponse({"error": result}, status_code=400)
+    profile_id = result.split("profile_fact→", 1)[1].split(" ", 1)[0]
+    created = await bucket_mgr.get(profile_id)
+    return JSONResponse({
+        "status": "created",
+        "id": profile_id,
+        "result": result,
+        "fact": await _profile_fact_payload(created),
     })
 
 

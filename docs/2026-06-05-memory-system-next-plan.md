@@ -12,7 +12,7 @@ This is not a rewrite. The goal is to make the existing memory stack easier to r
 
 - Gateway currently uses the current user message as one recall query in normal bucket mode or graph mode.
 - The existing recall path already has deterministic term extraction, context-term filtering, facet expansion, topic evidence, vague gates, budget, cooldown, and `RecallPolicy`.
-- It does not yet have an LLM query planner that splits one long message into several short search anchors.
+- Gateway now has an optional LLM query planner that splits long mixed messages into short search anchors.
 - `core_memory_interval_rounds` defaults to `0`, so Core Memory injection is off unless configured.
 - When enabled, Gateway's Core Memory block only takes `pinned` or `protected` buckets.
 - `memory_layers.py` classifies ordinary `permanent` buckets as core layer, but Gateway does not inject ordinary permanent buckets into the Core Memory block.
@@ -65,6 +65,8 @@ Done in this document. This gives later code changes one source of truth for sco
 
 ### 2. Add a light Query Planner
 
+Status: implemented as an optional Gateway planner, disabled by default.
+
 Purpose: improve long-message recall without replacing the current recall path.
 
 Trigger only when one of these is true:
@@ -106,6 +108,8 @@ Rules:
 First version should not ask the planner to choose `keep_ids`. Add that only if short-query recall produces too much noise.
 
 ### 3. Add planner debug and a small real-query check
+
+Status: implemented in Gateway injection debug.
 
 Debug should show:
 
@@ -249,6 +253,8 @@ Current shape:
 
 ### 7. Add semi-automatic `profile_fact` proposals
 
+Status: implemented as manual-confirm dashboard proposals from a chosen evidence bucket.
+
 After Portrait Memory is stable, let an LLM propose profile facts.
 
 Proposal JSON must include:
@@ -268,6 +274,13 @@ Rules:
 - First version requires manual confirmation.
 - Confirmed facts use the existing `profile_fact` tool/write path.
 - Rejected facts stay out of memory.
+
+Current shape:
+
+- Dashboard Profile Facts page accepts an evidence bucket id and optional moment id.
+- `/api/profile-fact-proposals` calls the configured dehydration model and returns candidate JSON only.
+- Code rejects candidates whose `evidence_bucket_id` does not match, candidates without a fact, invalid moment ids, and duplicates of existing `profile_fact` content.
+- `/api/profile-fact-proposals/confirm` writes only one manually confirmed candidate through the existing `profile_fact(...)` path.
 
 ### 8. Add semi-automatic `anchor` proposals
 
