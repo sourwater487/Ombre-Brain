@@ -265,7 +265,7 @@ gateway:
   recalled_memory_budget: 400
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   retrieval_mode: graph       # graph | bucket; bucket skips moment graph diffusion
-  portrait_memory_enabled: false # read-only stable portrait cache from profile_fact + selected anchor
+  portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact + selected anchor
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: true # false = profile_fact only; never includes pinned/protected by default
