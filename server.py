@@ -2771,7 +2771,7 @@ async def api_bucket_delete(request):
 
 @mcp.custom_route("/api/bucket/{bucket_id}/archive", methods=["POST"])
 async def api_bucket_archive(request):
-    """Archive a resolved bucket from the dashboard without deleting content or embeddings."""
+    """Archive a dashboard bucket without deleting content or embeddings."""
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -2790,16 +2790,6 @@ async def api_bucket_archive(request):
     bucket_type = meta.get("type", "dynamic")
     if bucket_type == "archived":
         return JSONResponse({"error": "bucket already archived"}, status_code=400)
-    if bucket_type == "permanent":
-        return JSONResponse({"error": "permanent bucket cannot be archived from dashboard"}, status_code=400)
-    if meta.get("pinned"):
-        return JSONResponse({"error": "pinned bucket cannot be archived"}, status_code=400)
-    if meta.get("protected"):
-        return JSONResponse({"error": "protected bucket cannot be archived"}, status_code=400)
-    if meta.get("anchor"):
-        return JSONResponse({"error": "anchor bucket cannot be archived"}, status_code=400)
-    if not meta.get("resolved", False):
-        return JSONResponse({"error": "only resolved buckets can be archived"}, status_code=400)
 
     ok = await bucket_mgr.archive(bucket_id)
     if not ok:

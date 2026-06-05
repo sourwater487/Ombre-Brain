@@ -627,12 +627,12 @@ async def test_dashboard_archive_archives_resolved_dynamic_bucket(monkeypatch, b
 
 
 @pytest.mark.asyncio
-async def test_dashboard_archive_rejects_unresolved_bucket(monkeypatch, bucket_mgr, decay_eng):
+async def test_dashboard_archive_archives_unresolved_bucket(monkeypatch, bucket_mgr, decay_eng):
     import server
 
     bucket_id = await bucket_mgr.create(
-        content="Open operations item that should remain active.",
-        name="archive-unresolved-reject",
+        content="Open operations item selected for archive.",
+        name="archive-unresolved-dynamic",
         domain=["operations"],
     )
     monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
@@ -643,13 +643,13 @@ async def test_dashboard_archive_rejects_unresolved_bucket(monkeypatch, bucket_m
     payload = json.loads(response.body)
     bucket = await bucket_mgr.get(bucket_id)
 
-    assert response.status_code == 400
-    assert payload["error"] == "only resolved buckets can be archived"
-    assert bucket["metadata"]["type"] == "dynamic"
+    assert response.status_code == 200
+    assert payload == {"status": "archived", "id": bucket_id}
+    assert bucket["metadata"]["type"] == "archived"
 
 
 @pytest.mark.asyncio
-async def test_dashboard_archive_rejects_pinned_protected_permanent_anchor_bucket(
+async def test_dashboard_archive_archives_pinned_protected_permanent_anchor_bucket(
     monkeypatch, bucket_mgr, decay_eng
 ):
     import server
@@ -663,8 +663,8 @@ async def test_dashboard_archive_rejects_pinned_protected_permanent_anchor_bucke
     bucket_ids = []
     for label, kwargs in cases:
         bucket_id = await bucket_mgr.create(
-            content=f"Resolved {label} operations note that should not archive.",
-            name=f"archive-{label}-reject",
+            content=f"Resolved {label} operations note selected for archive.",
+            name=f"archive-{label}",
             domain=["operations"],
             resolved=True,
             **kwargs,
@@ -680,9 +680,30 @@ async def test_dashboard_archive_rejects_pinned_protected_permanent_anchor_bucke
         payload = json.loads(response.body)
         bucket = await bucket_mgr.get(bucket_id)
 
-        assert response.status_code == 400
-        assert "cannot be archived" in payload["error"]
-        assert bucket["metadata"]["type"] == ("permanent" if label == "permanent" else "dynamic")
+        assert response.status_code == 200
+        assert payload == {"status": "archived", "id": bucket_id}
+        assert bucket["metadata"]["type"] == "archived"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_archive_rejects_already_archived_bucket(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="Already archived operations note.",
+        name="archive-already-archived",
+        domain=["operations"],
+    )
+    await bucket_mgr.archive(bucket_id)
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_bucket_archive(DummyRequest(path_params={"bucket_id": bucket_id}))
+    payload = json.loads(response.body)
+
+    assert response.status_code == 400
+    assert payload["error"] == "bucket already archived"
 
 
 @pytest.mark.asyncio

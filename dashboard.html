@@ -361,20 +361,13 @@
   .bucket-content-block .detail-content {
     margin-top: 0;
   }
-  .bucket-content-block .detail-edit-button {
+  .bucket-content-actions {
     position: absolute;
     top: -38px;
     right: 2px;
-  }
-  .bucket-content-block .detail-archive-button {
-    position: absolute;
-    top: -38px;
-    right: 40px;
-  }
-  .bucket-content-block .detail-delete-button {
-    position: absolute;
-    top: -38px;
-    right: 78px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .content-edit-form {
     margin-top: 12px;
@@ -1986,20 +1979,10 @@ async function showDetail(id) {
     var meta = b.metadata || {};
     var comments = Array.isArray(meta.comments) ? meta.comments : [];
     var bucketType = meta.type || b.type || 'dynamic';
-    var isResolved = meta.resolved === true || b.resolved === true;
-    var isArchived = meta.archived === true || b.archived === true;
-    var canArchive = isResolved &&
-      !isArchived &&
-      bucketType !== 'permanent' &&
-      bucketType !== 'archived' &&
-      !meta.pinned &&
-      !b.pinned &&
-      !meta.protected &&
-      !b.protected &&
-      !meta.anchor &&
-      !b.anchor;
+    var isArchived = bucketType === 'archived';
+    var canArchive = !isArchived;
     var archiveButtonHtml = canArchive
-      ? '<button id="bucket-content-archive-button" type="button" class="detail-archive-button" onclick="archiveBucket(\'' + jsString(id) + '\')" aria-label="归档已解决" title="归档已解决">' +
+      ? '<button id="bucket-content-archive-button" type="button" class="detail-archive-button" onclick="archiveBucket(\'' + jsString(id) + '\')" aria-label="归档 bucket" title="归档 bucket">' +
           '<svg viewBox="0 0 24 24" aria-hidden="true">' +
             '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.25">' +
               '<path stroke-linejoin="round" d="M4.382 8.813v8.5c0 .845.344 1.656.957 2.253a3.305 3.305 0 0 0 2.308.934h8.706c.866 0 1.696-.336 2.308-.934a3.15 3.15 0 0 0 .957-2.253v-8.5m0-5.313H4.382c-.901 0-1.632.714-1.632 1.594v2.125c0 .88.73 1.593 1.632 1.593h15.236c.901 0 1.632-.713 1.632-1.593V5.094c0-.88-.73-1.594-1.632-1.594"/>' +
@@ -2064,9 +2047,11 @@ async function showDetail(id) {
         '<div class="field"><label>最后活跃</label>' + esc(meta.last_active || '—') + '</div>' +
       '</div>' +
       '<div class="bucket-content-block">' +
-        deleteButtonHtml +
-        archiveButtonHtml +
-        '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + jsString(id) + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
+        '<div class="bucket-content-actions">' +
+          deleteButtonHtml +
+          archiveButtonHtml +
+          '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + jsString(id) + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
+        '</div>' +
         '<div id="bucket-content-view" class="detail-content">' + esc(b.content || '') + '</div>' +
         '<form id="bucket-content-edit" class="content-edit-form hidden" onsubmit="submitBucketContentEdit(event, \'' + jsString(id) + '\')">' +
           '<textarea name="content">' + esc(b.content || '') + '</textarea>' +
@@ -2118,7 +2103,7 @@ function cancelBucketContentEdit() {
 }
 
 async function archiveBucket(bucketId) {
-  if (!confirm('确定归档这条已解决记忆吗？它不会被删除，只会移入 archived。')) return;
+  if (!confirm('确定归档这个 bucket 吗？它不会被删除，只会移入 archived。')) return;
   var button = document.getElementById('bucket-content-archive-button');
   if (button) button.disabled = true;
   try {
