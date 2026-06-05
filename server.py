@@ -2748,6 +2748,27 @@ async def api_bucket_update(request):
     })
 
 
+@mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
+async def api_bucket_delete(request):
+    """Delete a bucket from the dashboard and clear its embedding."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    bucket_id = request.path_params["bucket_id"]
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+
+    deleted = await bucket_mgr.delete(bucket_id)
+    if not deleted:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    embedding_engine.delete_embedding(bucket_id)
+    return JSONResponse({"status": "deleted", "id": bucket_id})
+
+
 @mcp.custom_route("/api/bucket/{bucket_id}/archive", methods=["POST"])
 async def api_bucket_archive(request):
     """Archive a resolved bucket from the dashboard without deleting content or embeddings."""

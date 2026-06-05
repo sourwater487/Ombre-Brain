@@ -710,6 +710,61 @@ async def test_dashboard_archive_does_not_delete_embedding(monkeypatch, bucket_m
 
 
 @pytest.mark.asyncio
+async def test_dashboard_bucket_delete_writes_tombstone_and_clears_embedding(
+    monkeypatch, bucket_mgr, decay_eng, test_config
+):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="Duplicate dashboard note that should be deleted.",
+        name="dashboard-delete",
+        domain=["operations"],
+    )
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    response = await server.api_bucket_delete(DummyRequest(path_params={"bucket_id": bucket_id}))
+    payload = json.loads(response.body)
+    tombstone_path = os.path.join(test_config["buckets_dir"], ".tombstones", f"{bucket_id}.json")
+
+    assert response.status_code == 200
+    assert payload == {"status": "deleted", "id": bucket_id}
+    assert await bucket_mgr.get(bucket_id) is None
+    assert os.path.exists(tombstone_path)
+    assert embedding_engine.deleted == [bucket_id]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_bucket_delete_requires_auth(monkeypatch, bucket_mgr, decay_eng):
+    import server
+    from starlette.responses import JSONResponse
+
+    bucket_id = await bucket_mgr.create(
+        content="Dashboard delete should require auth.",
+        name="dashboard-delete-auth",
+        domain=["operations"],
+    )
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(
+        server,
+        "_require_dashboard_auth",
+        lambda request: JSONResponse({"error": "unauthorized"}, status_code=401),
+    )
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    response = await server.api_bucket_delete(DummyRequest(path_params={"bucket_id": bucket_id}))
+
+    assert response.status_code == 401
+    assert await bucket_mgr.get(bucket_id) is not None
+    assert embedding_engine.deleted == []
+
+
+@pytest.mark.asyncio
 async def test_dashboard_comment_delete_can_delete_dashboard_source_comment(monkeypatch, bucket_mgr, decay_eng):
     import server
 

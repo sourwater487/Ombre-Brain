@@ -316,7 +316,8 @@
     transition: all 0.18s ease;
   }
   .detail-edit-button,
-  .detail-archive-button {
+  .detail-archive-button,
+  .detail-delete-button {
     width: 32px;
     height: 32px;
     padding: 0;
@@ -337,13 +338,19 @@
     height: 0.82em;
     opacity: 0.72;
   }
+  .detail-delete-button svg {
+    width: 0.82em;
+    height: 0.82em;
+    opacity: 0.68;
+  }
   .content-edit-actions button:hover,
   .comment-delete-button:hover {
     color: var(--accent-dark);
     box-shadow: 3px 3px 8px var(--shadow-dark-subtle), -3px -3px 8px var(--shadow-light);
   }
   .detail-edit-button:hover,
-  .detail-archive-button:hover {
+  .detail-archive-button:hover,
+  .detail-delete-button:hover {
     color: var(--accent-dark);
     background: var(--accent-glow);
   }
@@ -363,6 +370,11 @@
     position: absolute;
     top: -38px;
     right: 40px;
+  }
+  .bucket-content-block .detail-delete-button {
+    position: absolute;
+    top: -38px;
+    right: 78px;
   }
   .content-edit-form {
     margin-top: 12px;
@@ -1997,6 +2009,15 @@ async function showDetail(id) {
           '</svg>' +
         '</button>'
       : '';
+    var deleteButtonHtml =
+      '<button id="bucket-content-delete-button" type="button" class="detail-delete-button" onclick="deleteBucket(\'' + jsString(id) + '\')" aria-label="删除 bucket" title="删除 bucket">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+          '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.25">' +
+            '<path d="M5.47 6.015v12.514a2.72 2.72 0 0 0 2.721 2.721h7.618a2.72 2.72 0 0 0 2.72-2.72V6.014m-15.235.001h17.412"/>' +
+            '<path d="M8.735 6.015V4.382a1.632 1.632 0 0 1 1.633-1.632h3.264a1.632 1.632 0 0 1 1.633 1.632v1.633M9.824 16.992v-5.439m4.353 5.439v-5.439"/>' +
+          '</g>' +
+        '</svg>' +
+      '</button>';
     var commentsHtml = comments.length
       ? '<div class="detail-comments"><h3>年轮</h3>' + comments.map(function(c) {
           var canDelete = c && c.id;
@@ -2043,6 +2064,7 @@ async function showDetail(id) {
         '<div class="field"><label>最后活跃</label>' + esc(meta.last_active || '—') + '</div>' +
       '</div>' +
       '<div class="bucket-content-block">' +
+        deleteButtonHtml +
         archiveButtonHtml +
         '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + jsString(id) + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
         '<div id="bucket-content-view" class="detail-content">' + esc(b.content || '') + '</div>' +
@@ -2066,11 +2088,13 @@ function startBucketContentEdit(bucketId) {
   var form = document.getElementById('bucket-content-edit');
   var editButton = document.getElementById('bucket-content-edit-button');
   var archiveButton = document.getElementById('bucket-content-archive-button');
+  var deleteButton = document.getElementById('bucket-content-delete-button');
   if (!view || !form) return;
   view.classList.add('hidden');
   form.classList.remove('hidden');
   if (editButton) editButton.classList.add('hidden');
   if (archiveButton) archiveButton.classList.add('hidden');
+  if (deleteButton) deleteButton.classList.add('hidden');
   var textarea = form.querySelector('textarea[name="content"]');
   if (textarea) {
     textarea.focus();
@@ -2084,11 +2108,13 @@ function cancelBucketContentEdit() {
   var form = document.getElementById('bucket-content-edit');
   var editButton = document.getElementById('bucket-content-edit-button');
   var archiveButton = document.getElementById('bucket-content-archive-button');
+  var deleteButton = document.getElementById('bucket-content-delete-button');
   if (!view || !form) return;
   form.classList.add('hidden');
   view.classList.remove('hidden');
   if (editButton) editButton.classList.remove('hidden');
   if (archiveButton) archiveButton.classList.remove('hidden');
+  if (deleteButton) deleteButton.classList.remove('hidden');
 }
 
 async function archiveBucket(bucketId) {
@@ -2108,6 +2134,28 @@ async function archiveBucket(bucketId) {
     await showDetail(bucketId);
   } catch (e) {
     alert('归档失败: ' + e.message);
+    if (button) button.disabled = false;
+  }
+}
+
+async function deleteBucket(bucketId) {
+  if (!confirm('确定要删除这个 bucket 吗？这会真正删除这条记忆。')) return;
+  if (!confirm('二次确认：删除后不能从 dashboard 恢复。继续删除？')) return;
+  var button = document.getElementById('bucket-content-delete-button');
+  if (button) button.disabled = true;
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId), {
+      method: 'DELETE'
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '删除失败');
+    }
+    await loadBuckets();
+    closeDetail();
+  } catch (e) {
+    alert('删除失败: ' + e.message);
     if (button) button.disabled = false;
   }
 }
