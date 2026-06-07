@@ -364,6 +364,27 @@ def test_gateway_state_store_cooldown_curve(tmp_path):
     store.record_recent_context_injection("sess-a", 1, injected_at=origin + timedelta(minutes=5))
     assert store.get_last_recent_context_at("sess-a") == origin + timedelta(minutes=5)
 
+    store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="sess-a",
+        round_id=1,
+        user_text="暗号是星河折纸",
+        assistant_text="我记住了。",
+        model="dummy-model",
+        client="unit-test",
+        route="/v1/chat/completions",
+        created_at=origin + timedelta(minutes=6),
+    )
+    turns = store.list_recent_conversation_turns(
+        profile_id="haven_xiaoyu",
+        limit=5,
+        hours=24 * 365,
+    )
+    assert len(turns) == 1
+    assert turns[0]["session_id"] == "sess-a"
+    assert turns[0]["user_text"] == "暗号是星河折纸"
+    assert turns[0]["assistant_text"] == "我记住了。"
+
 
 def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_config, bucket_mgr):
     cfg = _gateway_config(
@@ -4032,6 +4053,140 @@ def test_gateway_recent_context_allows_explicit_recent_memory_query(
     payload = debug_response.json()["items"][0]["payload"]
     assert payload["recent_context_injected"] is True
     assert payload["recent_context_reason"] == "explicit_recent_query"
+
+
+def test_gateway_just_now_context_uses_conversation_turns_and_skips_memory_recall(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=800,
+        recalled_memory_budget=500,
+        related_memory_budget=420,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        just_now_context_enabled=True,
+        just_now_context_hours=12,
+        just_now_context_max_turns=4,
+        just_now_context_budget=500,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="旧记忆：另一个长期暗号是旧窗口折角，不该在刚刚查询里抢答。",
+        name="旧暗号",
+        hours_ago=10,
+        importance=9,
+    )
+    embedding_queries: list[str] = []
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+        embedding_queries=embedding_queries,
+    )
+    state_store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="window-one",
+        round_id=1,
+        user_text="哥哥，我们刚刚的暗号是星河折纸。",
+        assistant_text="记住了，星河折纸。",
+        model="dummy",
+        client="unit-test",
+        route="/v1/chat/completions",
+        created_at=datetime.now() - timedelta(minutes=2),
+    )
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "哥哥，刚刚我们的暗号是什么？"}]},
+            "window-two",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == []
+    assert embedding_queries == []
+    assert "Just Now Chat Context" in injected
+    assert "星河折纸" in injected
+    assert "旧窗口折角" not in injected
+    assert "Recalled Memory" not in injected
+    assert "Recent Context" not in injected
+    assert debug["just_now_context_injected"] is True
+    assert debug["just_now_context_debug"]["status"] == "injected"
+    assert debug["recent_context_injected"] is False
+    assert debug["date_persona_trace_injected"] is False
+    assert debug["query_planner_debug"]["skip_reason"] == "just_now_context"
+    assert debug["injected_bucket_ids"] == []
+
+
+def test_gateway_records_successful_chat_turn_for_just_now_context(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=0,
+        related_memory_budget=0,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        conversation_turns_max_entries=20,
+    )
+
+    def upstream_responder(body, request, captured):
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "记住了，暗号是星河折纸。"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    app, _service, state_store, _captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        upstream_responder=upstream_responder,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "window-one",
+                "X-Ombre-Client": "unit-client",
+            },
+            json={"messages": [{"role": "user", "content": "哥哥，暗号是星河折纸"}]},
+        )
+
+    assert response.status_code == 200
+    turns = state_store.list_recent_conversation_turns(
+        profile_id="haven_xiaoyu",
+        limit=5,
+        hours=1,
+    )
+    assert len(turns) == 1
+    assert turns[0]["session_id"] == "window-one"
+    assert turns[0]["user_text"] == "哥哥，暗号是星河折纸"
+    assert turns[0]["assistant_text"] == "记住了，暗号是星河折纸。"
+    assert turns[0]["model"] == cfg["gateway"]["upstream_default_model"]
+    assert turns[0]["client"] == "unit-client"
 
 
 def test_gateway_recent_context_allows_twenty_four_hour_reentry(

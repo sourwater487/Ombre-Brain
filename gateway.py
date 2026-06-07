@@ -253,6 +253,20 @@ class GatewayService:
         self.recent_context_cooldown_hours = float(
             self.gateway_cfg.get("recent_context_cooldown_hours", 6)
         )
+        self.just_now_context_enabled = self._bool_config_value(
+            self.gateway_cfg.get("just_now_context_enabled"),
+            True,
+        )
+        self.just_now_context_hours = max(0.0, float(self.gateway_cfg.get("just_now_context_hours", 6)))
+        self.just_now_context_max_turns = max(
+            1,
+            min(8, int(self.gateway_cfg.get("just_now_context_max_turns", 5))),
+        )
+        self.just_now_context_budget = max(0, int(self.gateway_cfg.get("just_now_context_budget", 420)))
+        self.conversation_turns_max_entries = max(
+            0,
+            int(self.gateway_cfg.get("conversation_turns_max_entries", 500)),
+        )
         self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 10))
         self.inject_max_cards = max(0, min(2, int(self.gateway_cfg.get("inject_max_cards", 2))))
         self.skip_recent_rounds = max(0, int(self.gateway_cfg.get("skip_recent_rounds", 5)))
@@ -416,6 +430,10 @@ class GatewayService:
                 "recent_context_cooldown_hours": self.recent_context_cooldown_hours,
                 "recent_context_reentry_idle_hours": self.recent_context_reentry_idle_hours,
                 "recent_context_budget": self.recent_budget,
+                "just_now_context_enabled": self.just_now_context_enabled,
+                "just_now_context_hours": self.just_now_context_hours,
+                "just_now_context_max_turns": self.just_now_context_max_turns,
+                "just_now_context_budget": self.just_now_context_budget,
                 "date_persona_trace_enabled": self.date_persona_trace_enabled,
                 "date_persona_trace_budget": self.date_persona_trace_budget,
                 "date_persona_trace_max_events": self.date_persona_trace_max_events,
@@ -461,6 +479,11 @@ class GatewayService:
             "recent_context_cooldown_hours": self.recent_context_cooldown_hours,
             "recent_context_reentry_idle_hours": self.recent_context_reentry_idle_hours,
             "recent_context_budget": self.recent_budget,
+            "just_now_context_enabled": self.just_now_context_enabled,
+            "just_now_context_hours": self.just_now_context_hours,
+            "just_now_context_max_turns": self.just_now_context_max_turns,
+            "just_now_context_budget": self.just_now_context_budget,
+            "conversation_turns_max_entries": self.conversation_turns_max_entries,
             "date_persona_trace_enabled": self.date_persona_trace_enabled,
             "date_persona_trace_budget": self.date_persona_trace_budget,
             "date_persona_trace_max_events": self.date_persona_trace_max_events,
@@ -546,6 +569,29 @@ class GatewayService:
             self.recent_budget = max(0, int(payload["recent_context_budget"]))
             self.gateway_cfg["recent_context_budget"] = self.recent_budget
             updated.append("gateway.recent_context_budget")
+        if "just_now_context_enabled" in payload:
+            self.just_now_context_enabled = self._bool_config_value(
+                payload["just_now_context_enabled"],
+                True,
+            )
+            self.gateway_cfg["just_now_context_enabled"] = self.just_now_context_enabled
+            updated.append("gateway.just_now_context_enabled")
+        if "just_now_context_hours" in payload:
+            self.just_now_context_hours = max(0.0, float(payload["just_now_context_hours"]))
+            self.gateway_cfg["just_now_context_hours"] = self.just_now_context_hours
+            updated.append("gateway.just_now_context_hours")
+        if "just_now_context_max_turns" in payload:
+            self.just_now_context_max_turns = max(1, min(8, int(payload["just_now_context_max_turns"])))
+            self.gateway_cfg["just_now_context_max_turns"] = self.just_now_context_max_turns
+            updated.append("gateway.just_now_context_max_turns")
+        if "just_now_context_budget" in payload:
+            self.just_now_context_budget = max(0, int(payload["just_now_context_budget"]))
+            self.gateway_cfg["just_now_context_budget"] = self.just_now_context_budget
+            updated.append("gateway.just_now_context_budget")
+        if "conversation_turns_max_entries" in payload:
+            self.conversation_turns_max_entries = max(0, int(payload["conversation_turns_max_entries"]))
+            self.gateway_cfg["conversation_turns_max_entries"] = self.conversation_turns_max_entries
+            updated.append("gateway.conversation_turns_max_entries")
         if "date_persona_trace_enabled" in payload:
             self.date_persona_trace_enabled = self._bool_config_value(
                 payload["date_persona_trace_enabled"],
@@ -800,6 +846,7 @@ class GatewayService:
             return auth_result
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        client_label = self._client_label_from_request(request, "/v1/chat/completions")
 
         try:
             payload = await request.json()
@@ -853,6 +900,7 @@ class GatewayService:
                     session_id,
                     recalled_ids,
                     persona_user_message,
+                    client_label,
                     injection_debug,
                 )
             except RuntimeError as exc:
@@ -877,11 +925,21 @@ class GatewayService:
                 route="/v1/chat/completions",
             )
             self._capture_reasoning_from_response(session_id, upstream_response)
-            await self._record_successful_round(session_id, recalled_ids, injection_debug)
-            await self._update_persona_after_response(
+            assistant_message = self._extract_assistant_message_from_response(upstream_response)
+            await self._record_successful_round(
+                session_id,
+                recalled_ids,
+                injection_debug,
+                user_message=persona_user_message,
+                assistant_message=assistant_message,
+                model=forward_payload["model"],
+                client=client_label,
+                route="/v1/chat/completions",
+            )
+            await self._update_persona_after_assistant_message(
                 session_id,
                 persona_user_message,
-                upstream_response,
+                assistant_message,
                 recalled_ids or [],
             )
 
@@ -893,6 +951,7 @@ class GatewayService:
             return auth_result
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        client_label = self._client_label_from_request(request, "/v1/messages")
 
         try:
             payload = await request.json()
@@ -937,6 +996,7 @@ class GatewayService:
                 session_id,
                 recalled_ids,
                 persona_user_message,
+                client_label,
                 injection_debug,
             )
 
@@ -956,11 +1016,21 @@ class GatewayService:
                 route="/v1/messages",
             )
             self._capture_reasoning_from_response(session_id, upstream_response)
-            await self._record_successful_round(session_id, recalled_ids, injection_debug)
-            await self._update_persona_after_response(
+            assistant_message = self._extract_assistant_message_from_response(upstream_response)
+            await self._record_successful_round(
+                session_id,
+                recalled_ids,
+                injection_debug,
+                user_message=persona_user_message,
+                assistant_message=assistant_message,
+                model=forward_payload["model"],
+                client=client_label,
+                route="/v1/messages",
+            )
+            await self._update_persona_after_assistant_message(
                 session_id,
                 persona_user_message,
-                upstream_response,
+                assistant_message,
                 recalled_ids or [],
             )
             return self._openai_response_to_anthropic(upstream_response, forward_payload["model"])
@@ -1041,11 +1111,17 @@ class GatewayService:
             and self._query_prefers_session_start_handoff(current_user_query)
         )
         needs_handoff_first = is_handoff_trigger_query or is_session_start_handoff_query
+        just_now_context_requested = (
+            self.just_now_context_enabled
+            and self._query_requests_just_now_context(current_user_query)
+        )
 
         persona_block = ""
         core_memory = ""
         portrait_memory = ""
         portrait_memory_debug: dict[str, Any] = self._portrait_memory_debug_base()
+        just_now_context = ""
+        just_now_context_debug: dict[str, Any] = self._just_now_context_debug_base(current_user_query)
         recent_context = ""
         recent_context_reason = ""
         recalled_moments: list[dict] = []
@@ -1079,7 +1155,11 @@ class GatewayService:
                 current_user_query,
                 session_id,
             )
-            skip_broad_dynamic_recall = skip_for_targeted_detail or needs_handoff_first
+            skip_broad_dynamic_recall = (
+                skip_for_targeted_detail
+                or needs_handoff_first
+                or just_now_context_requested
+            )
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = (
                     "handoff_trigger" if is_handoff_trigger_query else "session_start_handoff"
@@ -1097,6 +1177,11 @@ class GatewayService:
                         "or breath(mode=\"handoff\") before replying. Do not call breath(query=\"新窗口\") "
                         "for this literal signal, and do not write/hold it unless the user explicitly asks."
                     )
+            elif just_now_context_requested:
+                query_planner_debug["skip_reason"] = "just_now_context"
+                just_now_context, just_now_context_debug = self._build_just_now_chat_context(
+                    current_user_query,
+                )
             if self.persona_engine.enabled and self._should_inject_interval(
                 session_id,
                 self.current_inner_state_interval_rounds,
@@ -1108,14 +1193,16 @@ class GatewayService:
             if self.persona_engine.enabled and persona_state is None:
                 persona_state = self._get_persona_state_for_context_mode(session_id)
             context_mode = self._classify_context_mode(current_user_query, persona_state)
-            if not needs_handoff_first and self._should_inject_interval(
+            if not needs_handoff_first and not just_now_context_requested and self._should_inject_interval(
                 session_id,
                 self.core_memory_interval_rounds,
             ):
                 core_memory = await self._build_core_memory_block(all_buckets)
-            if needs_handoff_first:
+            if needs_handoff_first or just_now_context_requested:
                 portrait_memory_debug["skip_reason"] = (
-                    "handoff_trigger" if is_handoff_trigger_query else "session_start_handoff"
+                    "just_now_context"
+                    if just_now_context_requested and not needs_handoff_first
+                    else ("handoff_trigger" if is_handoff_trigger_query else "session_start_handoff")
                 )
             else:
                 portrait_memory, portrait_memory_debug = self._build_portrait_memory_block(all_buckets)
@@ -1173,9 +1260,11 @@ class GatewayService:
                 self.recalled_budget,
                 current_user_query,
             )
-            if needs_handoff_first:
+            if needs_handoff_first or just_now_context_requested:
                 date_persona_trace_debug["skip_reason"] = (
-                    "handoff_trigger" if is_handoff_trigger_query else "session_start_handoff"
+                    "just_now_context"
+                    if just_now_context_requested and not needs_handoff_first
+                    else ("handoff_trigger" if is_handoff_trigger_query else "session_start_handoff")
                 )
             else:
                 date_persona_trace, date_persona_trace_debug = self._build_date_persona_trace_block(
@@ -1250,7 +1339,7 @@ class GatewayService:
                     "Do not mention this line in the final answer."
                 )
             reliable_dynamic_context = bool(recalled_memory.strip() or related_memory.strip())
-            if self._should_inject_recent_context(
+            if not just_now_context_requested and self._should_inject_recent_context(
                 session_id,
                 current_user_query,
                 has_reliable_dynamic_context=reliable_dynamic_context,
@@ -1297,6 +1386,7 @@ class GatewayService:
             persona_block=persona_block,
             core_memory=core_memory,
             portrait_memory=portrait_memory,
+            just_now_context=just_now_context,
             recent_context=recent_context,
             recalled_memory=recalled_memory,
             date_persona_trace=date_persona_trace,
@@ -1338,6 +1428,8 @@ class GatewayService:
                 targeted_memory_detail_debug=targeted_memory_detail_debug,
                 dream_context=dream_context,
                 dream_context_status=dream_context_status,
+                just_now_context=just_now_context,
+                just_now_context_debug=just_now_context_debug,
                 recent_context=recent_context,
                 recent_context_reason=recent_context_reason,
                 favorite_ids=favorite_ids,
@@ -1361,6 +1453,20 @@ class GatewayService:
         retention = str(upstream.get("prompt_cache_retention") or "").strip()
         if retention:
             payload.setdefault("prompt_cache_retention", retention)
+
+    def _client_label_from_request(self, request: Request, route: str) -> str:
+        explicit = (
+            request.headers.get("X-Ombre-Client")
+            or request.headers.get("X-Client-Name")
+            or request.headers.get("X-Client")
+            or ""
+        ).strip()
+        if explicit:
+            return self._clip_text(explicit, 120)
+        user_agent = (request.headers.get("User-Agent") or "").strip()
+        if user_agent:
+            return self._clip_text(user_agent, 120)
+        return route
 
     def _authorize(self, auth_header: str) -> JSONResponse | None:
         if not self.gateway_token:
@@ -1563,6 +1669,7 @@ class GatewayService:
         session_id: str,
         recalled_ids: list[str] | None,
         user_message: str,
+        client: str = "",
         injection_debug: dict[str, Any] | None = None,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
@@ -1595,6 +1702,7 @@ class GatewayService:
                     stream_state=stream_state,
                     recalled_ids=recalled_ids,
                     user_message=user_message,
+                    client=client,
                     injection_debug=injection_debug,
                 )
 
@@ -1625,6 +1733,12 @@ class GatewayService:
         session_id: str,
         recalled_ids: list[str] | None,
         injection_debug: dict[str, Any] | None = None,
+        *,
+        user_message: str = "",
+        assistant_message: dict[str, Any] | None = None,
+        model: str = "",
+        client: str = "",
+        route: str = "",
     ) -> None:
         if recalled_ids is None:
             logger.info(
@@ -1653,6 +1767,15 @@ class GatewayService:
                     round_id,
                     exc,
                 )
+        self._record_conversation_turn(
+            session_id=session_id,
+            round_id=round_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            model=model,
+            client=client,
+            route=route,
+        )
         for bucket_id in recalled_ids:
             await self.bucket_mgr.touch(bucket_id)
         logger.info(
@@ -1661,6 +1784,48 @@ class GatewayService:
             round_id,
             recalled_ids,
         )
+
+    def _record_conversation_turn(
+        self,
+        *,
+        session_id: str,
+        round_id: int,
+        user_message: str,
+        assistant_message: dict[str, Any] | None,
+        model: str,
+        client: str,
+        route: str,
+    ) -> None:
+        if not user_message.strip():
+            return
+        assistant_text = ""
+        if isinstance(assistant_message, dict):
+            assistant_text = self._coerce_message_text(assistant_message.get("content")).strip()
+            if not assistant_text and assistant_message.get("tool_calls"):
+                return
+        user_text = self._clean_conversation_turn_text(user_message)
+        assistant_text = self._clean_conversation_turn_text(assistant_text)
+        if not user_text and not assistant_text:
+            return
+        try:
+            self.state_store.record_conversation_turn(
+                profile_id=str(getattr(self.persona_engine, "profile_id", "") or "default"),
+                session_id=session_id,
+                round_id=round_id,
+                user_text=self._clip_text(user_text, 4000),
+                assistant_text=self._clip_text(assistant_text, 4000),
+                model=model,
+                client=client,
+                route=route,
+                max_entries=self.conversation_turns_max_entries,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Gateway conversation turn record failed | session=%s round=%s error=%s",
+                session_id,
+                round_id,
+                exc,
+            )
 
     async def _maybe_retry_with_memory_detail(
         self,
@@ -2422,6 +2587,7 @@ class GatewayService:
         stream_state: dict[str, Any],
         recalled_ids: list[str] | None,
         user_message: str,
+        client: str = "",
         injection_debug: dict[str, Any] | None = None,
     ) -> None:
         self._log_cache_usage_from_stream_state(
@@ -2431,8 +2597,17 @@ class GatewayService:
             route=route,
         )
         self._capture_reasoning_from_stream_state(session_id, stream_state)
-        await self._record_successful_round(session_id, recalled_ids, injection_debug)
         assistant_message = self._build_stream_assistant_message(stream_state)
+        await self._record_successful_round(
+            session_id,
+            recalled_ids,
+            injection_debug,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            model=model,
+            client=client,
+            route=route,
+        )
         self._schedule_persona_post_reply_update(
             session_id,
             user_message,
@@ -2843,6 +3018,7 @@ class GatewayService:
         session_id: str,
         recalled_ids: list[str] | None,
         user_message: str,
+        client: str = "",
         injection_debug: dict[str, Any] | None = None,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
@@ -2882,6 +3058,7 @@ class GatewayService:
                     stream_state=stream_state,
                     recalled_ids=recalled_ids,
                     user_message=user_message,
+                    client=client,
                     injection_debug=injection_debug,
                 )
 
@@ -3760,6 +3937,131 @@ class GatewayService:
             "excerpt_event_count": 0,
         }
 
+    def _just_now_context_debug_base(self, query: str = "") -> dict[str, Any]:
+        return {
+            "enabled": self.just_now_context_enabled,
+            "status": "skipped",
+            "skip_reason": "",
+            "query_preview": self._clip_text(query, 160),
+            "hours": self.just_now_context_hours,
+            "max_turns": self.just_now_context_max_turns,
+            "turn_count": 0,
+            "selected_turn_ids": [],
+        }
+
+    def _build_just_now_chat_context(self, query_text: str) -> tuple[str, dict[str, Any]]:
+        debug = self._just_now_context_debug_base(query_text)
+        debug["triggered"] = True
+        if not self.just_now_context_enabled:
+            debug["skip_reason"] = "disabled"
+            return "", debug
+        if self.just_now_context_budget <= 0 or self.just_now_context_hours <= 0:
+            debug["skip_reason"] = "budget_disabled"
+            return "", debug
+
+        profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
+        limit = max(self.just_now_context_max_turns * 4, self.just_now_context_max_turns)
+        turns = self.state_store.list_recent_conversation_turns(
+            profile_id=profile_id,
+            limit=limit,
+            hours=self.just_now_context_hours,
+        )
+        selected = self._select_just_now_turns(query_text, turns)
+        selected = selected[: self.just_now_context_max_turns]
+        debug["turn_count"] = len(selected)
+        debug["selected_turn_ids"] = [int(turn.get("id") or 0) for turn in selected]
+        if not selected:
+            debug["skip_reason"] = "no_recent_turns"
+            return "", debug
+
+        lines = [
+            "Recent cross-window chat snippets for just-now references. "
+            "Use this for 刚刚/刚才/上一句; it is short-term chat context, not long-term memory."
+        ]
+        for turn in reversed(selected):
+            created = self._format_conversation_turn_time(turn.get("created_at"))
+            session_label = self._clip_text(str(turn.get("session_id") or ""), 18)
+            header_bits = [created] if created else []
+            if session_label:
+                header_bits.append(f"session:{session_label}")
+            header = f"- [{' '.join(header_bits)}]" if header_bits else "-"
+            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""))
+            assistant_text = self._clean_conversation_turn_text(turn.get("assistant_text", ""))
+            if user_text:
+                lines.append(f"{header} {self.identity['user_display_name']}: {self._clip_text(user_text, 180)}")
+            if assistant_text:
+                lines.append(f"  {self.identity['ai_name']}: {self._clip_text(assistant_text, 180)}")
+
+        text = self._trim_text("\n".join(lines), self.just_now_context_budget)
+        if not text.strip():
+            debug["skip_reason"] = "empty_context"
+            return "", debug
+        debug["status"] = "injected"
+        return text, debug
+
+    def _select_just_now_turns(self, query_text: str, turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not turns:
+            return []
+        terms = self._just_now_query_terms(query_text)
+        if terms:
+            matched = [
+                turn for turn in turns
+                if any(
+                    term in (
+                        str(turn.get("user_text") or "")
+                        + "\n"
+                        + str(turn.get("assistant_text") or "")
+                    )
+                    for term in terms
+                )
+            ]
+            if matched:
+                return matched
+        return turns
+
+    @staticmethod
+    def _just_now_query_terms(query_text: str) -> list[str]:
+        text = str(query_text or "")
+        stop_terms = {
+            "刚刚", "刚才", "刚说", "刚聊", "刚提", "上一句", "上句话",
+            "我们", "我们的", "你", "我", "小雨", "哥哥", "记得", "还记得",
+            "记不记得", "是什么", "什么", "那个", "这个", "一下", "吗", "呀",
+            "呢", "了", "的",
+        }
+        raw_terms = re.findall(r"[\u4e00-\u9fffA-Za-z0-9_]{2,}", text)
+        terms: list[str] = []
+        for term in raw_terms:
+            if term in stop_terms:
+                continue
+            if term.startswith("刚才") and len(term) > 2:
+                term = term[2:]
+            if term.startswith("刚刚") and len(term) > 2:
+                term = term[2:]
+            if term and term not in stop_terms and len(term) >= 2:
+                terms.append(term)
+        if "暗号" in text and "暗号" not in terms:
+            terms.append("暗号")
+        return list(dict.fromkeys(terms))[:5]
+
+    def _format_conversation_turn_time(self, value: Any) -> str:
+        try:
+            parsed = datetime.fromisoformat(str(value or ""))
+        except ValueError:
+            return ""
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(self.gateway_tz)
+        return parsed.strftime("%Y-%m-%d %H:%M")
+
+    def _clean_conversation_turn_text(self, text: Any) -> str:
+        cleaned = str(text or "").strip()
+        cleaner = getattr(self.persona_engine, "_clean_client_status_lines", None)
+        if callable(cleaner):
+            try:
+                cleaned = str(cleaner(cleaned) or "").strip()
+            except Exception:
+                pass
+        return re.sub(r"\s+", " ", cleaned).strip()
+
     def _query_date_hint(self, query: str) -> dict[str, str] | None:
         text = str(query or "").strip()
         if not text:
@@ -3922,8 +4224,6 @@ class GatewayService:
             "最近提过",
             "最近发生",
             "最近记得",
-            "刚才",
-            "刚刚",
             "上次",
             "这几天",
             "这两天",
@@ -3938,6 +4238,35 @@ class GatewayService:
             "earlier",
         )
         return any(phrase in text for phrase in explicit_phrases)
+
+    @staticmethod
+    def _query_requests_just_now_context(query: str) -> bool:
+        text = " ".join(str(query or "").lower().split())
+        if not text:
+            return False
+        just_now_markers = (
+            "刚刚",
+            "刚才",
+            "刚说",
+            "刚聊",
+            "刚提",
+            "刚才的",
+            "刚刚的",
+            "上一句",
+            "上句话",
+            "上一轮",
+            "上条",
+            "刚才那个",
+            "刚刚那个",
+        )
+        if not any(marker in text for marker in just_now_markers):
+            return False
+        old_context_markers = ("以前", "很久前", "旧窗口", "历史记忆", "长期记忆")
+        if any(marker in text for marker in old_context_markers):
+            return False
+        if "之前" in text and ("背景" in text or "相关" in text):
+            return False
+        return True
 
     async def _build_relationship_weather_block(self, all_buckets: list[dict]) -> str:
         if self.relationship_weather_budget <= 0:
@@ -6320,6 +6649,7 @@ class GatewayService:
         persona_block: str,
         core_memory: str,
         portrait_memory: str,
+        just_now_context: str,
         recent_context: str,
         recalled_memory: str,
         relationship_weather: str,
@@ -6353,6 +6683,7 @@ class GatewayService:
                 persona_block,
                 relationship_weather,
                 favorite_memory,
+                just_now_context,
                 recent_context,
                 recalled_memory,
                 date_persona_trace,
@@ -6372,6 +6703,7 @@ class GatewayService:
                 if content.strip():
                     dynamic_sections.extend(["", title, content])
 
+            add_section("Just Now Chat Context", just_now_context)
             add_section("Recent Context", recent_context)
             add_section("Context Mode", f"context_mode: {context_mode}" if context_mode.strip() else "")
             if "[created:" in str(recalled_memory or "") or "[created:" in str(targeted_memory_detail or ""):
@@ -6666,6 +6998,8 @@ class GatewayService:
         targeted_memory_detail_debug: dict[str, Any],
         dream_context: str,
         dream_context_status: dict[str, Any],
+        just_now_context: str,
+        just_now_context_debug: dict[str, Any],
         recent_context: str,
         recent_context_reason: str,
         favorite_ids: list[str],
@@ -6729,6 +7063,8 @@ class GatewayService:
             "dynamic_tokens": count_tokens_approx(dynamic_context),
             "portrait_memory_injected": bool(str(portrait_memory or "").strip()),
             "portrait_memory_debug": portrait_memory_debug or self._portrait_memory_debug_base(),
+            "just_now_context_injected": bool(str(just_now_context or "").strip()),
+            "just_now_context_debug": just_now_context_debug or self._just_now_context_debug_base(query),
             "recent_context_injected": bool(str(recent_context or "").strip()),
             "recent_context_reason": recent_context_reason,
             "date_persona_trace_injected": bool(str(date_persona_trace or "").strip()),
@@ -6778,6 +7114,7 @@ class GatewayService:
             ],
             "context_mode": context_mode,
             "recalled_memory": recalled_memory,
+            "just_now_context": just_now_context,
             "date_persona_trace": date_persona_trace,
             "targeted_memory_detail": targeted_memory_detail,
             "diffused_memory": related_memory,
@@ -6902,6 +7239,13 @@ class GatewayService:
         except ValueError:
             return
         self._capture_reasoning_from_response_body(session_id, body)
+
+    def _extract_assistant_message_from_response(self, upstream_response: httpx.Response) -> dict[str, Any] | None:
+        try:
+            body = upstream_response.json()
+        except ValueError:
+            return None
+        return self._extract_assistant_message_from_response_body(body)
 
     def _capture_reasoning_from_response_body(self, session_id: str, body: Any) -> None:
         message = self._extract_assistant_message_from_response_body(body)

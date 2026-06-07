@@ -1,7 +1,7 @@
 import os
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -81,6 +81,35 @@ class GatewayStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_recent_context_lookup
             ON recent_context_injections (session_id, injected_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                user_text TEXT NOT NULL DEFAULT '',
+                assistant_text TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                client TEXT NOT NULL DEFAULT '',
+                route TEXT NOT NULL DEFAULT '',
+                UNIQUE(profile_id, session_id, round_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversation_turns_recent
+            ON conversation_turns (profile_id, created_at DESC, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversation_turns_session
+            ON conversation_turns (profile_id, session_id, created_at DESC)
             """
         )
         conn.commit()
@@ -256,6 +285,101 @@ class GatewayStateStore:
         conn.commit()
         conn.close()
         return debug_id
+
+    def record_conversation_turn(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        round_id: int,
+        user_text: str,
+        assistant_text: str = "",
+        model: str = "",
+        client: str = "",
+        route: str = "",
+        created_at: datetime | None = None,
+        max_entries: int = 500,
+    ) -> int:
+        created_at = created_at or datetime.now(timezone.utc)
+        created_iso = created_at.isoformat(timespec="seconds")
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "default").strip() or "default"
+        conn = self._connect()
+        cursor = conn.execute(
+            """
+            INSERT OR REPLACE INTO conversation_turns
+            (profile_id, session_id, round_id, created_at, user_text, assistant_text, model, client, route)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                safe_profile_id,
+                safe_session_id,
+                int(round_id),
+                created_iso,
+                str(user_text or ""),
+                str(assistant_text or ""),
+                str(model or ""),
+                str(client or ""),
+                str(route or ""),
+            ),
+        )
+        if max_entries > 0:
+            conn.execute(
+                """
+                DELETE FROM conversation_turns
+                WHERE profile_id = ?
+                  AND id NOT IN (
+                    SELECT id FROM conversation_turns
+                    WHERE profile_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                  )
+                """,
+                (safe_profile_id, safe_profile_id, max(1, int(max_entries))),
+            )
+        conn.commit()
+        turn_id = int(cursor.lastrowid or 0)
+        conn.close()
+        return turn_id
+
+    def list_recent_conversation_turns(
+        self,
+        *,
+        profile_id: str,
+        limit: int = 10,
+        hours: float = 6.0,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(50, int(limit or 10)))
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(0.0, float(hours or 0)))
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT id, profile_id, session_id, round_id, created_at,
+                   user_text, assistant_text, model, client, route
+            FROM conversation_turns
+            WHERE profile_id = ? AND created_at >= ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (safe_profile_id, cutoff.isoformat(timespec="seconds"), safe_limit),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "id": row["id"],
+                "profile_id": row["profile_id"],
+                "session_id": row["session_id"],
+                "round_id": row["round_id"],
+                "created_at": row["created_at"],
+                "user_text": row["user_text"] or "",
+                "assistant_text": row["assistant_text"] or "",
+                "model": row["model"] or "",
+                "client": row["client"] or "",
+                "route": row["route"] or "",
+            }
+            for row in rows
+        ]
 
     def list_injection_debug(
         self,
