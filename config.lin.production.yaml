@@ -148,7 +148,7 @@ gateway:
   #     models:
   #       - "Qwen/Qwen3-32B"
   #       - "THUDM/GLM-4-32B"
-  head_recent_hours: 72
+  head_recent_hours: 24
   dynamic_top_k: 10
   inject_max_cards: 2
   skip_recent_rounds: 6
@@ -166,12 +166,12 @@ gateway:
   core_memory_budget: 500
   recent_context_budget: 300
   recent_context_interval_rounds: 6
-  recalled_memory_budget: 400
+  recalled_memory_budget: 550
   recalled_memory_interval_rounds: 2
   relationship_weather_budget: 220
   favorite_memory_budget: 180
   favorite_memory_max_cards: 1
-  related_memory_budget: 220
+  related_memory_budget: 300
   related_memory_interval_rounds: 3
   related_memory_skip_recent_rounds: 12
   related_memory_cooldown_hours: 48
@@ -470,11 +470,11 @@ memory_diffusion:
   include_incoming: true
   max_paths_per_hit: 3
   chain_walk_enabled: false
-  chain_max_hops: 6
+  chain_max_hops: 4
   chain_min_strength: 0.2
-  chain_min_confidence: 0.72
+  chain_min_confidence: 0.78
   chain_min_relation_priority: 60
-  chain_max_frontier: 24
+  chain_max_frontier: 16
   chain_continue_relation_types:
   - same_event
   - context_of
