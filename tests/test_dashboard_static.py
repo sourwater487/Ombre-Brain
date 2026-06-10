@@ -207,20 +207,20 @@ def test_dashboard_exposes_portrait_state_panel():
     assert "loadPortraitState();" in load_buckets_block
 
 
-def test_dashboard_groups_self_anchor_and_profile_filters():
+def test_dashboard_keeps_self_anchor_and_profile_domain_filter():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     build_block = html.split("function buildFilters()", 1)[1].split("function filterBuckets", 1)[0]
     filter_block = html.split("function filterBuckets", 1)[1].split("function bucketBulkDeleteBlockReason", 1)[0]
 
     assert "function isSelfAnchorBucket" in html
-    assert "function isProfileBucket" in html
     assert "tag:self_anchor" in build_block
     assert "label: '自我'" in build_block
-    assert "key: 'profile'" in build_block
-    assert "label: '画像'" in build_block
+    assert "const profileDomainAliases = new Set(['preference', 'project_milestone', 'relationship_anchor']);" in build_block
+    assert "key: 'profile'" not in build_block
+    assert "label: '画像'" not in build_block
     assert "filters.onclick = function(e)" in build_block
     assert "filters.addEventListener" not in build_block
-    assert "currentFilter === 'profile'" in filter_block
+    assert "currentFilter === 'profile'" not in filter_block
     assert "currentFilter === 'tag:self_anchor'" in filter_block
 
 

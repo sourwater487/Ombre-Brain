@@ -3092,18 +3092,6 @@ function isSelfAnchorBucket(bucket) {
   return tags.includes('自我') || tags.includes('self_anchor') || tags.includes('first_person_anchor');
 }
 
-function isProfileBucket(bucket) {
-  if (!bucket || isSelfAnchorBucket(bucket)) return false;
-  if (bucket.profile_kind) return true;
-  var tags = bucketTags(bucket);
-  return tags.includes('profile_fact')
-    || tags.includes('profile')
-    || tags.includes('preference')
-    || tags.includes('project_milestone')
-    || tags.includes('relationship_anchor')
-    || tags.some(function(tag) { return tag.indexOf('profile_') === 0; });
-}
-
 function getDailyImpressions() {
   return allBuckets.filter(function(b) {
     return isDailyImpressionBucket(b);
@@ -4134,7 +4122,7 @@ function updateStats() {
 function buildFilters() {
   const domains = new Set();
   allBuckets.forEach(b => (b.domain || []).forEach(d => domains.add(d)));
-  const profileDomainAliases = new Set(['profile', 'preference', 'project_milestone']);
+  const profileDomainAliases = new Set(['preference', 'project_milestone', 'relationship_anchor']);
   const filters = document.getElementById('filters');
   const types = [
     { key: 'all', label: '全部' },
@@ -4146,7 +4134,6 @@ function buildFilters() {
     { key: 'archived', label: '📦 归档' },
   ];
   if (allBuckets.some(isSelfAnchorBucket)) types.push({ key: 'tag:self_anchor', label: '自我' });
-  if (allBuckets.some(isProfileBucket)) types.push({ key: 'profile', label: '画像' });
   const domainFilters = Array.from(domains).filter(function(d) {
     return !profileDomainAliases.has(String(d || '').trim());
   }).slice(0, 10).map(function(d) {
@@ -4178,7 +4165,6 @@ function filterBuckets(buckets) {
   if (currentFilter === 'unresolved') return buckets.filter(function(b) { return !b.resolved && b.type !== 'permanent' && !b.pinned; });
   if (currentFilter === 'digested') return buckets.filter(function(b) { return b.digested; });
   if (currentFilter === 'archived') return buckets.filter(function(b) { return b.type === 'archived' || b.score < 0.3; });
-  if (currentFilter === 'profile') return buckets.filter(isProfileBucket);
   if (currentFilter === 'tag:self_anchor') return buckets.filter(isSelfAnchorBucket);
   if (currentFilter.startsWith('tag:')) {
     var tag = currentFilter.slice(4);
