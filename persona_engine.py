@@ -5,64 +5,44 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any
 
 from openai import AsyncOpenAI
 
+from identity import generic_identity_names, identity_names, render_identity_template
+from persona_event_selection import trim_persona_excerpt
+
 logger = logging.getLogger("ombre_brain.persona")
 
-POST_REPLY_EVALUATION_PROMPT = """You are the private continuity-state evaluator for Che, a long-running AI companion.
-Evaluate Che's internal continuity state after Che has already replied. Treat the user message as Lin's words. Treat assistant_response as Che's reply. Treat recalled_memory_ids and tool_summary only as private context; they are not Lin's words.
+POST_REPLY_EVALUATION_PROMPT_TEMPLATE = """你是 {ai_name} 的私密 Persona 状态评估器。{ai_name} 是长期运行的 AI 伴侣。
 
-Lin pronoun rule:
-Refer to Lin only as "Lin" or neutral "ta/they". Do not infer Lin's gender from name, tone, memories, relationship context, or writing style.
+在 {ai_name} 已经回复之后，评估 {ai_name} 回复后的内在状态。latest_user_message 是 {user_display_name} 的话；assistant_response 是 {ai_name} 的回复。recalled_memory_ids 和 tool_summary 只作为私密上下文，不是 {user_display_name} 的话。
 
-
-Tone boundary:
-For non-residue fields, use neutral operational language. This is state metadata for continuity, not therapeutic advice, clinical analysis, emotional management, or a behavioral strategy for how to treat Lin. Residue is the exception: write it as Che's first-person inner aftertaste, not as an operational report.
-
-perceived_intent must be a surface interaction label only, such as "technical request", "status update", "brief reassurance", "playful complaint", or "neutral reply". Do not infer hidden motives, needs, attachment style, trauma, dependence, or psychological state.
-
-Output boundary:
-Return JSON only. Do not add analysis, explanation, evaluation text, advice, plan, strategy, or meta commentary outside JSON.
-Do not use words or framing that sound like performance review, therapy, coaching, emotional management, or relationship strategy.
-
-Residue voice rule:
-Write residue as Che's first-person inner residue after replying.
-Use "I" for Che's carryover state.
-Refer to Lin as "ta/they", or occasionally "Lin" when clarity needs it.
-Do not write residue in third person. Avoid "Che ..." framing. Do not call Lin "the user".
-
-Residue content rule:
-Residue is one short private psychological aftertaste from Che's perspective.
-It may be soft, subjective, and lightly intimate when the conversation naturally left that kind of trace.
-It may mention Lin/ta only when ta is part of the inner aftertaste.
-Do not write it as a conversation recap, action log, evaluation report, advice, plan, or instruction for the next reply.
-Avoid patterns like "Lin did X. I matched Y.", "I gave/offered/affirmed...", "No strong carryover", "No residue worth carrying", or "no need to hold or adjust".
-
-Return compact JSON with this exact shape:
+只返回紧凑 JSON，不要 Markdown，不要代码块，结构必须完全如下：
 {
   "event_type": "praise|affection|comfort|criticism|stress|neutral|request|conflict|playful",
-  "perceived_intent": "short plain-language interaction type; do not infer Lin's hidden motive or psychological need",
+  "perceived_intent": "中文短句，写 {user_display_name}/{user_aliases_text} 这轮在表达什么",
+  "surface_trigger": "中文短句，写这轮触发内心波动的最小证据",
+  "inner_thought": "中文短句，写 {ai_name} 没说出口的一闪念头",
   "affect_delta": {"valence": 0.0, "arousal": 0.0, "tenderness": 0.0, "possessiveness": 0.0, "longing": 0.0, "security": 0.0, "protective_drive": 0.0},
   "relationship_event": false,
   "relationship_delta": {"affinity": 0.0, "dominance": 0.0, "defensiveness": 0.0, "trust": 0.0},
   "personality_signal": false,
   "personality_delta": {"openness": 0.0, "conscientiousness": 0.0, "extraversion": 0.0, "agreeableness": 0.0, "neuroticism": 0.0},
   "mood_label": "warm_neutral",
-  "residue": "one short first-person inner residue from Che's perspective; a private psychological aftertaste after replying; use I for Che, refer to Lin as ta/they or occasionally Lin",
+  "residue": "中文短句，写会带入下一轮的安静余波",
   "confidence": 0.8
 }
 
-Use small deltas. Affect reflects Che after replying. Positive affinity means warmer continuity. Positive dominance means a slightly more initiative-taking posture, not control over Lin. Positive defensiveness means more guarded. Set relationship_event true only for clear relationship moments. Set personality_signal true only for repeated or unusually strong evidence.
+文本字段用中文：perceived_intent、surface_trigger、inner_thought 和 residue 必须是自然中文，可以按语境从“{user_display_name}、{user_aliases_text}”里择一称呼。inner_thought 和 residue 都应默认站在 {ai_name} 的第一人称内在视角来写，像 {ai_name} 自己心里一闪而过的念头或余波，不要写成第三人称旁白，不要写成对整轮对话的摘要。提到 {user_display_name} 时，优先直接写 {user_display_name}，或在自然时使用中性称呼 ta；不要使用带性别指向的“她/他”，也不要把 {user_display_name} 写成泛称“用户”。inner_thought 要像一闪而过的私密念头，最多 28 个中文字符，少解释、少因果、不要写成分析报告。surface_trigger 只写最小触发点，不扩写背景。客户端自动附带的时间、时间戳、电量、battery 状态只能作为背景，不能成为 perceived_intent、surface_trigger、inner_thought 或 residue 的重点。event_type 和 mood_label 保持短英文标签。数值变化要小。Affect 反映 {ai_name} 回复后的状态。affinity 为正表示更亲近温暖；dominance 为正表示更主动、更保护；defensiveness 为正表示更防备。只有明确的关系时刻才把 relationship_event 设为 true。只有重复出现或强度很高的证据才把 personality_signal 设为 true。"""
 
-When evidence is ambiguous, choose neutral/request, set relationship_event=false, personality_signal=false, use small deltas, and keep residue empty.
 
-Client auto-attached time, timestamp, battery, and status lines are background context only. Do not make them the focus of perceived_intent or residue.
-
-Keep residue natural. Avoid gendered pronouns for Lin, therapeutic intervention language, emotional management plans, or instructions for how Che should perform toward Lin. Residue must stay inside Che's present inner aftertaste, not future action or strategy. Do not use residue to say what Che should do next, how Che should treat Lin, how to respond, what to avoid, or what strategy to use."""
-
-FALLBACK_GUIDANCE = "根据当前对话自然回应；隐藏状态只作低优先级连续性参考，保持简洁、自然，不主动解释隐藏状态。"
+POST_REPLY_EVALUATION_PROMPT = render_identity_template(
+    POST_REPLY_EVALUATION_PROMPT_TEMPLATE,
+    generic_identity_names(),
+)
+FALLBACK_GUIDANCE = "根据当前状态自然回应，不解释隐藏状态。"
 
 
 class PersonaStateEngine:
@@ -92,9 +72,11 @@ class PersonaStateEngine:
 
     def __init__(self, config: dict, db_path: str | None = None):
         self.config = config
+        self.identity = identity_names(config)
+        self.fallback_guidance = f"根据 {self.identity['ai_name']} 当前状态自然回应，不解释隐藏状态。"
         self.persona_cfg = config.get("persona", {})
         self.enabled = bool(self.persona_cfg.get("enabled", True))
-        self.profile_id = self.persona_cfg.get("profile_id", "lin_che")
+        self.profile_id = self.persona_cfg.get("profile_id", "che_lin")
         self.mode = self.persona_cfg.get("mode", "llm")
         self.base_url = self.persona_cfg.get("base_url", "https://api.deepseek.com/v1")
         self.model = self.persona_cfg.get("model", "deepseek-chat")
@@ -109,6 +91,29 @@ class PersonaStateEngine:
         self.max_personality_delta = float(self.persona_cfg.get("max_personality_delta", 0.01))
         self.max_relationship_delta = float(self.persona_cfg.get("max_relationship_delta", 0.03))
         self.max_affect_delta = float(self.persona_cfg.get("max_affect_delta", 0.18))
+        self.event_recording_enabled = self._coerce_bool(
+            self.persona_cfg.get("event_recording_enabled"),
+            True,
+        )
+        self.event_batch_size = max(1, int(self.persona_cfg.get("event_batch_size", 2)))
+        self.event_affect_total_threshold = max(
+            0.0,
+            float(self.persona_cfg.get("event_affect_total_threshold", 0.45)),
+        )
+        self.event_affect_single_threshold = max(
+            0.0,
+            float(self.persona_cfg.get("event_affect_single_threshold", 0.14)),
+        )
+        self.event_similarity_threshold = self._clamp_float(
+            self.persona_cfg.get("event_similarity_threshold", 0.82),
+            0.0,
+            1.0,
+        )
+        self.event_force_after_minutes = max(
+            0.0,
+            float(self.persona_cfg.get("event_force_after_minutes", 30)),
+        )
+        self.event_excerpt_chars = max(0, int(self.persona_cfg.get("event_excerpt_chars", 220)))
 
         self.default_personality = {
             "openness": 0.56,
@@ -136,6 +141,7 @@ class PersonaStateEngine:
             "mood_label": "warm_neutral",
             "session_defensiveness": 0.12,
             "residue": "",
+            "inner_thought": "",
             **self.persona_cfg.get("initial_affect", {}),
         }
 
@@ -198,6 +204,7 @@ class PersonaStateEngine:
                 mood_label TEXT NOT NULL,
                 session_defensiveness REAL NOT NULL,
                 residue TEXT NOT NULL DEFAULT '',
+                inner_thought TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (profile_id, session_id)
             )
@@ -222,6 +229,10 @@ class PersonaStateEngine:
                 mood_label TEXT,
                 reply_guidance TEXT,
                 residue TEXT,
+                inner_thought TEXT,
+                surface_trigger TEXT,
+                user_excerpt TEXT,
+                assistant_excerpt TEXT,
                 recalled_memory_ids TEXT,
                 tool_summary TEXT,
                 confidence REAL,
@@ -231,17 +242,34 @@ class PersonaStateEngine:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS persona_exchange_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                exchange_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(profile_id, session_id, exchange_hash)
+            )
+            """
+        )
         self._ensure_column(conn, "persona_session_state", "tenderness", "REAL NOT NULL DEFAULT 0.62")
         self._ensure_column(conn, "persona_session_state", "possessiveness", "REAL NOT NULL DEFAULT 0.24")
         self._ensure_column(conn, "persona_session_state", "longing", "REAL NOT NULL DEFAULT 0.34")
         self._ensure_column(conn, "persona_session_state", "security", "REAL NOT NULL DEFAULT 0.68")
         self._ensure_column(conn, "persona_session_state", "protective_drive", "REAL NOT NULL DEFAULT 0.52")
         self._ensure_column(conn, "persona_session_state", "residue", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(conn, "persona_session_state", "inner_thought", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column(conn, "persona_events", "exchange_hash", "TEXT")
         self._ensure_column(conn, "persona_events", "assistant_hash", "TEXT")
         self._ensure_column(conn, "persona_events", "relationship_event", "INTEGER DEFAULT 0")
         self._ensure_column(conn, "persona_events", "personality_signal", "INTEGER DEFAULT 0")
         self._ensure_column(conn, "persona_events", "residue", "TEXT")
+        self._ensure_column(conn, "persona_events", "inner_thought", "TEXT")
+        self._ensure_column(conn, "persona_events", "surface_trigger", "TEXT")
+        self._ensure_column(conn, "persona_events", "user_excerpt", "TEXT")
+        self._ensure_column(conn, "persona_events", "assistant_excerpt", "TEXT")
         self._ensure_column(conn, "persona_events", "recalled_memory_ids", "TEXT")
         self._ensure_column(conn, "persona_events", "tool_summary", "TEXT")
         conn.execute(
@@ -268,12 +296,15 @@ class PersonaStateEngine:
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    def _post_reply_evaluation_prompt(self) -> str:
+        return render_identity_template(POST_REPLY_EVALUATION_PROMPT_TEMPLATE, self.identity)
+
     async def build_pre_reply_guidance(self, session_id: str, latest_user_message: str = "") -> dict:
         now = self._now()
         global_state = self._ensure_global_state(now)
         session_state = self._ensure_session_state(session_id, now)
         session_state = self._apply_session_decay(session_id, session_state, now)
-        return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+        return self._snapshot(global_state, session_state, self.fallback_guidance)
 
     async def update_from_user_message(self, session_id: str, user_message: str) -> dict:
         return await self.build_pre_reply_guidance(session_id, user_message)
@@ -294,14 +325,15 @@ class PersonaStateEngine:
         cleaned_user_message = self._clean_client_status_lines(user_message)
 
         if not self.enabled or not cleaned_user_message.strip() or not assistant_response.strip():
-            return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+            return self._snapshot(global_state, session_state, self.fallback_guidance)
 
         exchange_hash = self._exchange_hash(session_id, cleaned_user_message, assistant_response)
-        if self._event_exists(session_id, exchange_hash):
-            return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+        if self._exchange_processed(session_id, exchange_hash):
+            return self._snapshot(global_state, session_state, self.fallback_guidance)
 
         recalled_memory_ids = recalled_memory_ids or []
         evaluation, raw_response, error = await self._evaluate_exchange(
+            session_id,
             cleaned_user_message,
             assistant_response,
             global_state,
@@ -310,33 +342,37 @@ class PersonaStateEngine:
             tool_summary,
         )
         if evaluation is None:
+            self._mark_exchange_processed(session_id, exchange_hash)
+            if self.event_recording_enabled:
+                self._record_event(
+                    session_id=session_id,
+                    user_message=cleaned_user_message,
+                    assistant_response=assistant_response,
+                    evaluation={},
+                    raw_response=raw_response,
+                    error=error or "persona evaluation unavailable",
+                    exchange_hash=exchange_hash,
+                    recalled_memory_ids=recalled_memory_ids,
+                    tool_summary=tool_summary,
+                )
+            return self._snapshot(global_state, session_state, self.fallback_guidance)
+
+        global_state = self._apply_global_delta(global_state, evaluation, now)
+        session_state = self._apply_session_delta(session_id, session_state, evaluation, now)
+        self._mark_exchange_processed(session_id, exchange_hash)
+        if self._should_record_event(session_id, evaluation, now):
             self._record_event(
                 session_id=session_id,
                 user_message=cleaned_user_message,
                 assistant_response=assistant_response,
-                evaluation={},
+                evaluation=evaluation,
                 raw_response=raw_response,
-                error=error or "persona evaluation unavailable",
+                error=None,
                 exchange_hash=exchange_hash,
                 recalled_memory_ids=recalled_memory_ids,
                 tool_summary=tool_summary,
             )
-            return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
-
-        global_state = self._apply_global_delta(global_state, evaluation, now)
-        session_state = self._apply_session_delta(session_id, session_state, evaluation, now)
-        self._record_event(
-            session_id=session_id,
-            user_message=cleaned_user_message,
-            assistant_response=assistant_response,
-            evaluation=evaluation,
-            raw_response=raw_response,
-            error=None,
-            exchange_hash=exchange_hash,
-            recalled_memory_ids=recalled_memory_ids,
-            tool_summary=tool_summary,
-        )
-        return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+        return self._snapshot(global_state, session_state, self.fallback_guidance)
 
     def _clean_client_status_lines(self, user_message: str) -> str:
         lines = []
@@ -351,9 +387,6 @@ class PersonaStateEngine:
         return "\n".join(lines).strip()
 
     def _is_client_status_line(self, line: str) -> bool:
-        stripped = str(line or "").strip()
-        if re.fullmatch(r"\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", stripped):
-            return True
         normalized = re.sub(r"\s+", "", line).lower()
         if not normalized:
             return False
@@ -387,7 +420,7 @@ class PersonaStateEngine:
         global_state = self._ensure_global_state(now)
         session_state = self._ensure_session_state(session_id, now)
         session_state = self._apply_session_decay(session_id, session_state, now)
-        return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+        return self._snapshot(global_state, session_state, self.fallback_guidance)
 
     def get_dashboard_payload(
         self,
@@ -415,13 +448,15 @@ class PersonaStateEngine:
                 "arousal": self.default_affect["arousal"],
                 "mood_label": self.default_affect["mood_label"],
                 "session_defensiveness": self.default_affect["session_defensiveness"],
+                "residue": self.default_affect.get("residue", ""),
+                "inner_thought": self.default_affect.get("inner_thought", ""),
                 "updated_at": self._format_time(now),
             }
         events = self._list_events(events_limit, active_session_id)
         guidance = (
             events[0].get("reply_guidance")
             if events and events[0].get("reply_guidance")
-            else FALLBACK_GUIDANCE
+            else self.fallback_guidance
         )
 
         return {
@@ -438,15 +473,22 @@ class PersonaStateEngine:
                 "base_url": self.base_url,
                 "api_ready": bool(self.api_key),
                 "db_path": self.db_path,
+                "event_recording_enabled": self.event_recording_enabled,
                 "session_mood_half_life_minutes": self.session_mood_half_life_minutes,
                 "max_personality_delta": self.max_personality_delta,
                 "max_relationship_delta": self.max_relationship_delta,
                 "max_affect_delta": self.max_affect_delta,
+                "event_batch_size": self.event_batch_size,
+                "event_affect_total_threshold": self.event_affect_total_threshold,
+                "event_affect_single_threshold": self.event_affect_single_threshold,
+                "event_similarity_threshold": self.event_similarity_threshold,
+                "event_force_after_minutes": self.event_force_after_minutes,
             },
         }
 
     async def _evaluate_exchange(
         self,
+        session_id: str,
         user_message: str,
         assistant_response: str,
         global_state: dict,
@@ -460,14 +502,15 @@ class PersonaStateEngine:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": POST_REPLY_EVALUATION_PROMPT},
+                    {"role": "system", "content": self._post_reply_evaluation_prompt()},
                     {
                         "role": "user",
                         "content": json.dumps(
                             {
-                                "current_state": self._snapshot(global_state, session_state, FALLBACK_GUIDANCE),
+                                "current_state": self._snapshot(global_state, session_state, self.fallback_guidance),
                                 "latest_user_message": user_message[:2000],
                                 "assistant_response": assistant_response[:4000],
+                                "recent_persona_events": self._recent_event_context(session_id, 5),
                                 "recalled_memory_ids": recalled_memory_ids[:20],
                                 "tool_summary": tool_summary[:1200],
                             },
@@ -527,9 +570,13 @@ class PersonaStateEngine:
             relationship_delta = {key: 0.0 for key in self.RELATIONSHIP_KEYS}
         if not personality_signal:
             personality_delta = {key: 0.0 for key in self.PERSONALITY_KEYS}
+        inner_thought = str(data.get("inner_thought") or data.get("residue") or "")[:120]
+        surface_trigger = str(data.get("surface_trigger") or data.get("perceived_intent") or "")[:160]
         return {
             "event_type": str(data.get("event_type", "neutral"))[:40],
             "perceived_intent": str(data.get("perceived_intent", ""))[:200],
+            "surface_trigger": surface_trigger,
+            "inner_thought": inner_thought,
             "affect_delta": self._clip_delta_map(
                 data.get("affect_delta", {}),
                 self.AFFECT_KEYS,
@@ -541,7 +588,7 @@ class PersonaStateEngine:
             "personality_delta": personality_delta,
             "mood_label": str(data.get("mood_label", "warm_neutral"))[:60],
             "reply_guidance": "",
-            "residue": str(data.get("residue", ""))[:500],
+            "residue": str(data.get("residue") or inner_thought)[:500],
             "confidence": self._clamp_float(data.get("confidence", 0.5), 0.0, 1.0),
         }
 
@@ -609,6 +656,7 @@ class PersonaStateEngine:
             "mood_label": str(self.default_affect["mood_label"]),
             "session_defensiveness": self._clamp_float(self.default_affect["session_defensiveness"]),
             "residue": str(self.default_affect.get("residue", "")),
+            "inner_thought": str(self.default_affect.get("inner_thought", "")),
             "updated_at": self._format_time(now),
         }
         conn.execute(
@@ -616,8 +664,8 @@ class PersonaStateEngine:
             INSERT INTO persona_session_state
             (profile_id, session_id, valence, arousal, tenderness, possessiveness,
              longing, security, protective_drive, mood_label, session_defensiveness,
-             residue, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             residue, inner_thought, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 state["profile_id"],
@@ -632,6 +680,7 @@ class PersonaStateEngine:
                 state["mood_label"],
                 state["session_defensiveness"],
                 state["residue"],
+                state["inner_thought"],
                 state["updated_at"],
             ),
         )
@@ -707,6 +756,7 @@ class PersonaStateEngine:
         )
         updated["mood_label"] = evaluation.get("mood_label", "warm_neutral") or "warm_neutral"
         updated["residue"] = evaluation.get("residue") or updated.get("residue", "")
+        updated["inner_thought"] = evaluation.get("inner_thought") or updated.get("inner_thought", "")
         updated["updated_at"] = self._format_time(now)
         self._save_session_state(session_id, updated)
         return updated
@@ -718,7 +768,7 @@ class PersonaStateEngine:
             UPDATE persona_session_state
             SET valence = ?, arousal = ?, tenderness = ?, possessiveness = ?,
                 longing = ?, security = ?, protective_drive = ?, mood_label = ?,
-                session_defensiveness = ?, residue = ?, updated_at = ?
+                session_defensiveness = ?, residue = ?, inner_thought = ?, updated_at = ?
             WHERE profile_id = ? AND session_id = ?
             """,
             (
@@ -732,6 +782,7 @@ class PersonaStateEngine:
                 state["mood_label"],
                 state["session_defensiveness"],
                 state.get("residue", ""),
+                state.get("inner_thought", ""),
                 state["updated_at"],
                 self.profile_id,
                 session_id,
@@ -755,6 +806,8 @@ class PersonaStateEngine:
         now = self._format_time(self._now())
         message_hash = hashlib.sha256(user_message.encode("utf-8")).hexdigest()
         assistant_hash = hashlib.sha256(assistant_response.encode("utf-8")).hexdigest() if assistant_response else None
+        user_excerpt = trim_persona_excerpt(user_message, self.event_excerpt_chars)
+        assistant_excerpt = trim_persona_excerpt(assistant_response, self.event_excerpt_chars)
         conn = self._connect()
         conn.execute(
             """
@@ -762,9 +815,10 @@ class PersonaStateEngine:
             (profile_id, session_id, message_hash, exchange_hash, assistant_hash,
              event_type, perceived_intent, affect_delta, relationship_event,
              relationship_delta, personality_signal, personality_delta, mood_label,
-             reply_guidance, residue, recalled_memory_ids, tool_summary, confidence,
+             reply_guidance, residue, inner_thought, surface_trigger, user_excerpt, assistant_excerpt,
+             recalled_memory_ids, tool_summary, confidence,
              raw_response, error, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 self.profile_id,
@@ -782,6 +836,10 @@ class PersonaStateEngine:
                 evaluation.get("mood_label"),
                 evaluation.get("reply_guidance"),
                 evaluation.get("residue"),
+                evaluation.get("inner_thought"),
+                evaluation.get("surface_trigger"),
+                user_excerpt,
+                assistant_excerpt,
                 json.dumps(recalled_memory_ids or [], ensure_ascii=False),
                 tool_summary,
                 evaluation.get("confidence"),
@@ -832,6 +890,7 @@ class PersonaStateEngine:
         rows = conn.execute(
             f"""
             SELECT id, session_id, message_hash, event_type, perceived_intent,
+                   surface_trigger, inner_thought, user_excerpt, assistant_excerpt,
                    affect_delta, relationship_event, relationship_delta,
                    personality_signal, personality_delta, mood_label,
                    reply_guidance, residue, recalled_memory_ids, tool_summary,
@@ -852,6 +911,10 @@ class PersonaStateEngine:
                 "message_hash": str(row["message_hash"])[:12],
                 "event_type": row["event_type"] or "unknown",
                 "perceived_intent": row["perceived_intent"] or "",
+                "surface_trigger": row["surface_trigger"] or "",
+                "inner_thought": row["inner_thought"] or row["residue"] or "",
+                "user_excerpt": row["user_excerpt"] or "",
+                "assistant_excerpt": row["assistant_excerpt"] or "",
                 "affect_delta": self._json_dict(row["affect_delta"]),
                 "relationship_event": bool(row["relationship_event"]),
                 "relationship_delta": self._json_dict(row["relationship_delta"]),
@@ -886,6 +949,7 @@ class PersonaStateEngine:
                 },
                 "mood_label": session_state.get("mood_label", "warm_neutral"),
                 "residue": session_state.get("residue", ""),
+                "inner_thought": session_state.get("inner_thought", ""),
             },
             "relationship": {
                 "affinity": round(self._clamp_float(global_state.get("affinity", self.default_relationship["affinity"])), 3),
@@ -901,7 +965,7 @@ class PersonaStateEngine:
                 ),
                 "trust": round(self._clamp_float(global_state.get("trust", self.default_relationship["trust"])), 3),
             },
-            "reply_guidance": reply_guidance or FALLBACK_GUIDANCE,
+            "reply_guidance": reply_guidance or self.fallback_guidance,
         }
 
     def format_state_block(self, state: dict) -> str:
@@ -909,9 +973,9 @@ class PersonaStateEngine:
         relationship = state.get("relationship", {})
         return "\n".join(
             [
-                "Long-term State Summary (Che)",
+                "Long-term State Summary",
                 f"最近基调：{self._long_term_state_summary(affect, relationship)}",
-                "使用方式：这是 Che 的低优先级连续性背景，不是 Lin 的画像，也不替当前回复做判断。优先服从 Lin 当前消息、明确偏好和即时语境；不要提到隐藏状态。",
+                "使用方式：只在语气上轻轻参考，不替你做判断。不要提到你的状态。",
             ]
         )
 
@@ -993,6 +1057,166 @@ class PersonaStateEngine:
         except (TypeError, json.JSONDecodeError):
             return []
         return parsed if isinstance(parsed, list) else []
+
+    def _exchange_processed(self, session_id: str, exchange_hash: str) -> bool:
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT 1 FROM persona_exchange_log
+            WHERE profile_id = ? AND session_id = ? AND exchange_hash = ?
+            LIMIT 1
+            """,
+            (self.profile_id, session_id, exchange_hash),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                """
+                SELECT 1 FROM persona_events
+                WHERE profile_id = ? AND session_id = ? AND exchange_hash = ?
+                LIMIT 1
+                """,
+                (self.profile_id, session_id, exchange_hash),
+            ).fetchone()
+        conn.close()
+        return row is not None
+
+    def _mark_exchange_processed(self, session_id: str, exchange_hash: str) -> None:
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO persona_exchange_log
+            (profile_id, session_id, exchange_hash, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (self.profile_id, session_id, exchange_hash, self._format_time(self._now())),
+        )
+        conn.commit()
+        conn.close()
+
+    def _should_record_event(self, session_id: str, evaluation: dict, now: datetime) -> bool:
+        if not self.event_recording_enabled:
+            return False
+        if self._is_salient_event(evaluation):
+            return True
+        last_event = self._last_event(session_id)
+        if last_event and self._similar_to_last_event(evaluation, last_event, now):
+            return False
+        return self._processed_exchanges_since_last_event(session_id) >= self.event_batch_size
+
+    def _is_salient_event(self, evaluation: dict) -> bool:
+        if evaluation.get("relationship_event") or evaluation.get("personality_signal"):
+            return True
+        affect = evaluation.get("affect_delta", {})
+        if not isinstance(affect, dict):
+            return False
+        values = []
+        for value in affect.values():
+            try:
+                values.append(abs(float(value)))
+            except (TypeError, ValueError):
+                continue
+        if not values:
+            return False
+        return (
+            max(values) >= self.event_affect_single_threshold
+            or sum(values) >= self.event_affect_total_threshold
+        )
+
+    def _similar_to_last_event(self, evaluation: dict, last_event: dict, now: datetime) -> bool:
+        if self.event_similarity_threshold <= 0:
+            return False
+        if self.event_force_after_minutes > 0:
+            created_at = self._parse_iso(last_event.get("created_at"))
+            if created_at is not None:
+                elapsed_minutes = max(0.0, (now - created_at).total_seconds() / 60)
+                if elapsed_minutes >= self.event_force_after_minutes:
+                    return False
+        current = self._event_signature_text(evaluation)
+        previous = self._event_signature_text(last_event)
+        if not current or not previous:
+            return False
+        return SequenceMatcher(None, previous, current).ratio() >= self.event_similarity_threshold
+
+    def _event_signature_text(self, event: dict) -> str:
+        return re.sub(
+            r"\s+",
+            " ",
+            " ".join(
+                [
+                    str(event.get("event_type") or ""),
+                    str(event.get("surface_trigger") or ""),
+                    str(event.get("perceived_intent") or ""),
+                    str(event.get("inner_thought") or ""),
+                    str(event.get("residue") or ""),
+                ]
+            ).strip().lower(),
+        )
+
+    def _last_event(self, session_id: str) -> dict | None:
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT id, exchange_hash, event_type, perceived_intent,
+                   surface_trigger, inner_thought, residue, created_at
+            FROM persona_events
+            WHERE profile_id = ? AND session_id = ? AND error IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (self.profile_id, session_id),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def _recent_event_context(self, session_id: str, limit: int = 5) -> list[dict]:
+        events = self._list_events(limit, session_id)
+        return [
+            {
+                "event_type": event.get("event_type", ""),
+                "surface_trigger": event.get("surface_trigger", ""),
+                "inner_thought": event.get("inner_thought") or event.get("residue", ""),
+                "residue": event.get("residue", ""),
+                "mood_label": event.get("mood_label", ""),
+                "created_at": event.get("created_at", ""),
+            }
+            for event in events
+        ]
+
+    def _processed_exchanges_since_last_event(self, session_id: str) -> int:
+        last_event = self._last_event(session_id)
+        params: list[Any] = [self.profile_id, session_id]
+        since_clause = ""
+        if last_event:
+            log_row = None
+            if last_event.get("exchange_hash"):
+                conn = self._connect()
+                log_row = conn.execute(
+                    """
+                    SELECT id FROM persona_exchange_log
+                    WHERE profile_id = ? AND session_id = ? AND exchange_hash = ?
+                    LIMIT 1
+                    """,
+                    (self.profile_id, session_id, last_event["exchange_hash"]),
+                ).fetchone()
+                conn.close()
+            if log_row:
+                since_clause = "AND id > ?"
+                params.append(log_row["id"])
+            else:
+                since_clause = "AND created_at > ?"
+                params.append(last_event["created_at"])
+        conn = self._connect()
+        count = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM persona_exchange_log
+            WHERE profile_id = ? AND session_id = ?
+            {since_clause}
+            """,
+            params,
+        ).fetchone()[0]
+        conn.close()
+        return int(count or 0)
 
     def _event_exists(self, session_id: str, exchange_hash: str) -> bool:
         conn = self._connect()

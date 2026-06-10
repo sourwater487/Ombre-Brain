@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
-from utils import load_config, strip_affect_anchor, strip_wikilinks
+from utils import load_config, strip_affect_anchor
 
 
 NON_DELETABLE_TYPES = {"permanent", "feel", "archived"}
@@ -33,14 +33,14 @@ class DuplicatePlan:
 
 
 def normalize_content(text: str) -> str:
-    text = strip_wikilinks(str(text or ""))
+    text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", str(text or ""))
     text = strip_affect_anchor(text)
     text = re.sub(r"[\s\u3000]+", "", text.lower())
     return re.sub(r"[^0-9a-zA-Z_\u4e00-\u9fff]+", "", text)
 
 
 def similarity_text(text: str) -> str:
-    text = strip_wikilinks(str(text or "").lower())
+    text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", str(text or "").lower())
     text = strip_affect_anchor(text)
     text = re.sub(r"[^0-9a-zA-Z_\u4e00-\u9fff]+", " ", text)
     return " ".join(token for token in jieba.lcut(text) if token.strip())
@@ -144,8 +144,7 @@ def near_duplicate_pairs(
 ) -> list[tuple[str, str, float]]:
     exclude_pairs = exclude_pairs or set()
     candidates = [
-        bucket
-        for bucket in buckets
+        bucket for bucket in buckets
         if len(normalize_content(bucket.get("content", ""))) >= min_chars
     ]
     prepared = [
@@ -308,7 +307,7 @@ async def main() -> int:
     config = load_config()
     bucket_mgr = BucketManager(config)
     embedding_engine = EmbeddingEngine(config)
-    buckets = await bucket_mgr.list_all(include_archive=True)
+    buckets = await bucket_mgr.list_all(include_archive=False)
     bucket_map = {str(bucket.get("id")): bucket for bucket in buckets}
 
     plans = exact_duplicate_plans(buckets, min_chars=args.min_chars)

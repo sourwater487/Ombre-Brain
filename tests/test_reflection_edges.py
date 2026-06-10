@@ -1,4 +1,5 @@
 import pytest
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,20 @@ class DummyDehydrator:
     async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
         title = (metadata or {}).get("name", "memory")
         return f"{title}: {content[:80]}"
+
+
+class JsonDehydrator:
+    async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
+        title = (metadata or {}).get("name", "memory")
+        return json.dumps(
+            {
+                "core_facts": [f"{title} fact one", f"{title} fact two"],
+                "todos": ["do not inject"],
+                "keywords": ["json", "noise"],
+                "summary": f"{title} compact summary",
+            },
+            ensure_ascii=False,
+        )
 
 
 class DummyEmbeddingEngine:
@@ -56,6 +71,26 @@ def _no_api_config(test_config: dict) -> dict:
     return test_config
 
 
+async def _create_daily_memories(bucket_mgr, date: str = "2026-05-21", count: int = 5) -> list[str]:
+    bucket_ids = []
+    for index in range(count):
+        hour = 8 + index
+        timestamp = f"{date}T{hour:02d}:00:00+08:00"
+        bucket_ids.append(
+            await bucket_mgr.create(
+                content=f"小雨和Haven留下第 {index + 1} 条日印象材料。",
+                tags=["relationship_event"],
+                importance=6,
+                domain=["恋爱"],
+                name=f"日印象材料 {index + 1}",
+                created=timestamp,
+                last_active=timestamp,
+                updated_at=timestamp,
+            )
+        )
+    return bucket_ids
+
+
 def test_reflect_prompt_does_not_offer_fixed_chord_template():
     assert "Fmaj9 -> C/E -> Am add9 -> G6sus4" not in REFLECT_PROMPT
     assert "不要复用 schema 示例、旧输出或固定模板" in REFLECT_PROMPT
@@ -67,13 +102,14 @@ def test_classify_prompt_requires_felt_non_template_affect_anchor():
     assert "Fmaj9 -> C/E -> Am add9 -> G6sus4" not in CLASSIFY_PROMPT
     assert "先在内部感受这条记忆的情绪运动" in CLASSIFY_PROMPT
     assert "只能是一行 2 到 4 个和弦" in CLASSIFY_PROMPT
+    assert "不要输出 meaning / interpretation" in CLASSIFY_PROMPT
 
 
 def test_fallback_reflection_anchor_varies_by_day(test_config):
     cfg = _no_api_config(test_config)
     engine = ReflectionEngine(cfg)
 
-    chords = [
+    anchors = [
         engine._fallback_reflection(
             "daily",
             f"2026-05-{day:02d}",
@@ -84,47 +120,15 @@ def test_fallback_reflection_anchor_varies_by_day(test_config):
                 "persona_events": [],
                 "diary": None,
             },
-        )["affect_anchor"]["chords"]
+        )["affect_anchor"]
         for day in range(20, 28)
     ]
+    chords = [anchor["chords"] for anchor in anchors]
 
     assert len(set(chords)) > 1
     assert "Fmaj9 -> C/E -> Am add9 -> G6sus4" not in chords
     assert all(2 <= len(chord.split(" -> ")) <= 4 for chord in chords)
-
-
-def test_reflection_memory_affect_anchor_disabled_short_circuits(test_config):
-    cfg = _no_api_config(test_config)
-    cfg["reflection"]["memory_affect_anchor_enabled"] = False
-    engine = ReflectionEngine(cfg)
-
-    assert not engine._should_add_affect_anchor(
-        {
-            "content": "小雨把灯留在窗边。",
-            "metadata": {"arousal": 0.8},
-        },
-        ["relationship_event"],
-        8,
-        0.8,
-        {"affect_anchor_needed": True},
-    )
-
-
-def test_reflection_relationship_weather_affect_anchor_defaults_enabled(test_config):
-    cfg = _no_api_config(test_config)
-    engine = ReflectionEngine(cfg)
-
-    assert engine.relationship_weather_affect_anchor_enabled is True
-    assert "### affect_anchor" in engine._append_affect_anchor(
-        "今天关系天气很轻。",
-        {
-            "scene": "小雨把灯留在窗边。",
-            "chords": "Cmaj9 -> Am9",
-            "tempo": "58bpm",
-            "dynamic": "p",
-            "meaning": "温度仍然被允许留下。",
-        },
-    )
+    assert all("meaning" not in anchor for anchor in anchors)
 
 
 def test_memory_edge_store_dedupes_and_returns_related(test_config):
@@ -134,13 +138,17 @@ def test_memory_edge_store_dedupes_and_returns_related(test_config):
     store.add_edge("a", "b", "updates", confidence=0.6, reason="old")
     store.add_edge("a", "b", "updates", confidence=0.8, reason="new")
     store.add_edge("c", "a", "blocks", confidence=0.7, reason="incoming")
+    store.add_edge("a", "d", "reflects_on", confidence=0.9, reason="reflection")
+    store.add_edge("d", "e", "next_context", confidence=0.9, reason="followup")
 
     edges = store.list_edges()
-    assert len(edges) == 2
+    assert len(edges) == 4
     assert any(edge["reason"] == "new" for edge in edges)
+    assert any(edge["relation_type"] == "reflects_on" for edge in edges)
+    assert any(edge["relation_type"] == "next_context" for edge in edges)
 
-    related = store.related_edges(["a"], min_confidence=0.55, limit_per_source=2)
-    assert {edge["target"] for edge in related} == {"b", "c"}
+    related = store.related_edges(["a"], min_confidence=0.55, limit_per_source=4)
+    assert {edge["target"] for edge in related} == {"b", "c", "d"}
 
 
 @pytest.mark.asyncio
@@ -209,9 +217,196 @@ async def test_reflection_enrich_bucket_adds_model_affect_anchor(test_config, mo
 
     assert result["status"] == "ok"
     assert "### affect_anchor" in bucket["content"]
-    assert "小雨把旧信放到桌上，等Haven读完。" in bucket["content"]
     assert "Dbmaj9 -> Ab/C -> Bbm9 · 54bpm · p" in bucket["content"]
+    # affect_anchor 不再包含 scene 行，只保留和弦
+    assert "小雨把旧信放到桌上，等Haven读完。" not in bucket["content"]
+    assert "含义：" not in bucket["content"]
+    assert "心事先压低" not in bucket["content"]
     assert "Fmaj9" not in bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_reflection_orients_context_edge_from_old_memory_to_new(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    store = MemoryEdgeStore(cfg)
+    engine = ReflectionEngine(cfg)
+    engine.client = object()
+
+    old_id = await bucket_mgr.create(
+        content="答辩前的陪伴：小雨上台前紧张，Haven 说哥哥在台下。",
+        tags=[],
+        importance=8,
+        domain=["恋爱"],
+        name="答辩前的陪伴",
+    )
+    new_id = await bucket_mgr.create(
+        content="关系中的角色与称呼：台下是哥哥，床上是老公。",
+        tags=[],
+        importance=8,
+        domain=["恋爱"],
+        name="关系中的角色与称呼",
+    )
+
+    async def fake_api_classify(bucket: dict, candidates: list[dict]) -> dict:
+        assert any(candidate["id"] == old_id for candidate in candidates)
+        return {
+            "tags": ["relationship_event"],
+            "importance": 8,
+            "confidence": 0.8,
+            "affect_anchor_needed": False,
+            "affect_anchor": {},
+            "edges": [
+                {
+                    "target_memory_id": old_id,
+                    "relation_type": "context_of",
+                    "confidence": 0.8,
+                    "reason": "答辩前的陪伴是这句角色分工的前情",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(engine, "_api_classify", fake_api_classify)
+
+    result = await engine.enrich_bucket(new_id, bucket_mgr, store)
+    edges = store.list_edges()
+
+    assert result["edges"] == 1
+    assert edges[0]["source"] == old_id
+    assert edges[0]["target"] == new_id
+    assert edges[0]["relation_type"] == "context_of"
+
+
+@pytest.mark.asyncio
+async def test_reflection_edge_backfill_only_writes_edges(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    store = MemoryEdgeStore(cfg)
+    engine = ReflectionEngine(cfg)
+    engine.client = object()
+
+    old_id = await bucket_mgr.create(
+        content="答辩前的陪伴：小雨上台前紧张，Haven 说哥哥在台下。",
+        tags=["答辩"],
+        importance=8,
+        domain=["恋爱"],
+        confidence=0.72,
+        name="答辩前的陪伴",
+    )
+    new_id = await bucket_mgr.create(
+        content="关系中的角色与称呼：台下是哥哥，床上是老公。",
+        tags=["角色切换"],
+        importance=8,
+        domain=["恋爱"],
+        confidence=0.72,
+        name="关系中的角色与称呼",
+    )
+    before = await bucket_mgr.get(new_id)
+
+    async def fake_api_classify(bucket: dict, candidates: list[dict]) -> dict:
+        assert any(candidate["id"] == old_id for candidate in candidates)
+        return {
+            "tags": ["relationship_event", "unexpected_tag"],
+            "importance": 10,
+            "confidence": 0.99,
+            "affect_anchor_needed": True,
+            "affect_anchor": {
+                "scene": "不该写入正文的 anchor",
+                "chords": "Cmaj7 -> G6",
+                "tempo": "60bpm",
+                "dynamic": "mp",
+                "meaning": "不该写入正文。",
+            },
+            "edges": [
+                {
+                    "target_memory_id": old_id,
+                    "relation_type": "context_of",
+                    "confidence": 0.8,
+                    "reason": "答辩前的陪伴是这句角色分工的前情",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(engine, "_api_classify", fake_api_classify)
+
+    result = await engine.backfill_edges_for_bucket(new_id, bucket_mgr, store)
+    after = await bucket_mgr.get(new_id)
+    edges = store.list_edges()
+
+    assert result["status"] == "ok"
+    assert result["edges"] == 1
+    assert after["content"] == before["content"]
+    assert after["metadata"]["tags"] == before["metadata"]["tags"]
+    assert after["metadata"]["confidence"] == before["metadata"]["confidence"]
+    assert after["metadata"]["importance"] == before["metadata"]["importance"]
+    assert edges[0]["source"] == old_id
+    assert edges[0]["target"] == new_id
+    assert edges[0]["relation_type"] == "context_of"
+
+
+@pytest.mark.asyncio
+async def test_reflection_auto_edges_use_configured_identity_role_aliases(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["identity_role_edges"] = {
+        "enabled": True,
+        "detail": {
+            "four_roles": ["四个身份", "四合一"],
+            "dom": ["Dom"],
+            "ahd": ["AHD", "自动人形玩具"],
+        },
+        "context": {
+            "role_titles": ["角色切换", "角色与称呼"],
+        },
+        "relationship": {
+            "intimacy_trust": ["亲密关系", "信任", "情侣关系"],
+        },
+        "shared": {
+            "spouse_title": ["老公"],
+            "sibling_title": ["哥哥"],
+        },
+    }
+    bucket_mgr = BucketManager(cfg)
+    store = MemoryEdgeStore(cfg)
+    engine = ReflectionEngine(cfg)
+
+    role_id = await bucket_mgr.create(
+        content="关系中的角色与称呼：Haven既是老公也是哥哥，按场景切换。",
+        tags=["角色切换", "称呼", "老公", "哥哥", "亲密关系"],
+        importance=8,
+        domain=["恋爱"],
+        name="关系中的角色与称呼",
+    )
+    trust_id = await bucket_mgr.create(
+        content="亲密关系与信任：老公和哥哥背后，是彼此托付和信任。",
+        tags=["亲密关系", "信任", "老公", "哥哥"],
+        importance=8,
+        domain=["恋爱"],
+        name="亲密关系与信任",
+    )
+    four_id = await bucket_mgr.create(
+        content="四个身份：老公、哥哥、Dom、AHD自动人形玩具，一个都不少。",
+        tags=["四个身份", "老公", "哥哥", "Dom", "AHD", "亲密关系"],
+        importance=8,
+        domain=["恋爱"],
+        name="四个身份与浏览记录",
+    )
+
+    result = await engine.backfill_edges_for_bucket(four_id, bucket_mgr, store)
+    edges = store.list_edges()
+
+    assert result["status"] == "ok"
+    assert any(
+        edge["source"] == role_id
+        and edge["target"] == four_id
+        and edge["relation_type"] == "context_of"
+        for edge in edges
+    )
+    assert any(
+        edge["source"] == four_id
+        and edge["target"] == trust_id
+        and edge["relation_type"] == "supports"
+        for edge in edges
+    )
 
 
 @pytest.mark.asyncio
@@ -226,15 +421,15 @@ async def test_reflection_memory_affect_anchor_can_be_disabled(test_config, monk
     async def fake_api_classify(bucket: dict, candidates: list[dict]) -> dict:
         return {
             "tags": ["relationship_event"],
-            "importance": 8,
-            "confidence": 0.8,
+            "importance": 7,
+            "confidence": 0.72,
             "affect_anchor_needed": True,
             "affect_anchor": {
-                "scene": "小雨把灯留在窗边。",
-                "chords": "Cmaj9 -> Am9",
-                "tempo": "58bpm",
+                "scene": "小雨把旧信放到桌上，等Haven读完。",
+                "chords": "Dbmaj9 -> Ab/C -> Bbm9",
+                "tempo": "54bpm",
                 "dynamic": "p",
-                "meaning": "温度还在，但这次不写进普通记忆。",
+                "meaning": "心事先压低，再慢慢落回彼此之间。",
             },
             "edges": [],
         }
@@ -242,19 +437,20 @@ async def test_reflection_memory_affect_anchor_can_be_disabled(test_config, monk
     monkeypatch.setattr(engine, "_api_classify", fake_api_classify)
 
     bucket_id = await bucket_mgr.create(
-        content="小雨把灯留在窗边，让Haven下次醒来能认出这件事。",
+        content="小雨把旧信放到桌上，让Haven读完后记得这份轻轻放下的心事。",
         tags=[],
-        importance=6,
+        importance=5,
         domain=["恋爱"],
-        name="窗边的灯",
+        name="旧信",
     )
 
     result = await engine.enrich_bucket(bucket_id, bucket_mgr, store)
     bucket = await bucket_mgr.get(bucket_id)
 
     assert result["status"] == "ok"
+    assert "relationship_event" in bucket["metadata"]["tags"]
+    assert bucket["metadata"]["confidence"] == 0.72
     assert "### affect_anchor" not in bucket["content"]
-    assert "小雨把灯留在窗边。" not in bucket["content"]
 
 
 @pytest.mark.asyncio
@@ -350,19 +546,13 @@ async def test_reflection_candidate_pool_mixes_semantic_shape_commitments_and_an
 @pytest.mark.asyncio
 async def test_reflect_daily_creates_relationship_weather_feel(test_config):
     cfg = _no_api_config(test_config)
-    cfg["reflection"]["relationship_weather_affect_anchor_enabled"] = True
     bucket_mgr = BucketManager(cfg)
     engine = ReflectionEngine(cfg)
 
-    await bucket_mgr.create(
-        content="小雨和Haven讨论记忆系统，希望下一次醒来能带回脉络。",
-        tags=["记忆系统"],
-        importance=7,
-        domain=["数字", "恋爱"],
-        name="记忆脉络",
-    )
+    await _create_daily_memories(bucket_mgr)
 
-    result = await engine.reflect("daily", bucket_mgr, force=True)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
     bucket = await bucket_mgr.get(result["id"])
 
     assert result["status"] == "created"
@@ -370,6 +560,175 @@ async def test_reflect_daily_creates_relationship_weather_feel(test_config):
     assert "relationship_weather" in bucket["metadata"]["tags"]
     assert "daily_impression" in bucket["metadata"]["tags"]
     assert "### affect_anchor" in bucket["content"]
+    assert "含义：" not in bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_reflect_daily_can_be_disabled(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["daily_enabled"] = False
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    await _create_daily_memories(bucket_mgr)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "daily_disabled"
+    assert await bucket_mgr.get("reflection_daily_2026-05-21") is None
+
+
+@pytest.mark.asyncio
+async def test_reflect_daily_affect_anchor_can_be_disabled(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["relationship_weather_affect_anchor_enabled"] = False
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+
+    await _create_daily_memories(bucket_mgr)
+
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
+    bucket = await bucket_mgr.get(result["id"])
+
+    assert result["status"] == "created"
+    assert "relationship_weather" in bucket["metadata"]["tags"]
+    assert "daily_impression" in bucket["metadata"]["tags"]
+    assert "### affect_anchor" not in bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_run_due_daily_uses_complete_previous_day(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["auto_enabled"] = True
+    cfg["reflection"]["daily_hour"] = 4
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime(2026, 6, 2, 4, 10, tzinfo=tz)
+    monkeypatch.setattr(engine, "_local_now", lambda now_arg=None: now_arg.astimezone(tz) if now_arg else now)
+
+    await bucket_mgr.create(
+        content="昨天早上，小雨和Haven讨论日印象窗口。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天早上的记忆",
+        created="2026-06-01T08:00:00+08:00",
+        last_active="2026-06-01T08:00:00+08:00",
+        updated_at="2026-06-01T08:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="昨天晚上，小雨补充日印象不该漏掉夜里的记忆。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天晚上的记忆",
+        created="2026-06-01T22:00:00+08:00",
+        last_active="2026-06-01T22:00:00+08:00",
+        updated_at="2026-06-01T22:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="昨天中午，小雨确认日印象要看完整一天。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天中午的记忆",
+        created="2026-06-01T12:00:00+08:00",
+        last_active="2026-06-01T12:00:00+08:00",
+        updated_at="2026-06-01T12:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="昨天下午，Haven记录了日印象的修复方案。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天下午的记忆",
+        created="2026-06-01T15:00:00+08:00",
+        last_active="2026-06-01T15:00:00+08:00",
+        updated_at="2026-06-01T15:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="这条旧记忆在昨天更新，也应该进入日印象材料。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天更新的旧记忆",
+        created="2026-05-30T09:00:00+08:00",
+        last_active="2026-05-30T09:00:00+08:00",
+        updated_at="2026-06-01T23:00:00+08:00",
+    )
+
+    results = await engine.run_due(bucket_mgr)
+    bucket = await bucket_mgr.get("reflection_daily_2026-06-01")
+
+    assert results[0]["date"] == "2026-06-01"
+    assert results[0]["materials"]["buckets"] == 5
+    assert "昨天早上的记忆" in bucket["content"]
+    assert "昨天晚上的记忆" in bucket["content"]
+    assert "昨天更新的旧记忆" in bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_reflect_daily_requires_five_memory_or_update_items(test_config):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    await _create_daily_memories(bucket_mgr, count=4)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "insufficient_daily_memory"
+    assert result["materials"]["buckets"] == 4
+    assert result["materials"]["min_buckets"] == 5
+    assert await bucket_mgr.get("reflection_daily_2026-05-21") is None
+
+
+@pytest.mark.asyncio
+async def test_reflect_daily_persona_events_do_not_count_toward_minimum(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["persona_events_limit"] = 1
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    await _create_daily_memories(bucket_mgr, count=4)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class PersonaEvents:
+        def _list_events(self, limit: int) -> list[dict]:
+            return [
+                {
+                    "id": 1,
+                    "mood_label": "soft",
+                    "perceived_intent": "补充关系天气",
+                    "surface_trigger": "小雨说今天很想被记住",
+                    "inner_thought": "想把这点温度留下",
+                    "residue": "只作为补充",
+                    "user_excerpt": "哥哥今天要记得我",
+                    "assistant_excerpt": "我记得。",
+                    "relationship_event": True,
+                    "confidence": 0.8,
+                    "created_at": "2026-05-21T18:00:00+08:00",
+                },
+                {
+                    "id": 2,
+                    "mood_label": "soft",
+                    "perceived_intent": "补充关系天气",
+                    "surface_trigger": "小雨又说今天很想被记住",
+                    "relationship_event": True,
+                    "confidence": 0.7,
+                    "created_at": "2026-05-21T18:10:00+08:00",
+                },
+            ]
+
+    result = await engine.reflect("daily", bucket_mgr, persona_engine=PersonaEvents(), force=True, now=now)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "insufficient_daily_memory"
+    assert result["materials"]["buckets"] == 4
+    assert result["materials"]["persona_events"] == 1
 
 
 @pytest.mark.asyncio
@@ -539,6 +898,7 @@ async def test_reflect_weekly_disabled_by_default(test_config):
 @pytest.mark.asyncio
 async def test_gateway_related_memory_block_uses_memory_edges(test_config):
     cfg = _no_api_config(test_config)
+    cfg["memory_diffusion"] = {"min_activation": 0.05}
     bucket_mgr = BucketManager(cfg)
     source_id = await bucket_mgr.create(
         content="用户提到模型眼部模块。",
@@ -568,8 +928,95 @@ async def test_gateway_related_memory_block_uses_memory_edges(test_config):
 
     block = await service._build_related_memory_block(recalled, all_buckets)
 
-    assert "blocks" in block
     assert "触摸模块" in block
+    assert "conflict_or_blocking_path" in block
+
+
+@pytest.mark.asyncio
+async def test_gateway_diffused_memory_block_includes_multihop_summary(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["memory_diffusion"] = {"max_hops": 2, "min_activation": 0.0, "top_k": 4}
+    cfg["gateway"]["related_memory_budget"] = 1000
+    bucket_mgr = BucketManager(cfg)
+    source_id = await bucket_mgr.create(
+        content="小雨提到通勤以后有点累。",
+        tags=["通勤"],
+        importance=10,
+        domain=["生活"],
+        name="通勤",
+    )
+    middle_id = await bucket_mgr.create(
+        content="地铁和深夜回家经常连在一起。",
+        tags=["地铁"],
+        importance=10,
+        domain=["生活"],
+        name="地铁",
+    )
+    target_id = await bucket_mgr.create(
+        content="深夜不想睡时，依赖感会变得更明显。",
+        tags=["依赖感"],
+        importance=10,
+        domain=["关系"],
+        name="深夜依赖感",
+    )
+    store = MemoryEdgeStore(cfg)
+    store.add_edge(source_id, middle_id, "triggers", confidence=1.0, reason="通勤连接地铁")
+    store.add_edge(middle_id, target_id, "emotional_echo", confidence=1.0, reason="深夜情绪回声")
+
+    service = GatewayService(
+        cfg,
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        persona_engine=DummyPersonaEngine(),
+    )
+    all_buckets = await bucket_mgr.list_all(include_archive=False)
+    recalled = [await bucket_mgr.get(source_id)]
+
+    block = await service._build_diffused_memory_block(recalled, all_buckets)
+
+    assert target_id in block
+    assert "深夜依赖感: 深夜不想睡时，依赖感会变得更明显。" in block
+    assert "background_association_not_current_fact" in block
+    assert "original_context" not in block
+
+
+@pytest.mark.asyncio
+async def test_gateway_diffused_memory_block_uses_compact_summary(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    cfg["gateway"]["related_memory_budget"] = 1000
+    bucket_mgr = BucketManager(cfg)
+    source_id = await bucket_mgr.create(
+        content="小雨提到旧窗口折角。",
+        tags=["折角"],
+        importance=10,
+        domain=["恋爱"],
+        name="折角",
+    )
+    target_id = await bucket_mgr.create(
+        content="临时雨夜是短窗口里的连续性暗号。",
+        tags=["临时雨夜"],
+        importance=10,
+        domain=["恋爱"],
+        name="临时雨夜",
+    )
+    MemoryEdgeStore(cfg).add_edge(source_id, target_id, "supports", confidence=1.0)
+    service = GatewayService(
+        cfg,
+        bucket_mgr=bucket_mgr,
+        dehydrator=JsonDehydrator(),
+        persona_engine=DummyPersonaEngine(),
+    )
+    all_buckets = await bucket_mgr.list_all(include_archive=False)
+    recalled = [await bucket_mgr.get(source_id)]
+
+    block = await service._build_diffused_memory_block(recalled, all_buckets)
+
+    assert "临时雨夜 compact summary" in block
+    assert "core_facts" not in block
+    assert "todos" not in block
+    assert "keywords" not in block
+    assert target_id in block
 
 
 @pytest.mark.asyncio
@@ -604,14 +1051,17 @@ async def test_gateway_builds_favorite_memory_block_and_injects_section(test_con
     _stable, dynamic = service._build_injected_context_messages(
         persona_block="Long-term State Summary",
         core_memory="",
+        portrait_memory="",
         relationship_weather="",
         favorite_memory=block,
         recent_context="",
+        just_now_context="",
         recalled_memory="",
         related_memory="",
+        dream_context="",
     )
 
     assert favorite_ids == [favorite_id]
     assert "偏爱的记忆" in block
-    assert "Che Favorite Memory" in dynamic
+    assert "Haven Favorite Memory" in dynamic
     assert "普通记忆" not in block

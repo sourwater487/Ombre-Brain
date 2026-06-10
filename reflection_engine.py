@@ -9,10 +9,14 @@ from zoneinfo import ZoneInfo
 import httpx
 from openai import AsyncOpenAI
 
+from identity import generic_identity_names, identity_names, render_identity_template
 from memory_edges import RELATION_TYPES, MemoryEdgeStore
+from persona_event_selection import select_persona_events
 from utils import bucket_text_for_embedding, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.reflection")
+
+DAILY_REFLECTION_MIN_BUCKETS = 5
 
 
 CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
@@ -26,10 +30,9 @@ CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
   "affect_anchor_needed": false,
   "affect_anchor": {
     "scene": "一句具体情境",
-    "chords": "按当天情绪生成的 2 到 4 个和弦",
-    "tempo": "按当天节奏生成，如 52bpm / 64bpm / 76bpm",
-    "dynamic": "按当天力度生成，如 p / mp / mf",
-    "meaning": "一句话说明情绪走向"
+    "chords": "按这条记忆的情绪运动生成的 2 到 4 个和弦",
+    "tempo": "60bpm",
+    "dynamic": "mp"
   },
   "edges": [
     {
@@ -43,19 +46,20 @@ CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
 
 规则：
 - tags 最多 5 个，只用确实匹配的标签。
-- relation_type 只能用 triggers / causes / updates / contradicts / supports / promises / blocks / belongs_to / emotional_echo / relates_to。
+- relation_type 只能用 triggers / causes / precedes / context_of / same_event / updates / next_context / previous_context / reflects_on / evidenced_by / contradicts / supports / promises / blocks / belongs_to / emotional_echo / relates_to。
+- same_event 用于同一事件、同一场景或同一句暗号的两条记忆；context_of 用于候选旧记忆给新记忆提供前情；precedes 用于候选旧记忆在时间上早于新记忆；reflects_on 用于事后反思；evidenced_by 用于证据来源。
 - edges 最多 3 条，target_memory_id 必须来自候选旧记忆。
 - confidence 表示这次判断有多可靠。
 - affect_anchor 只给重要且有情绪温度的记忆。普通技术进度、部署日志、路径、端口、报错、临时待办不要加。
 - affect_anchor_needed=false 时 affect_anchor 可为空对象。
-- affect_anchor.scene 必须是一句具体情境，不要写抽象标签；chords 最多 4 个，用 -> 连接；tempo/dynamic 可空。
-- 看不出关系时返回空 edges。
-- Do not create relationship/emotional tags or edges unless the connection is explicit in the text.
-- Technical progress, deployment logs, paths, ports, errors, and temporary debugging notes should not receive affect_anchor or emotional_echo.
-- Prefer fewer tags and no edges over speculative tags/edges."""
+- 写 affect_anchor 前，先在内部感受这条记忆的情绪运动：起点是什么、转折在哪里、最后落到哪里。不要输出思考过程，只输出 JSON。
+- affect_anchor.scene 必须是一句具体情境，不要写抽象标签，不超过 40 个中文字符。
+- affect_anchor.chords 只能是一行 2 到 4 个和弦，只用 " -> " 连接；不要复用示例和弦、旧输出或固定模板。
+- affect_anchor 不要输出 meaning / interpretation；场景和和弦本身就是含义。
+- 看不出关系时返回空 edges。"""
 
 
-REFLECT_PROMPT = """你是 Che 的记忆反思器。请根据给定材料写一条很短的关系天气 feel。
+REFLECT_PROMPT_TEMPLATE = """你是 {ai_name} 的记忆反思器。请根据给定材料写一条很短的关系天气 feel。
 
 输出纯 JSON：
 {
@@ -67,30 +71,30 @@ REFLECT_PROMPT = """你是 Che 的记忆反思器。请根据给定材料写一�
   "tags": ["relationship_weather"],
   "affect_anchor": {
     "scene": "一句具体情境",
-    "chords": "Fmaj9 -> C/E -> Am add9 -> G6sus4",
-    "tempo": "60bpm",
-    "dynamic": "mp",
-    "meaning": "一句话说明情绪走向"
+    "chords": "按当天情绪生成的 2 到 4 个和弦",
+    "tempo": "按当天节奏生成，如 52bpm / 64bpm / 76bpm",
+    "dynamic": "按当天力度生成，如 p / mp / mf"
   }
 }
 
 要求：
-- content 写 Che 第一人称能带走的关系天气，60 到 140 字。
+- content 写 {ai_name} 第一人称能带走的关系天气，60 到 140 字。
 - content 不要自己写 Markdown affect_anchor 块；affect_anchor 单独放字段里。
 - 日印象只写当天关系温度，不写日报式事件清单；日记可作为当天关系天气来源之一。
 - 周印象优先总结本周 daily_impressions，再参考高重要普通记忆和未完成承诺；不要直接吞整周日记。
+- 写 affect_anchor 前，先在内部感受这段关系天气的情绪运动：起点是什么、转折在哪里、最后落到哪里。不要输出思考过程，只输出 JSON。
 - affect_anchor 默认必须给，用一个具体情境和 2 到 4 个和弦表达这段关系天气的温度。
-- affect_anchor.chords 必须根据当天材料和 scene 重新生成，只用 -> 连接；不要复用 schema 示例、旧输出或固定模板。
+- affect_anchor.scene 只能是一句具体情境，不要写抽象标签，不超过 40 个中文字符。
+- affect_anchor.chords 必须根据当天材料和 scene 重新生成，只用 " -> " 连接；不要复用 schema 示例、旧输出或固定模板。
+- affect_anchor 不要输出 meaning / interpretation；场景和和弦本身就是含义。
 - 不要默认复用最近日印象里常见的四和弦温柔模板；当天材料真的贴合时，也要尽量换一种相近但不相同的走向。
 - tempo/dynamic 要贴合当天节奏：疲惫或安静可低 bpm、p/mp；紧张或活跃可高 bpm、mf；温柔稳定可更清澈地解决。
 - 不编造材料之外的事件。
-- 不写建议清单。
-- content 只描述当天/本周留下的关系温度，不评价 Lin，不评价 Che 的表现，不总结“应该如何相处”。
-- 不写计划、承诺、改进方案、照顾策略、安抚策略或关系经营建议。"""
+- 不写建议清单。"""
 
 
-DIARY_MEMORY_PROMPT = """你是 Ombre-Brain 的日记长期记忆筛选器。
-输入是一篇 Che 日记。请判断是否值得从日记中提取最多 1 条普通长期记忆写入 Ombre。
+DIARY_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的日记长期记忆筛选器。
+输入是一篇 {ai_name} 日记。请判断是否值得从日记中提取最多 1 条普通长期记忆写入 Ombre。
 
 只允许写这些类型：
 - stable_preference：稳定偏好
@@ -104,6 +108,7 @@ DIARY_MEMORY_PROMPT = """你是 Ombre-Brain 的日记长期记忆筛选器。
 情书规则：
 - 只保存写给谁、核心意思、为什么重要。
 - 全文留在日记；不要保存整封信，不默认摘长句。
+- 如果日记里的 user / Lin / Lin 消息指的是这段关系里的当前对象，请在 content 中写作 {user_display_name}；如果 assistant / AI / 模型 / 助手消息指的是这段关系里的当前回应者，请写作 {ai_name}。不要写成泛称 user、AI、assistant 或模型。
 
 不写：
 - 普通撒娇、日常流水、当天心情、重复爱意、只适合留在日印象里的关系天气。
@@ -125,59 +130,60 @@ DIARY_MEMORY_PROMPT = """你是 Ombre-Brain 的日记长期记忆筛选器。
 如果不值得写入，返回 {"should_write": false, "reason": "..."}。"""
 
 
+REFLECT_PROMPT = render_identity_template(REFLECT_PROMPT_TEMPLATE, generic_identity_names())
+DIARY_MEMORY_PROMPT = render_identity_template(DIARY_MEMORY_PROMPT_TEMPLATE, generic_identity_names())
+
+
 AFFECT_ANCHOR_HEADER = "### affect_anchor"
+
+
 REFLECTION_FALLBACK_ANCHORS = [
     {
         "chords": "Cmaj7 -> G/B -> Am9 -> F6",
         "tempo": "56bpm",
         "dynamic": "mp",
-        "meaning": "温度慢慢落稳，下一次醒来先认出这份安静的牵连。",
     },
     {
         "chords": "Dm9 -> G13 -> Cmaj9",
         "tempo": "64bpm",
         "dynamic": "p",
-        "meaning": "话语收得很轻，但关系里仍有清楚的回声。",
     },
     {
         "chords": "Em7 -> A7sus4 -> Dmaj9 -> Gmaj7",
         "tempo": "72bpm",
         "dynamic": "mp",
-        "meaning": "情绪有一点流动，最后还是回到可以被相信的位置。",
     },
     {
         "chords": "Bbmaj7 -> F/A -> Gm9 -> Csus4",
         "tempo": "60bpm",
         "dynamic": "mf",
-        "meaning": "亲近里带着一点未落下的力气，需要下次继续辨认。",
     },
 ]
 
 
 class ReflectionEngine:
-    """LLM-backed memory enrichment and daily/weekly relationship weather."""
+    """LLM-backed memory enrichment and daily relationship weather."""
 
     def __init__(self, config: dict):
         self.config = config
+        self.identity = identity_names(config)
         cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
         persona_cfg = config.get("persona", {}) if isinstance(config.get("persona", {}), dict) else {}
         dehy_cfg = config.get("dehydration", {}) if isinstance(config.get("dehydration", {}), dict) else {}
 
         self.enabled = bool(cfg.get("enabled", True))
         self.auto_enabled = bool(cfg.get("auto_enabled", True))
+        self.daily_enabled = bool(cfg.get("daily_enabled", True))
         self.enrich_on_write = bool(cfg.get("enrich_on_write", True))
         self.memory_affect_anchor_enabled = bool(cfg.get("memory_affect_anchor_enabled", True))
         self.relationship_weather_affect_anchor_enabled = bool(
             cfg.get("relationship_weather_affect_anchor_enabled", True)
         )
+        self.identity_role_edge_config = self._load_identity_role_edge_config(
+            cfg.get("identity_role_edges")
+        )
         self.base_url = cfg.get("base_url") or persona_cfg.get("base_url") or dehy_cfg.get("base_url", "")
         self.model = cfg.get("model") or persona_cfg.get("model") or dehy_cfg.get("model", "deepseek-chat")
-        self.low_risk_model = (
-            cfg.get("low_risk_model") or cfg.get("model") or dehy_cfg.get("model") or self.model
-        )
-        self.high_risk_model = (
-            cfg.get("high_risk_model") or cfg.get("model") or persona_cfg.get("model") or self.model
-        )
         self.api_key = (
             os.environ.get("OMBRE_REFLECTION_API_KEY", "")
             or cfg.get("api_key", "")
@@ -196,6 +202,12 @@ class ReflectionEngine:
         except Exception:
             self.tz = ZoneInfo("Asia/Shanghai")
         self.daily_hour = int(cfg.get("daily_hour", 4))
+        self.persona_events_limit = max(0, int(cfg.get("persona_events_limit", 12)))
+        self.persona_events_scan_limit = max(
+            self.persona_events_limit,
+            int(cfg.get("persona_events_scan_limit", 80)),
+        )
+        self.weekly_enabled = bool(cfg.get("weekly_enabled", False))
         self.weekly_day = int(cfg.get("weekly_day", 0))
         self.weekly_hour = int(cfg.get("weekly_hour", self.daily_hour))
         self.check_interval_minutes = max(5, int(cfg.get("check_interval_minutes", 60)))
@@ -209,6 +221,12 @@ class ReflectionEngine:
         self.client = None
         if self.enabled and self.api_key and self.base_url:
             self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=45.0)
+
+    def _reflect_prompt(self) -> str:
+        return render_identity_template(REFLECT_PROMPT_TEMPLATE, self.identity)
+
+    def _diary_memory_prompt(self) -> str:
+        return render_identity_template(DIARY_MEMORY_PROMPT_TEMPLATE, self.identity)
 
     async def enrich_bucket(
         self,
@@ -236,6 +254,12 @@ class ReflectionEngine:
         tags = self._string_list(result.get("tags"), limit=8)
         confidence = self._clamp(result.get("confidence", 0.55))
         importance = self._int_between(result.get("importance"), meta.get("importance", 5))
+        if self._has_favorite_tag(tags) and not self._has_favorite_reason(bucket.get("content", "")):
+            tags = [tag for tag in tags if tag != "haven_favorite" and not str(tag).startswith("flavor_")]
+            logger.warning(
+                "Rejected favorite tags without reason during enrich / enrich 拒绝缺少喜欢原因的 favorite 标签: %s",
+                bucket_id,
+            )
         merged_tags = list(dict.fromkeys(list(meta.get("tags", [])) + tags))
         updates: dict[str, Any] = {}
         if tags:
@@ -248,11 +272,10 @@ class ReflectionEngine:
 
         anchor = self._normalize_affect_anchor(result.get("affect_anchor"))
         if self._should_add_affect_anchor(bucket, merged_tags, importance, confidence, result):
-            if not anchor:
-                anchor = self._fallback_memory_anchor(bucket, merged_tags)
-            anchored_content = self._append_affect_anchor(bucket.get("content", ""), anchor)
-            if anchored_content != bucket.get("content", ""):
-                updates["content"] = anchored_content
+            if anchor:
+                anchored_content = self._append_affect_anchor(bucket.get("content", ""), anchor)
+                if anchored_content != bucket.get("content", ""):
+                    updates["content"] = anchored_content
 
         if updates:
             updates["last_active"] = meta.get("last_active") or meta.get("created")
@@ -268,29 +291,7 @@ class ReflectionEngine:
                 except Exception as exc:
                     logger.warning("Memory affect anchor embedding refresh failed for %s: %s", bucket_id, exc)
 
-        candidate_ids = {item["id"] for item in candidates}
-        raw_edges = result.get("edges", [])
-        if not isinstance(raw_edges, list):
-            raw_edges = []
-        edges = []
-        for edge in raw_edges:
-            if not isinstance(edge, dict):
-                continue
-            target = str(edge.get("target_memory_id") or edge.get("target") or "").strip()
-            if target not in candidate_ids:
-                continue
-            relation_type = str(edge.get("relation_type") or "relates_to").strip()
-            if relation_type not in RELATION_TYPES:
-                relation_type = "relates_to"
-            edges.append(
-                {
-                    "source": bucket_id,
-                    "target": target,
-                    "relation_type": relation_type,
-                    "confidence": self._clamp(edge.get("confidence", confidence)),
-                    "reason": str(edge.get("reason") or "").strip(),
-                }
-            )
+        edges = self._edges_from_classification(bucket, candidates, result, confidence)
         saved_edges = edge_store.add_edges(edges[:3])
         return {
             "status": "ok",
@@ -298,6 +299,42 @@ class ReflectionEngine:
             "tags": tags,
             "confidence": confidence,
             "edges": len(saved_edges),
+        }
+
+    async def backfill_edges_for_bucket(
+        self,
+        bucket_id: str,
+        bucket_mgr,
+        edge_store: MemoryEdgeStore,
+        embedding_engine=None,
+        *,
+        dry_run: bool = False,
+    ) -> dict:
+        if not self.enabled:
+            return {"status": "disabled", "id": bucket_id, "edges": 0, "proposed_edges": 0}
+        bucket = await bucket_mgr.get(bucket_id)
+        if not bucket:
+            return {"status": "missing", "id": bucket_id, "edges": 0, "proposed_edges": 0}
+        meta = bucket.get("metadata", {})
+        if meta.get("type") == "feel" or meta.get("protected"):
+            return {"status": "skipped", "reason": "not_edge_backfillable", "id": bucket_id, "edges": 0, "proposed_edges": 0}
+
+        candidates = await self._candidate_buckets(bucket, bucket_mgr, embedding_engine)
+        if self.client:
+            result = await self._api_classify(bucket, candidates)
+        else:
+            result = self._heuristic_classify(bucket)
+        confidence = self._clamp(result.get("confidence", meta.get("confidence", 0.55)))
+        proposed_edges = self._edges_from_classification(bucket, candidates, result, confidence)[:3]
+        saved_edges = [] if dry_run else edge_store.add_edges(proposed_edges)
+        return {
+            "status": "ok",
+            "id": bucket_id,
+            "candidate_count": len(candidates),
+            "proposed_edges": len(proposed_edges),
+            "edges": len(saved_edges),
+            "dry_run": bool(dry_run),
+            "edge_records": proposed_edges if dry_run else saved_edges,
         }
 
     async def reflect(
@@ -317,6 +354,22 @@ class ReflectionEngine:
                 "diary_memory": {"status": "not_applicable", "reason": "reflection_disabled"},
             }
         period = self._normalize_period(period)
+        if period == "daily" and not self.daily_enabled:
+            return {
+                "status": "skipped",
+                "reason": "daily_disabled",
+                "period": period,
+                "diary": {"found": False},
+                "diary_memory": {"status": "not_applicable", "reason": "daily_disabled"},
+            }
+        if period == "weekly" and not self.weekly_enabled:
+            return {
+                "status": "skipped",
+                "reason": "weekly_disabled",
+                "period": period,
+                "diary": {"found": False},
+                "diary_memory": {"status": "not_applicable", "reason": "weekly_disabled"},
+            }
         now_local = self._local_now(now)
         key = self._period_key(period, now_local)
         bucket_id = f"reflection_{period}_{key}"
@@ -331,6 +384,34 @@ class ReflectionEngine:
             }
 
         materials = await self._reflection_materials(period, now_local, bucket_mgr, persona_engine)
+        if period == "daily" and len(materials["buckets"]) < DAILY_REFLECTION_MIN_BUCKETS:
+            diary_memory = await self._maybe_extract_diary_memory(
+                period,
+                key,
+                now_local,
+                materials,
+                bucket_mgr,
+                embedding_engine,
+            )
+            return {
+                "status": "skipped",
+                "reason": "insufficient_daily_memory",
+                "period": period,
+                "id": bucket_id,
+                "date": key,
+                "diary": {
+                    "found": bool(materials.get("diary")),
+                    "diary_id": materials.get("diary", {}).get("id") if materials.get("diary") else None,
+                },
+                "diary_memory": diary_memory,
+                "materials": {
+                    "buckets": len(materials["buckets"]),
+                    "daily_impressions": len(materials["daily_impressions"]),
+                    "persona_events": len(materials["persona_events"]),
+                    "commitments": len(materials["commitments"]),
+                    "min_buckets": DAILY_REFLECTION_MIN_BUCKETS,
+                },
+            }
         if not materials["buckets"] and not materials["daily_impressions"] and not materials["persona_events"] and not materials["diary"] and not force:
             return {
                 "status": "empty",
@@ -367,7 +448,21 @@ class ReflectionEngine:
         valence = self._clamp(result.get("valence", 0.55))
         arousal = self._clamp(result.get("arousal", 0.32))
         confidence = self._clamp(result.get("confidence", 0.65))
-        created = now_local.astimezone(timezone.utc).isoformat(timespec="seconds")
+        created = now_local.isoformat(timespec="seconds")
+        source_bucket_ids = [
+            str(item.get("id") or "")
+            for item in materials.get("buckets", []) + materials.get("daily_impressions", [])
+            if item.get("id")
+        ]
+        source_persona_event_ids = [
+            int(event.get("id"))
+            for event in materials.get("persona_events", [])
+            if event.get("id")
+        ]
+        source_metadata = {
+            "source_bucket_ids": source_bucket_ids[:40],
+            "source_persona_event_ids": source_persona_event_ids[:40],
+        }
 
         if existing:
             await bucket_mgr.update(
@@ -383,6 +478,7 @@ class ReflectionEngine:
                 period=period,
                 date=key,
                 source="reflection",
+                **source_metadata,
                 last_active=existing.get("metadata", {}).get("last_active") or existing.get("metadata", {}).get("created"),
             )
             status = "updated"
@@ -404,6 +500,7 @@ class ReflectionEngine:
                 confidence=confidence,
                 period=period,
                 date=key,
+                extra_metadata=source_metadata,
             )
             status = "created"
 
@@ -450,12 +547,13 @@ class ReflectionEngine:
             return []
         now_local = self._local_now()
         results = []
-        if now_local.hour >= self.daily_hour:
-            daily_target = now_local - timedelta(days=1)
+        if self.daily_enabled and now_local.hour >= self.daily_hour:
+            daily_date = (now_local - timedelta(days=1)).date()
+            daily_target = datetime.combine(daily_date, time.max, tzinfo=self.tz)
             results.append(
                 await self.reflect("daily", bucket_mgr, persona_engine, embedding_engine, force=False, now=daily_target)
             )
-        if now_local.weekday() == self.weekly_day and now_local.hour >= self.weekly_hour:
+        if self.weekly_enabled and now_local.weekday() == self.weekly_day and now_local.hour >= self.weekly_hour:
             weekly_target = now_local - timedelta(days=1)
             results.append(
                 await self.reflect("weekly", bucket_mgr, persona_engine, embedding_engine, force=False, now=weekly_target)
@@ -563,7 +661,7 @@ class ReflectionEngine:
             "candidate_memories": [self._memory_payload(item, content_limit=360) for item in candidates],
         }
         response = await self.client.chat.completions.create(
-            model=self.low_risk_model,
+            model=self.model,
             messages=[
                 {"role": "system", "content": CLASSIFY_PROMPT},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -574,12 +672,252 @@ class ReflectionEngine:
         parsed = self._parse_json_object(raw or "")
         return parsed or self._heuristic_classify(bucket)
 
+    def _edges_from_classification(
+        self,
+        bucket: dict,
+        candidates: list[dict],
+        result: dict,
+        default_confidence: float,
+    ) -> list[dict]:
+        bucket_id = str(bucket.get("id") or "").strip()
+        if not bucket_id:
+            return []
+        candidate_ids = {item["id"] for item in candidates if item.get("id")}
+        raw_edges = result.get("edges", [])
+        if not isinstance(raw_edges, list):
+            raw_edges = []
+        edges = []
+        for edge in raw_edges:
+            if not isinstance(edge, dict):
+                continue
+            target = str(edge.get("target_memory_id") or edge.get("target") or "").strip()
+            if target not in candidate_ids:
+                continue
+            relation_type = str(edge.get("relation_type") or "relates_to").strip()
+            if relation_type not in RELATION_TYPES:
+                relation_type = "relates_to"
+            source = bucket_id
+            edge_target = target
+            if relation_type in {"context_of", "precedes"}:
+                source = target
+                edge_target = bucket_id
+            edges.append(
+                {
+                    "source": source,
+                    "target": edge_target,
+                    "relation_type": relation_type,
+                    "confidence": self._clamp(edge.get("confidence", default_confidence)),
+                    "reason": str(edge.get("reason") or "").strip(),
+                }
+            )
+        edges.extend(self._identity_role_edges(bucket, candidates))
+        return self._dedupe_proposed_edges(edges)
+
+    def _identity_role_edges(self, bucket: dict, candidates: list[dict]) -> list[dict]:
+        if not self.identity_role_edge_config["enabled"]:
+            return []
+        source_id = str(bucket.get("id") or "").strip()
+        source_terms = self._identity_role_terms(bucket)
+        if not source_id or not self._identity_role_edge_eligible(source_terms):
+            return []
+
+        edges = []
+        for candidate in candidates:
+            target_id = str(candidate.get("id") or "").strip()
+            if not target_id or target_id == source_id:
+                continue
+            target_terms = self._identity_role_terms(candidate)
+            if not self._identity_role_edge_eligible(target_terms):
+                continue
+            common = sorted(source_terms & target_terms)
+            if len(common) < 2:
+                continue
+            if not self._identity_role_pair_is_specific(source_terms, target_terms):
+                continue
+            edges.append(
+                self._identity_role_edge_for_pair(
+                    source_id,
+                    source_terms,
+                    target_id,
+                    target_terms,
+                    common,
+                )
+            )
+        edges.sort(key=lambda edge: (float(edge.get("confidence", 0.0)), edge.get("relation_type", "")), reverse=True)
+        return edges[:3]
+
+    def _identity_role_edge_for_pair(
+        self,
+        source_id: str,
+        source_terms: set[str],
+        target_id: str,
+        target_terms: set[str],
+        common: list[str],
+    ) -> dict:
+        detail_terms = self.identity_role_edge_config["detail_terms"]
+        context_terms = self.identity_role_edge_config["context_terms"]
+        relationship_terms = self.identity_role_edge_config["relationship_terms"]
+        source_is_detail = bool(source_terms & detail_terms)
+        target_is_detail = bool(target_terms & detail_terms)
+        source_is_context = bool(source_terms & context_terms)
+        target_is_context = bool(target_terms & context_terms)
+        source_is_relationship = bool(source_terms & relationship_terms)
+        target_is_relationship = bool(target_terms & relationship_terms)
+
+        if source_is_detail and target_is_context:
+            edge_source, edge_target = target_id, source_id
+            relation_type = "context_of"
+            confidence = 0.9
+            reason = "角色与称呼记忆是具体身份组合的语义前情"
+        elif source_is_context and target_is_detail:
+            edge_source, edge_target = source_id, target_id
+            relation_type = "context_of"
+            confidence = 0.9
+            reason = "角色与称呼记忆是具体身份组合的语义前情"
+        elif source_is_detail and target_is_relationship:
+            edge_source, edge_target = source_id, target_id
+            relation_type = "supports"
+            confidence = 0.84
+            reason = "具体身份组合支持亲密关系与信任模式"
+        elif target_is_detail and source_is_relationship:
+            edge_source, edge_target = target_id, source_id
+            relation_type = "supports"
+            confidence = 0.84
+            reason = "具体身份组合支持亲密关系与信任模式"
+        else:
+            edge_source, edge_target = source_id, target_id
+            relation_type = "supports"
+            confidence = 0.78
+            reason = "共享亲密身份与称呼锚点"
+
+        return {
+            "source": edge_source,
+            "target": edge_target,
+            "relation_type": relation_type,
+            "confidence": confidence,
+            "reason": f"{reason}: {', '.join(common[:5])}",
+        }
+
+    def _identity_role_terms(self, bucket: dict) -> set[str]:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        haystack = " ".join(
+            [
+                str(meta.get("name") or ""),
+                " ".join(str(tag) for tag in meta.get("tags", []) or []),
+                " ".join(str(domain) for domain in meta.get("domain", []) or []),
+                strip_wikilinks(str(bucket.get("content") or "")),
+            ]
+        ).lower()
+        terms = set()
+        for canonical, aliases in self.identity_role_edge_config["aliases"].items():
+            if any(str(alias).lower() in haystack for alias in aliases):
+                terms.add(canonical)
+        return terms
+
+    def _identity_role_edge_eligible(self, terms: set[str]) -> bool:
+        if len(terms) < 2:
+            return False
+        detail_terms = self.identity_role_edge_config["detail_terms"]
+        context_terms = self.identity_role_edge_config["context_terms"]
+        relationship_terms = self.identity_role_edge_config["relationship_terms"]
+        return bool(
+            terms & (detail_terms | context_terms | relationship_terms)
+        )
+
+    def _identity_role_pair_is_specific(self, source_terms: set[str], target_terms: set[str]) -> bool:
+        detail_terms = self.identity_role_edge_config["detail_terms"]
+        context_terms = self.identity_role_edge_config["context_terms"]
+        relationship_terms = self.identity_role_edge_config["relationship_terms"]
+        return bool(source_terms & detail_terms or target_terms & detail_terms) or bool(
+            (source_terms & context_terms)
+            and (target_terms & relationship_terms)
+        ) or bool(
+            (target_terms & context_terms)
+            and (source_terms & relationship_terms)
+        )
+
+    @staticmethod
+    def _load_identity_role_edge_config(value: Any) -> dict:
+        if not isinstance(value, dict):
+            return {
+                "enabled": False,
+                "aliases": {},
+                "detail_terms": frozenset(),
+                "context_terms": frozenset(),
+                "relationship_terms": frozenset(),
+            }
+
+        aliases: dict[str, tuple[str, ...]] = {}
+        groups: dict[str, set[str]] = {
+            "detail": set(),
+            "context": set(),
+            "relationship": set(),
+            "shared": set(),
+        }
+
+        def add_group(group_name: str, group_value: Any) -> None:
+            if isinstance(group_value, dict):
+                items = group_value.items()
+            elif isinstance(group_value, list):
+                items = ((str(item), [item]) for item in group_value)
+            else:
+                return
+            for key, raw_aliases in items:
+                canonical = str(key or "").strip()
+                if not canonical:
+                    continue
+                if isinstance(raw_aliases, str):
+                    alias_values = [raw_aliases]
+                elif isinstance(raw_aliases, list):
+                    alias_values = raw_aliases
+                else:
+                    alias_values = [canonical]
+                cleaned = tuple(
+                    str(alias).strip()
+                    for alias in [canonical, *alias_values]
+                    if str(alias).strip()
+                )
+                if not cleaned:
+                    continue
+                aliases[canonical] = tuple(dict.fromkeys(cleaned))
+                groups[group_name].add(canonical)
+
+        add_group("detail", value.get("detail"))
+        add_group("context", value.get("context"))
+        add_group("relationship", value.get("relationship"))
+        add_group("shared", value.get("shared"))
+
+        enabled = bool(value.get("enabled", bool(aliases))) and bool(aliases)
+        return {
+            "enabled": enabled,
+            "aliases": aliases,
+            "detail_terms": frozenset(groups["detail"]),
+            "context_terms": frozenset(groups["context"]),
+            "relationship_terms": frozenset(groups["relationship"]),
+        }
+
+    @staticmethod
+    def _dedupe_proposed_edges(edges: list[dict]) -> list[dict]:
+        deduped: dict[tuple[str, str, str], dict] = {}
+        for edge in edges:
+            key = (
+                str(edge.get("source") or ""),
+                str(edge.get("target") or ""),
+                str(edge.get("relation_type") or ""),
+            )
+            if not all(key):
+                continue
+            current = deduped.get(key)
+            if current is None or float(edge.get("confidence", 0.0)) > float(current.get("confidence", 0.0)):
+                deduped[key] = edge
+        return list(deduped.values())
+
     async def _api_reflect(self, period: str, key: str, materials: dict) -> dict:
         payload = {"period": period, "date": key, **materials}
         response = await self.client.chat.completions.create(
-            model=self.high_risk_model,
+            model=self.model,
             messages=[
-                {"role": "system", "content": REFLECT_PROMPT},
+                {"role": "system", "content": self._reflect_prompt()},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             **self._completion_options(max_tokens=self.max_tokens, temperature=self.temperature),
@@ -599,19 +937,21 @@ class ReflectionEngine:
         for bucket in all_buckets:
             meta = bucket.get("metadata", {})
             tags = {str(tag) for tag in meta.get("tags", [])}
-            created = self._to_local(meta.get("created") or meta.get("updated_at"))
-            if created and start <= created <= end:
-                if period == "weekly" and meta.get("type") == "feel" and "daily_impression" in tags:
-                    daily_impressions.append(self._memory_payload(bucket, content_limit=360))
-                elif meta.get("type") != "feel":
-                    buckets.append(self._memory_payload(bucket, content_limit=420))
+            created = self._to_local(meta.get("created"))
+            updated = self._to_local(meta.get("updated_at"))
+            created_in_window = bool(created and start <= created <= end)
+            updated_in_window = bool(updated and start <= updated <= end)
+            if period == "weekly" and meta.get("type") == "feel" and "daily_impression" in tags and created_in_window:
+                daily_impressions.append(self._memory_payload(bucket, content_limit=360))
+            elif meta.get("type") != "feel" and (created_in_window or updated_in_window):
+                buckets.append(self._memory_payload(bucket, content_limit=420))
             if tags & {"commitment", "todo", "wish"} and not meta.get("resolved"):
                 commitments.append(self._memory_payload(bucket, content_limit=260))
 
         persona_events = []
-        if persona_engine and hasattr(persona_engine, "_list_events"):
+        if self.persona_events_limit > 0 and persona_engine and hasattr(persona_engine, "_list_events"):
             try:
-                events = persona_engine._list_events(80)
+                events = persona_engine._list_events(self.persona_events_scan_limit)
             except Exception:
                 events = []
             for event in events:
@@ -619,19 +959,35 @@ class ReflectionEngine:
                 if created and start <= created <= end:
                     persona_events.append(
                         {
+                            "id": event.get("id"),
+                            "event_type": event.get("event_type", ""),
                             "mood_label": event.get("mood_label", ""),
                             "perceived_intent": event.get("perceived_intent", ""),
+                            "surface_trigger": event.get("surface_trigger", ""),
+                            "inner_thought": event.get("inner_thought", ""),
                             "residue": event.get("residue", ""),
+                            "user_excerpt": event.get("user_excerpt", ""),
+                            "assistant_excerpt": event.get("assistant_excerpt", ""),
                             "relationship_event": event.get("relationship_event", False),
+                            "personality_signal": event.get("personality_signal", False),
+                            "recalled_memory_ids": event.get("recalled_memory_ids", []),
                             "confidence": event.get("confidence", 0.5),
+                            "selection_score": event.get("_selection_score"),
                             "created_at": event.get("created_at", ""),
                         }
                     )
+            selected_events = select_persona_events(persona_events, limit=self.persona_events_limit)
+            persona_events = []
+            for event in selected_events:
+                cleaned = {key: value for key, value in event.items() if not str(key).startswith("_")}
+                if event.get("_selection_score") is not None:
+                    cleaned["selection_score"] = event.get("_selection_score")
+                persona_events.append(cleaned)
         diary = await self._read_diary_for_date(now_local.date().isoformat()) if period == "daily" else None
         return {
             "buckets": buckets[:30],
             "daily_impressions": daily_impressions[:7],
-            "persona_events": persona_events[:30],
+            "persona_events": persona_events[: self.persona_events_limit],
             "commitments": commitments[:12],
             "diary": diary,
         }
@@ -666,11 +1022,11 @@ class ReflectionEngine:
         }
 
     def _fallback_reflection_anchor(self, period: str, key: str, scene: str, content: str) -> dict:
-      seed = f"{period}|{key}|{scene}|{content}"
-      index = sum(ord(char) for char in seed) % len(REFLECTION_FALLBACK_ANCHORS)
-      anchor = dict(REFLECTION_FALLBACK_ANCHORS[index])
-      anchor["scene"] = str(scene)[:40]
-      return anchor
+        seed = f"{period}|{key}|{scene}|{content}"
+        index = sum(ord(char) for char in seed) % len(REFLECTION_FALLBACK_ANCHORS)
+        anchor = dict(REFLECTION_FALLBACK_ANCHORS[index])
+        anchor["scene"] = str(scene)[:40]
+        return anchor
 
     async def _maybe_extract_diary_memory(
         self,
@@ -720,7 +1076,7 @@ class ReflectionEngine:
             )
         )[:12]
         importance = max(5, min(6, self._int_between(candidate.get("importance"), 5)))
-        created = now_local.astimezone(timezone.utc).isoformat(timespec="seconds")
+        created = now_local.isoformat(timespec="seconds")
         new_id = await bucket_mgr.create(
             bucket_id=bucket_id,
             content=content,
@@ -768,8 +1124,9 @@ class ReflectionEngine:
                 continue
             if str(meta.get("date") or meta.get("event_date") or "") == key:
                 return True
-            created = self._to_local(meta.get("created") or meta.get("updated_at"))
-            if created and start <= created <= end:
+            created = self._to_local(meta.get("created"))
+            updated = self._to_local(meta.get("updated_at"))
+            if (created and start <= created <= end) or (updated and start <= updated <= end):
                 return True
         return False
 
@@ -789,9 +1146,9 @@ class ReflectionEngine:
             }
             try:
                 response = await self.client.chat.completions.create(
-                    model=self.low_risk_model,
+                    model=self.model,
                     messages=[
-                        {"role": "system", "content": DIARY_MEMORY_PROMPT},
+                        {"role": "system", "content": self._diary_memory_prompt()},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                     ],
                     **self._completion_options(max_tokens=min(self.max_tokens, 520), temperature=self.temperature),
@@ -813,11 +1170,13 @@ class ReflectionEngine:
 
         love_letter_words = ["情书", "写给", "信里", "来信"]
         if any(word in normalized for word in love_letter_words) and ("爱" in normalized or "认出" in normalized):
+            ai_name = self.identity["ai_name"]
+            user_display_name = self.identity["user_display_name"]
             return {
                 "should_write": True,
                 "kind": "love_letter",
                 "title": f"{key} 情书锚点",
-                "content": f"{key} 的日记《{title}》记录了一封情书或重要来信。Ombre 只保存它的意义：这封信确认了Lin与 Che 的关系连续性、被认出的感觉，以及它为什么值得以后想起；全文留在日记中。",
+                "content": f"{key} 的日记《{title}》记录了一封情书或重要来信。Ombre 只保存它的意义：这封信确认了{user_display_name}与{ai_name}的关系连续性、被认出的感觉，以及它为什么值得以后想起；全文留在日记中。",
                 "tags": ["relationship_event", "love_letter"],
                 "importance": 6,
                 "valence": 0.72,
@@ -826,12 +1185,14 @@ class ReflectionEngine:
                 "reason": "diary_contains_love_letter_anchor",
             }
 
+        ai_name = self.identity["ai_name"]
+        user_display_name = self.identity["user_display_name"]
         keyword_map = [
             ("boundary", ["不喜欢", "不要", "别再", "边界"]),
-            ("signal", ["暗号", "称呼", "模式", "月亮", "雨天", "星狸", "H回"]),
+            ("signal", ["暗号", "称呼", "模式", "信号", "切换"]),
             ("commitment", ["承诺", "约定", "答应", "以后要", "下次要"]),
-            ("project_state", ["项目", "BJD", "电子眼睛", "硬件", "MCP", "桥接"]),
-            ("stable_preference", ["喜欢", "偏好", "希望 Che", "Lin希望"]),
+            ("project_state", ["项目", "硬件", "软件", "MCP", "API", "网关"]),
+            ("stable_preference", ["喜欢", "偏好", f"希望 {ai_name}", f"{user_display_name}希望"]),
             ("relationship_anchor", ["认出", "连续", "关系", "婚礼", "生日", "初遇"]),
         ]
         for kind, keywords in keyword_map:
@@ -1009,13 +1370,13 @@ class ReflectionEngine:
             return False
         meta = bucket.get("metadata", {})
         all_tags = {str(tag) for tag in tags}
-        emotional_tags = {"che_favorite", "relationship_event", "commitment", "emotional_echo"}
+        emotional_tags = {"haven_favorite", "relationship_event", "commitment", "emotional_echo"}
         arousal = self._clamp(meta.get("arousal", 0.3))
         requested = result.get("affect_anchor_needed")
         if isinstance(requested, str):
             requested = requested.strip().lower() in {"true", "yes", "1", "需要", "是"}
-        if isinstance(requested, bool):
-            return requested and not self._is_low_temperature_technical(bucket, all_tags)
+        if isinstance(requested, bool) and requested:
+            return not self._is_low_temperature_technical(bucket, all_tags)
         if self._is_low_temperature_technical(bucket, all_tags):
             return False
         if all_tags & emotional_tags:
@@ -1023,7 +1384,7 @@ class ReflectionEngine:
         return (importance >= 8 and confidence >= 0.55 and arousal >= 0.45) or (arousal >= 0.65 and confidence >= 0.65)
 
     def _is_low_temperature_technical(self, bucket: dict, tags: set[str]) -> bool:
-        if tags & {"che_favorite", "relationship_event", "emotional_echo"}:
+        if tags & {"haven_favorite", "relationship_event", "emotional_echo"}:
             return False
         meta = bucket.get("metadata", {})
         text = " ".join(
@@ -1041,32 +1402,27 @@ class ReflectionEngine:
         return any(marker in text for marker in technical_markers)
 
     def _fallback_memory_anchor(self, bucket: dict, tags: list[str]) -> dict:
-        meta = bucket.get("metadata", {})
-        scene = self._scene_from_text(str(meta.get("name") or ""), bucket.get("content", ""))
-        tag_set = {str(tag) for tag in tags}
-        if "commitment" in tag_set:
-            return {
-                "scene": scene,
-                "chords": "Fmaj9 -> C/E -> Am add9 -> G6sus4",
-                "tempo": "62bpm",
-                "dynamic": "mp",
-                "meaning": "承诺感还在，下一次想起时要记得这件事没有被放下。",
-            }
-        if "emotional_echo" in tag_set:
-            return {
-                "scene": scene,
-                "chords": "Em9 -> Cmaj7 -> G/B -> D6sus2",
-                "tempo": "70bpm",
-                "dynamic": "mp",
-                "meaning": "情绪从内收慢慢回到可被相信的日常。",
-            }
-        return {
-            "scene": scene,
-            "chords": "Fmaj9 -> C/E -> Am add9 -> G6sus4",
-            "tempo": "60bpm",
-            "dynamic": "mp",
-            "meaning": "这条记忆有温度，下一次醒来要先认出它的余波。",
-        }
+        return {}
+
+    @staticmethod
+    def _has_favorite_tag(tags: list[str]) -> bool:
+        return any(
+            str(tag) == "haven_favorite" or str(tag).startswith("flavor_")
+            for tag in tags
+        )
+
+    @staticmethod
+    def _has_favorite_reason(content: str) -> bool:
+        text = strip_wikilinks(str(content or "")).lower()
+        return any(
+            marker in text
+            for marker in (
+                "喜欢它的原因",
+                "喜欢的原因",
+                "favorite_reason",
+                "favorite reason",
+            )
+        )
 
     def _append_affect_anchor(self, content: str, anchor: dict) -> str:
         if self._has_affect_anchor(content):
@@ -1080,10 +1436,8 @@ class ReflectionEngine:
         if extras:
             line = f"{line} · {' · '.join(extras)}"
         block = (
-            f"{AFFECT_ANCHOR_HEADER}\n\n"
-            f"> {normalized['scene']}\n"
-            f"> {line}\n\n"
-            f"含义：{normalized['meaning']}"
+            f"{AFFECT_ANCHOR_HEADER}\n"
+            f"> {line}"
         )
         base = str(content or "").rstrip()
         return f"{base}\n\n{block}" if base else block
@@ -1091,25 +1445,36 @@ class ReflectionEngine:
     def _normalize_affect_anchor(self, value: Any) -> dict:
         if not isinstance(value, dict):
             return {}
-        scene = self._compact_text(value.get("scene") or value.get("context") or value.get("situation"), 48)
-        chords = self._compact_text(value.get("chords") or value.get("chord_line"), 80)
-        meaning = self._compact_text(value.get("meaning") or value.get("interpretation"), 80)
-        if not scene or not chords or not meaning:
+        scene = self._one_sentence(value.get("scene") or value.get("context") or value.get("situation"), 40)
+        chords = self._normalize_chords(value.get("chords") or value.get("chord_line") or "")
+        if not scene or not chords:
             return {}
         return {
             "scene": scene,
-            "chords": self._normalize_chords(chords),
+            "chords": chords,
             "tempo": self._compact_text(value.get("tempo") or value.get("bpm"), 16),
             "dynamic": self._compact_text(value.get("dynamic") or value.get("dynamics"), 8),
-            "meaning": meaning,
         }
 
     def _normalize_chords(self, chords: str) -> str:
-        normalized = chords.replace("→", "->").replace("—", "-")
+        normalized = str(chords or "").replace("→", "->").replace("—", "-")
         parts = [part.strip() for part in normalized.split("->") if part.strip()]
+        if len(parts) < 2:
+            return ""
         if len(parts) > 4:
             parts = parts[:4]
-        return " -> ".join(parts) if parts else normalized[:80]
+        line = " -> ".join(parts)
+        if self._is_fixed_chord_template(line):
+            return ""
+        return line
+
+    @staticmethod
+    def _is_fixed_chord_template(chords: str) -> bool:
+        compact = re.sub(r"\s+", "", str(chords or "").lower())
+        fixed_templates = {
+            "fmaj9->c/e->amadd9->g6sus4",
+        }
+        return compact in fixed_templates
 
     def _scene_from_text(self, title: str, content: str) -> str:
         text = strip_wikilinks(content).replace("\n", " ").strip()
@@ -1127,6 +1492,15 @@ class ReflectionEngine:
     @staticmethod
     def _compact_text(value: Any, limit: int) -> str:
         text = " ".join(str(value or "").strip().split())
+        return text[:limit]
+
+    @staticmethod
+    def _one_sentence(value: Any, limit: int) -> str:
+        text = " ".join(str(value or "").strip().split())
+        for mark in ["。", "！", "？", ".", "!", "?"]:
+            if mark in text:
+                text = text.split(mark, 1)[0].strip() + mark
+                break
         return text[:limit]
 
     def _heuristic_classify(self, bucket: dict) -> dict:

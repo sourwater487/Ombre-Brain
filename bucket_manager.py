@@ -40,14 +40,7 @@ import frontmatter
 import jieba
 from rapidfuzz import fuzz
 
-from utils import (
-    generate_bucket_id,
-    now_iso,
-    safe_path,
-    sanitize_name,
-    strip_affect_anchor,
-    strip_wikilinks,
-)
+from utils import generate_bucket_id, sanitize_name, safe_path, now_iso, strip_affect_anchor, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.bucket")
 
@@ -85,7 +78,7 @@ class BucketManager:
         self.wikilink_stopwords = {
             "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
             "都", "一个", "上", "也", "很", "到", "说", "要", "去",
-            "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她",
+            "你", "会", "着", "没有", "看", "好", "自己", "这",
             "我们", "你们", "他们", "然后", "今天", "昨天", "明天", "一下",
             "the", "and", "for", "are", "but", "not", "you", "all", "can",
             "had", "her", "was", "one", "our", "out", "has", "have", "with",
@@ -337,6 +330,26 @@ class BucketManager:
             post["comments"] = kwargs["comments"] if isinstance(kwargs["comments"], list) else []
         if "comment_count" in kwargs:
             post["comment_count"] = max(0, int(kwargs["comment_count"]))
+        if "active" in kwargs:
+            post["active"] = bool(kwargs["active"])
+        if "deprecated" in kwargs:
+            post["deprecated"] = bool(kwargs["deprecated"])
+        if "profile_kind" in kwargs:
+            post["profile_kind"] = str(kwargs["profile_kind"])
+        if "subject" in kwargs:
+            post["subject"] = str(kwargs["subject"])
+        if "predicate" in kwargs:
+            post["predicate"] = str(kwargs["predicate"])
+        if "object" in kwargs:
+            post["object"] = str(kwargs["object"])
+        if "evidence" in kwargs:
+            post["evidence"] = kwargs["evidence"] if isinstance(kwargs["evidence"], list) else []
+        if "source_bucket_ids" in kwargs:
+            post["source_bucket_ids"] = kwargs["source_bucket_ids"] if isinstance(kwargs["source_bucket_ids"], list) else []
+        if "source_persona_event_ids" in kwargs:
+            post["source_persona_event_ids"] = (
+                kwargs["source_persona_event_ids"] if isinstance(kwargs["source_persona_event_ids"], list) else []
+            )
 
         # --- Auto-refresh content update time and activation time ---
         # --- 自动刷新内容更新时间与激活时间 ---
@@ -775,9 +788,7 @@ class BucketManager:
             )
             * 2
         )
-        searchable_content = strip_affect_anchor(
-            strip_wikilinks(str(bucket.get("content", "")))
-        )[:1000]
+        searchable_content = strip_affect_anchor(strip_wikilinks(str(bucket.get("content", ""))))[:1000]
         content_score = fuzz.partial_ratio(query, searchable_content) * self.content_weight
 
         return (name_score + domain_score + tag_score + content_score) / (100 * (3 + 2.5 + 2 + self.content_weight))
@@ -987,15 +998,30 @@ class BucketManager:
         解析 Markdown 文件，返回桶的结构化数据。
         """
         try:
+            raw = Path(file_path).read_text(encoding="utf-8")
             post = frontmatter.load(file_path)
             return {
                 "id": post.get("id", Path(file_path).stem),
                 "metadata": dict(post.metadata),
                 "content": post.content,
                 "path": file_path,
+                "content_start_line": _markdown_body_start_line(raw),
             }
         except Exception as e:
             logger.warning(
                 f"Failed to load bucket file / 加载桶文件失败: {file_path}: {e}"
             )
             return None
+
+
+def _markdown_body_start_line(text: str) -> int:
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines or lines[0].strip() != "---":
+        return 1
+    for index, line in enumerate(lines[1:], start=2):
+        if line.strip() == "---":
+            body_start = index + 1
+            while body_start <= len(lines) and not lines[body_start - 1].strip():
+                body_start += 1
+            return max(1, body_start)
+    return 1

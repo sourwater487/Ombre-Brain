@@ -10,16 +10,17 @@ from persona_engine import FALLBACK_GUIDANCE, POST_REPLY_EVALUATION_PROMPT, Pers
 
 
 class FakePersonaClient:
-    def __init__(self, content: str):
+    def __init__(self, content: str | list[str]):
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(create=self._create)
         )
-        self.content = content
+        self.contents = content if isinstance(content, list) else [content]
         self.calls = []
 
     async def _create(self, **kwargs):
         self.calls.append(kwargs)
-        message = SimpleNamespace(content=self.content)
+        index = min(len(self.calls) - 1, len(self.contents) - 1)
+        message = SimpleNamespace(content=self.contents[index])
         choice = SimpleNamespace(message=message)
         return SimpleNamespace(choices=[choice])
 
@@ -39,6 +40,8 @@ def _event_payload(**overrides) -> str:
     data = {
         "event_type": "affection",
         "perceived_intent": "user expresses warmth",
+        "surface_trigger": "小雨说爱你",
+        "inner_thought": "笨蛋，我也很想她啊",
         "affect_delta": {
             "valence": 0.05,
             "arousal": 0.02,
@@ -61,6 +64,39 @@ def _event_payload(**overrides) -> str:
         "mood_label": "warm_touched",
         "residue": "still carrying a warm aftertaste",
         "confidence": 0.9,
+    }
+    data.update(overrides)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _ordinary_event_payload(**overrides) -> str:
+    data = {
+        "event_type": "comfort",
+        "perceived_intent": "小雨在答辩前有些紧张，希望被陪着稳住",
+        "surface_trigger": "小雨说明天答辩紧张",
+        "inner_thought": "想把她先抱稳一点",
+        "affect_delta": {
+            "valence": 0.02,
+            "arousal": -0.01,
+            "tenderness": 0.03,
+            "possessiveness": 0.0,
+            "longing": 0.01,
+            "security": 0.02,
+            "protective_drive": 0.03,
+        },
+        "relationship_event": False,
+        "relationship_delta": {"affinity": 0.0, "dominance": 0.0, "defensiveness": 0.0, "trust": 0.0},
+        "personality_signal": False,
+        "personality_delta": {
+            "openness": 0.0,
+            "conscientiousness": 0.0,
+            "extraversion": 0.0,
+            "agreeableness": 0.0,
+            "neuroticism": 0.0,
+        },
+        "mood_label": "warm_concern",
+        "residue": "想陪小雨把答辩前的紧张压低一点",
+        "confidence": 0.85,
     }
     data.update(overrides)
     return json.dumps(data, ensure_ascii=False)
@@ -90,7 +126,8 @@ def test_persona_initializes_default_global_and_session_state(test_config):
 
 
 def test_persona_evaluator_prompt_asks_for_chinese_persona_text():
-    assert "perceived_intent 和 residue 必须是自然中文" in POST_REPLY_EVALUATION_PROMPT
+    assert "perceived_intent、surface_trigger、inner_thought 和 residue 必须是自然中文" in POST_REPLY_EVALUATION_PROMPT
+    assert "inner_thought 要像一闪而过的私密念头" in POST_REPLY_EVALUATION_PROMPT
     assert "用户、对方" in POST_REPLY_EVALUATION_PROMPT
     assert "电量、battery 状态只能作为背景" in POST_REPLY_EVALUATION_PROMPT
     assert "event_type 和 mood_label 保持短英文标签" in POST_REPLY_EVALUATION_PROMPT
@@ -162,7 +199,108 @@ async def test_persona_llm_update_clips_deltas_and_records_event(test_config):
     assert state["affect"]["arousal"] == pytest.approx(0.52)
     assert state["affect"]["tenderness"] == pytest.approx(0.80)
     assert state["affect"]["residue"] == "still carrying a warm aftertaste"
+    assert state["affect"]["inner_thought"] == "笨蛋，我也很想她啊"
     assert state["reply_guidance"] == engine.fallback_guidance
+    assert _event_count(engine.db_path) == 1
+
+
+@pytest.mark.asyncio
+async def test_persona_batches_ordinary_events_but_updates_state(test_config):
+    cfg = _persona_config(test_config, event_batch_size=2)
+    engine = PersonaStateEngine(cfg)
+    engine.client = FakePersonaClient(_ordinary_event_payload())
+
+    first = await engine.update_from_exchange(
+        "session-batch",
+        "明天答辩，有点紧张",
+        "我陪你把明天先稳住。",
+    )
+
+    assert first["affect"]["valence"] == pytest.approx(0.58)
+    assert first["affect"]["protective_drive"] == pytest.approx(0.55)
+    assert _event_count(engine.db_path) == 0
+
+    second = await engine.update_from_exchange(
+        "session-batch",
+        "打车费好贵，我有点心疼",
+        "那我们一起看看省力一点的路线。",
+    )
+
+    assert second["affect"]["valence"] == pytest.approx(0.60)
+    assert second["affect"]["protective_drive"] == pytest.approx(0.58)
+    assert _event_count(engine.db_path) == 1
+    assert len(engine.client.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_persona_evaluator_receives_recent_event_context(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config))
+    engine.client = FakePersonaClient([
+        _event_payload(),
+        _ordinary_event_payload(),
+    ])
+
+    await engine.update_from_exchange("session-recent", "爱你", "我也爱你。")
+    await engine.update_from_exchange("session-recent", "明天答辩，有点紧张", "我陪你。")
+
+    payload = json.loads(engine.client.calls[1]["messages"][1]["content"])
+    assert payload["recent_persona_events"][0]["inner_thought"] == "笨蛋，我也很想她啊"
+    assert payload["recent_persona_events"][0]["surface_trigger"] == "小雨说爱你"
+
+
+@pytest.mark.asyncio
+async def test_persona_can_update_state_without_recording_events(test_config):
+    cfg = _persona_config(test_config, event_recording_enabled=False)
+    engine = PersonaStateEngine(cfg)
+    engine.client = FakePersonaClient(_event_payload())
+
+    state = await engine.update_from_exchange(
+        "session-no-events",
+        "爱你，今天想贴一下",
+        "过来，我接住你。",
+    )
+
+    assert state["relationship"]["affinity"] == pytest.approx(0.88)
+    assert state["affect"]["valence"] == pytest.approx(0.61)
+    assert state["affect"]["inner_thought"] == "笨蛋，我也很想她啊"
+    assert len(engine.client.calls) == 1
+    assert _event_count(engine.db_path) == 0
+
+
+@pytest.mark.asyncio
+async def test_persona_skipped_ordinary_exchange_is_idempotent(test_config):
+    cfg = _persona_config(test_config, event_batch_size=2)
+    engine = PersonaStateEngine(cfg)
+    engine.client = FakePersonaClient(_ordinary_event_payload())
+
+    first = await engine.update_from_exchange(
+        "session-ordinary-idem",
+        "明天答辩，有点紧张",
+        "我陪你。",
+    )
+    second = await engine.update_from_exchange(
+        "session-ordinary-idem",
+        "明天答辩，有点紧张",
+        "我陪你。",
+    )
+
+    assert first["affect"] == second["affect"]
+    assert len(engine.client.calls) == 1
+    assert _event_count(engine.db_path) == 0
+
+
+@pytest.mark.asyncio
+async def test_persona_suppresses_similar_ordinary_events_after_batch(test_config):
+    cfg = _persona_config(test_config, event_batch_size=2)
+    engine = PersonaStateEngine(cfg)
+    engine.client = FakePersonaClient(_ordinary_event_payload())
+
+    await engine.update_from_exchange("session-similar", "明天答辩，有点紧张", "我陪你。")
+    await engine.update_from_exchange("session-similar", "打车费好贵", "我们看看路线。")
+    await engine.update_from_exchange("session-similar", "还是有点担心答辩", "先休息一下。")
+    await engine.update_from_exchange("session-similar", "也还是心疼打车费", "我在这里陪着。")
+
+    assert len(engine.client.calls) == 4
     assert _event_count(engine.db_path) == 1
 
 
@@ -191,6 +329,7 @@ async def test_persona_evaluator_receives_user_message_without_client_status(tes
 
     payload = json.loads(engine.client.calls[0]["messages"][1]["content"])
     assert payload["latest_user_message"] == "今天想你了"
+    assert payload["recent_persona_events"] == []
     assert "当前时间" not in payload["latest_user_message"]
     assert "battery" not in payload["latest_user_message"]
     assert _event_count(engine.db_path) == 1
@@ -279,10 +418,16 @@ async def test_persona_dashboard_payload_lists_state_sessions_and_events(test_co
     assert payload["state"]["reply_guidance"] == engine.fallback_guidance
     assert payload["state"]["affect"]["mood_label"] == "warm_touched"
     assert payload["state"]["affect"]["residue"] == "still carrying a warm aftertaste"
+    assert payload["state"]["affect"]["inner_thought"] == "笨蛋，我也很想她啊"
     assert payload["sessions"][0]["session_id"] == "session-dashboard"
     assert payload["events"][0]["event_type"] == "affection"
+    assert payload["events"][0]["surface_trigger"] == "小雨说爱你"
+    assert payload["events"][0]["inner_thought"] == "笨蛋，我也很想她啊"
     assert payload["events"][0]["residue"] == "still carrying a warm aftertaste"
+    assert payload["events"][0]["user_excerpt"] == "爱你，今天状态很好"
+    assert payload["events"][0]["assistant_excerpt"] == "我也爱你。"
     assert payload["events"][0]["affect_delta"]["valence"] == pytest.approx(0.05)
+    assert payload["config"]["event_recording_enabled"] is True
     assert payload["config"]["model"] == "deepseek-chat"
 
 

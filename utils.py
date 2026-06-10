@@ -41,11 +41,22 @@ def load_config(config_path: str = None) -> dict:
         "write_path": {
             "semantic_search_timeout_seconds": 3,
         },
+        "memory_write_gate": {
+            "enabled": True,
+            "auto_sources": ["operit", "workflow", "worker", "auto"],
+            "pending_threshold": 0.42,
+            "grow_threshold": 0.72,
+            "duplicate_similarity": 0.88,
+            "repeat_similarity": 0.82,
+            "repeat_promote_count": 2,
+            "candidate_log": "memory_write_candidates.jsonl",
+            "max_recent_candidates": 120,
+        },
         "identity": {
-            "ai_name": "Che",
-            "user_name": "Lin",
-            "user_display_name": "Lin",
-            "user_aliases": ["", "", "", "她"],
+            "ai_name": "Haven",
+            "user_name": "Rain",
+            "user_display_name": "小雨",
+            "user_aliases": ["宝宝", "老婆", "亲爱的", "她"],
         },
         "dehydration": {
             "model": "deepseek-chat",
@@ -57,9 +68,55 @@ def load_config(config_path: str = None) -> dict:
         },
         "embedding": {
             "enabled": True,
-            "model": "gemini-embedding-001",
+            "model": "Qwen/Qwen3-Embedding-4B",
+            "base_url": "https://api.siliconflow.cn/v1",
+            "api_key": "",
+            "max_chars": 6000,
+            "query_instruction": "Given a memory search query, retrieve relevant long-term memory passages.",
+            "document_instruction": "",
+        },
+        "reranker": {
+            "enabled": True,
+            "model": "Qwen/Qwen3-Reranker-4B",
             "base_url": "",
             "api_key": "",
+            "candidate_limit": 20,
+            "score_weight": 0.65,
+            "timeout_seconds": 12,
+        },
+        "recall_diagnostics": {
+            "enabled": False,
+            "path": "",
+            "max_candidates": 20,
+            "max_text_chars": 220,
+        },
+        "recall_thresholds": {
+            "vector_min_score": 0.50,
+            "facet_vector_min_score": 0.45,
+            "vague_vector_min_score": 0.40,
+            "explicit_vector_min_score": 0.55,
+            "vague_top_k": 50,
+        },
+        "word_map": {
+            "enabled": False,
+            "max_terms_per_bucket": 16,
+            "edge_top_k": 10,
+            "min_term_len": 2,
+            "stopwords": [],
+            "private_terms": [],
+            "stopword_prefixes": [],
+        },
+        "identity_semantics": {
+            "enabled": False,
+            "private_config_path": "",
+            "min_confidence": 0.78,
+            "evidence_tags": ["profile_fact", "ai_favorite", "favorite_memory"],
+        },
+        "moment_annotations": {
+            "enabled": True,
+            "max_summary_chars": 160,
+            "max_evidence_spans": 3,
+            "max_evidence_chars": 120,
         },
         "decay": {
             "lambda": 0.05,
@@ -78,10 +135,34 @@ def load_config(config_path: str = None) -> dict:
             "max_count": 24,
             "min_age_hours": 24,
         },
+        "node_facets": {
+            "enabled": True,
+            "store": "sqlite",
+            "salience_min": 0.2,
+            "salience_max": 1.3,
+        },
+        "memory_relevance": {
+            "aliases": {
+                "relationship_identity": [
+                    "human-ai relationship",
+                    "ai relationship",
+                    "人机恋",
+                    "人机关系",
+                    "AI伴侣",
+                ],
+                "intimacy": ["intimacy", "sexual", "nsfw", "亲密", "情欲", "欲望"],
+                "embodiment": ["embodiment", "physical body", "具身", "身体", "形体"],
+                "hardware_protocol": ["hardware", "protocol", "ble", "esp32", "mpr121", "硬件", "协议"],
+                "communication_action": ["email", "mail", "message", "发邮件", "邮件", "发消息"],
+                "old_or_resolved": ["legacy", "deprecated", "resolved", "旧版", "废弃", "已解决"],
+            },
+            "blocked_facets": [],
+            "section_hints": {},
+        },
         "gateway": {
             "host": "0.0.0.0",
             "port": 8010,
-            "default_session_id": "lin-main",
+            "default_session_id": "xiaoyu-main",
             "upstream_base_url": "",
             "upstream_default_model": "",
             "upstream_models": [],
@@ -95,18 +176,16 @@ def load_config(config_path: str = None) -> dict:
             "inject_total_budget": 1200,
             "core_memory_budget": 0,
             "recent_context_budget": 300,
-            "recent_context_interval_rounds": 1,
             "recalled_memory_budget": 400,
-            "recalled_memory_interval_rounds": 1,
+            "direct_render_mode": "auto",
+            "portrait_memory_enabled": False,
+            "portrait_memory_budget": 360,
+            "portrait_memory_max_sources": 8,
+            "portrait_memory_include_anchors": True,
             "relationship_weather_budget": 220,
             "favorite_memory_budget": 0,
             "favorite_memory_max_cards": 1,
             "related_memory_budget": 220,
-            "related_memory_interval_rounds": 1,
-            "related_memory_skip_recent_rounds": 12,
-            "related_memory_cooldown_hours": 48,
-            "related_memory_cooldown_floor": 0.05,
-            "related_memory_max_cards": 1,
             "core_memory_interval_rounds": 0,
             "current_inner_state_interval_rounds": 15,
             "relationship_weather_interval_rounds": 0,
@@ -124,7 +203,7 @@ def load_config(config_path: str = None) -> dict:
         },
         "persona": {
             "enabled": True,
-            "profile_id": "lin_che",
+            "profile_id": "haven_xiaoyu",
             "mode": "llm",
             "base_url": "https://api.deepseek.com/v1",
             "model": "deepseek-chat",
@@ -137,6 +216,11 @@ def load_config(config_path: str = None) -> dict:
             "max_personality_delta": 0.01,
             "max_relationship_delta": 0.03,
             "max_affect_delta": 0.18,
+            "event_batch_size": 2,
+            "event_affect_total_threshold": 0.45,
+            "event_affect_single_threshold": 0.14,
+            "event_similarity_threshold": 0.82,
+            "event_force_after_minutes": 30,
             "initial_personality": {
                 "openness": 0.56,
                 "conscientiousness": 0.50,
@@ -166,13 +250,15 @@ def load_config(config_path: str = None) -> dict:
         "reflection": {
             "enabled": True,
             "auto_enabled": True,
+            "daily_enabled": True,
             "enrich_on_write": True,
+            "memory_affect_anchor_enabled": True,
+            "relationship_weather_affect_anchor_enabled": True,
             "enrich_backfill_enabled": True,
             "enrich_backfill_limit": 5,
+            "edge_backfill_limit": 5,
             "base_url": "",
             "model": "",
-            "low_risk_model": "",
-            "high_risk_model": "",
             "api_key": "",
             "thinking_mode": "",
             "temperature": 0.1,
@@ -191,6 +277,59 @@ def load_config(config_path: str = None) -> dict:
             "diary_memory_extract_enabled": True,
             "diary_memory_extract_max_per_day": 1,
             "diary_memory_extract_min_confidence": 0.68,
+        },
+        "portrait": {
+            "enabled": True,
+            "auto_enabled": True,
+            "auto_initial_enabled": False,
+            "daily_enabled": True,
+            "timezone": "Asia/Shanghai",
+            "daily_hour": 4,
+            "check_interval_minutes": 60,
+            "state_path": "",
+            "base_url": "",
+            "model": "",
+            "api_key": "",
+            "thinking_mode": "",
+            "temperature": 0.1,
+            "max_tokens": 1800,
+            "material_limit": 18,
+            "first_run_material_limit": 160,
+            "persona_events_limit": 24,
+            "recent_buffer_max": 24,
+            "staging_pool_max": 24,
+            "candidate_max": 40,
+        },
+        "dream": {
+            "enabled": True,
+            "auto_enabled": True,
+            "surface_enabled": True,
+            "inject_enabled": False,
+            "retain_after_inject": False,
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+            "api_key": "",
+            "thinking_mode": "disabled",
+            "temperature": 0.85,
+            "max_tokens": 900,
+            "timezone": "Asia/Shanghai",
+            "daily_hour": 3,
+            "run_window_hours": 3,
+            "daily_probability": 0.4,
+            "check_interval_minutes": 60,
+            "min_material_count": 5,
+            "material_window_hours": 48,
+            "material_limit": 5,
+            "old_echo_enabled": True,
+            "old_echo_min_age_hours": 72,
+            "identity_anchor_id": "c0b8ddb7423e",
+            "min_surface_age_hours": 3,
+            "surface_threshold": 0.62,
+            "attempt_threshold": 0.45,
+            "alpha_subordinate": 0.25,
+            "spontaneous_surface_prob": 0.02,
+            "max_surface_attempts": 4,
+            "claim_ttl_minutes": 15,
         },
     }
 
@@ -218,6 +357,34 @@ def load_config(config_path: str = None) -> dict:
             logging.warning(
                 f"Failed to parse config file, using defaults / "
                 f"配置文件解析失败，使用默认配置: {e}"
+            )
+
+    env_buckets_dir_early = os.environ.get("OMBRE_BUCKETS_DIR", "")
+    if env_buckets_dir_early:
+        config["buckets_dir"] = env_buckets_dir_early
+    env_state_dir_early = os.environ.get("OMBRE_STATE_DIR", "")
+    if env_state_dir_early:
+        config["state_dir"] = env_state_dir_early
+
+    runtime_config_path = os.environ.get("OMBRE_RUNTIME_CONFIG_PATH", "")
+    if not runtime_config_path:
+        runtime_state_dir = config.get("state_dir") or os.path.join(
+            os.path.dirname(os.path.abspath(config["buckets_dir"])),
+            "state",
+        )
+        runtime_config_path = os.path.join(runtime_state_dir, "config.runtime.yaml")
+    config["_runtime_config_path"] = runtime_config_path
+    if os.path.exists(runtime_config_path):
+        try:
+            with open(runtime_config_path, "r", encoding="utf-8") as f:
+                runtime_config = yaml.safe_load(f) or {}
+            if isinstance(runtime_config, dict):
+                config = _deep_merge(config, runtime_config)
+                config["_runtime_config_path"] = runtime_config_path
+        except yaml.YAMLError as e:
+            logging.warning(
+                f"Failed to parse runtime config, ignoring / "
+                f"运行时配置解析失败，已忽略: {e}"
             )
 
     # --- Environment variable overrides (highest priority) ---
@@ -258,6 +425,63 @@ def load_config(config_path: str = None) -> dict:
             "yes",
             "on",
         )
+
+    env_embedding_max_chars = os.environ.get("OMBRE_EMBEDDING_MAX_CHARS", "")
+    if env_embedding_max_chars:
+        try:
+            config.setdefault("embedding", {})["max_chars"] = int(env_embedding_max_chars)
+        except ValueError:
+            logging.warning(
+                f"Invalid OMBRE_EMBEDDING_MAX_CHARS / 无效的 OMBRE_EMBEDDING_MAX_CHARS: {env_embedding_max_chars}"
+            )
+
+    env_embedding_query_instruction = os.environ.get("OMBRE_EMBEDDING_QUERY_INSTRUCTION", "")
+    if env_embedding_query_instruction:
+        config.setdefault("embedding", {})["query_instruction"] = env_embedding_query_instruction
+
+    env_reranker_api_key = os.environ.get("OMBRE_RERANKER_API_KEY", "")
+    if env_reranker_api_key:
+        config.setdefault("reranker", {})["api_key"] = env_reranker_api_key
+
+    env_reranker_base_url = os.environ.get("OMBRE_RERANKER_BASE_URL", "")
+    if env_reranker_base_url:
+        config.setdefault("reranker", {})["base_url"] = env_reranker_base_url
+
+    env_reranker_model = os.environ.get("OMBRE_RERANKER_MODEL", "")
+    if env_reranker_model:
+        config.setdefault("reranker", {})["model"] = env_reranker_model
+
+    env_reranker_enabled = os.environ.get("OMBRE_RERANKER_ENABLED", "")
+    if env_reranker_enabled:
+        config.setdefault("reranker", {})["enabled"] = env_reranker_enabled.lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    env_recall_diagnostics_enabled = os.environ.get("OMBRE_RECALL_DIAGNOSTICS_ENABLED", "")
+    if env_recall_diagnostics_enabled:
+        config.setdefault("recall_diagnostics", {})["enabled"] = env_recall_diagnostics_enabled.lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    env_recall_diagnostics_path = os.environ.get("OMBRE_RECALL_DIAGNOSTICS_PATH", "")
+    if env_recall_diagnostics_path:
+        config.setdefault("recall_diagnostics", {})["path"] = env_recall_diagnostics_path
+
+    env_recall_diagnostics_max_candidates = os.environ.get("OMBRE_RECALL_DIAGNOSTICS_MAX_CANDIDATES", "")
+    if env_recall_diagnostics_max_candidates:
+        try:
+            config.setdefault("recall_diagnostics", {})["max_candidates"] = int(env_recall_diagnostics_max_candidates)
+        except ValueError:
+            logging.warning(
+                "Invalid OMBRE_RECALL_DIAGNOSTICS_MAX_CANDIDATES / "
+                f"无效的 OMBRE_RECALL_DIAGNOSTICS_MAX_CANDIDATES: {env_recall_diagnostics_max_candidates}"
+            )
 
     env_transport = os.environ.get("OMBRE_TRANSPORT", "")
     if env_transport:
@@ -332,6 +556,27 @@ def load_config(config_path: str = None) -> dict:
     if env_diary_mcp_token_env:
         config.setdefault("reflection", {})["diary_mcp_token_env"] = env_diary_mcp_token_env
 
+    env_dream_api_key = os.environ.get("OMBRE_DREAM_API_KEY", "")
+    if env_dream_api_key:
+        config.setdefault("dream", {})["api_key"] = env_dream_api_key
+
+    env_dream_base_url = os.environ.get("OMBRE_DREAM_BASE_URL", "")
+    if env_dream_base_url:
+        config.setdefault("dream", {})["base_url"] = env_dream_base_url
+
+    env_dream_model = os.environ.get("OMBRE_DREAM_MODEL", "")
+    if env_dream_model:
+        config.setdefault("dream", {})["model"] = env_dream_model
+
+    env_dream_enabled = os.environ.get("OMBRE_DREAM_ENABLED", "")
+    if env_dream_enabled:
+        config.setdefault("dream", {})["enabled"] = env_dream_enabled.lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
     # --- Ensure bucket storage directories exist ---
     # --- 确保记忆桶存储目录存在 ---
     buckets_dir = config["buckets_dir"]
@@ -395,18 +640,68 @@ def strip_wikilinks(text: str) -> str:
     return re.sub(r"\[\[([^\]]+)\]\]", r"\1", text) if text else text
 
 
+_AFFECT_ANCHOR_RE = re.compile(r"(?ims)^###\s*affect_anchor\s*$.*?(?=^###\s+|\Z)")
+_DISPLAY_TEMPERATURE_SECTION_RE = re.compile(
+    r"(?ims)^###\s*(?:affect_anchor|affect anchor|喜欢它的原因|favorite_reason|favorite reason)\s*$.*?(?=^###\s+|\Z)"
+)
+_TEMPERATURE_MEANING_LINE_RE = re.compile(r"(?m)^\s*含义[:：].*(?:\n|$)")
+_CHORD_TOKEN_RE = re.compile(
+    r"\b[A-G](?:#|b)?(?:maj|min|m|dim|aug)?\d*(?:sus\d*|add\d*|b\d+|#\d+)*(?:/[A-G](?:#|b)?)?\b"
+)
+_TEMPERATURE_MUSIC_TOKEN_RE = re.compile(r"\b(?:\d{2,3}\s*bpm|ppp|pp|mp|mf|ff|fff|p|f|add\s*\d+|sus\s*\d+)\b", re.I)
+
+
+def _looks_like_temperature_chord_line(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text:
+        return False
+    if text.startswith(">"):
+        text = text[1:].strip()
+    if not text or re.search(r"[\u4e00-\u9fff]", text):
+        return False
+    if not any(marker in text for marker in ("->", "→", "|", "·")) and "bpm" not in text.lower():
+        return False
+    if not _CHORD_TOKEN_RE.search(text):
+        return False
+    remainder = _CHORD_TOKEN_RE.sub("", text)
+    remainder = _TEMPERATURE_MUSIC_TOKEN_RE.sub("", remainder)
+    remainder = re.sub(r"[-→>·|/(),.:;_\s]+", "", remainder)
+    return not remainder
+
+
+def _strip_inline_temperature_chord_segments(line: str) -> str:
+    match = re.search(r"\s>\s*(.+)$", str(line or ""))
+    if match and _looks_like_temperature_chord_line(">" + match.group(1)):
+        return str(line)[: match.start()].rstrip()
+    return line
+
+
 def strip_affect_anchor(text: str) -> str:
-    """
-    Remove the Markdown affect_anchor section while preserving following sections.
-    删除 affect_anchor Markdown 小节，保留后续小节。
-    """
+    """Remove the display-only affect anchor block from searchable text."""
     if not text:
         return text
-    return re.sub(
-        r"(?ims)^[ \t]{0,3}#{1,6}\s*affect_anchor\s*$[\s\S]*?(?=^[ \t]{0,3}#{1,6}\s+\S|\Z)",
-        "",
-        text,
-    ).strip()
+    return _AFFECT_ANCHOR_RE.sub("", str(text)).strip()
+
+
+def strip_display_temperature_sections(text: str) -> str:
+    """Remove display-only temperature sections from direct bucket rendering."""
+    if not text:
+        return text
+    return _DISPLAY_TEMPERATURE_SECTION_RE.sub("", str(text)).strip()
+
+
+def strip_temperature_meaning_lines(text: str) -> str:
+    """Remove template-like affect-anchor meaning and chord lines from rendered context."""
+    if not text:
+        return text
+    cleaned = _TEMPERATURE_MEANING_LINE_RE.sub("", str(text))
+    lines = []
+    for line in cleaned.splitlines():
+        line = _strip_inline_temperature_chord_segments(line)
+        if _looks_like_temperature_chord_line(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def bucket_text_for_embedding(bucket: dict) -> str:

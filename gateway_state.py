@@ -1,6 +1,8 @@
 import os
+import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 
 class GatewayStateStore:
@@ -48,6 +50,94 @@ class GatewayStateStore:
             ON injected_buckets (session_id, bucket_id, injected_at DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS injection_debug (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_injection_debug_lookup
+            ON injection_debug (session_id, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recent_context_injections (
+                session_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                injected_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, round_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recent_context_lookup
+            ON recent_context_injections (session_id, injected_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                user_text TEXT NOT NULL DEFAULT '',
+                assistant_text TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                client TEXT NOT NULL DEFAULT '',
+                route TEXT NOT NULL DEFAULT '',
+                UNIQUE(profile_id, session_id, round_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversation_turns_recent
+            ON conversation_turns (profile_id, created_at DESC, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversation_turns_session
+            ON conversation_turns (profile_id, session_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS upstream_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                route TEXT NOT NULL DEFAULT '',
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                prompt_cache_hit_tokens INTEGER,
+                prompt_cache_miss_tokens INTEGER,
+                cached_tokens INTEGER,
+                cache_read_input_tokens INTEGER,
+                cache_creation_input_tokens INTEGER,
+                usage_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_upstream_usage_lookup
+            ON upstream_usage (session_id, id DESC)
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -90,7 +180,27 @@ class GatewayStateStore:
         ).fetchone()
         conn.close()
         return int(row["current_round"]) if row else 0
-    
+
+    def get_last_success_at(self, session_id: str) -> datetime | None:
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT completed_at
+            FROM request_rounds
+            WHERE session_id = ?
+            ORDER BY round_id DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        try:
+            return datetime.fromisoformat(str(row["completed_at"]))
+        except ValueError:
+            return None
+
     def get_recent_bucket_ids(self, session_id: str, recent_rounds: int) -> set[str]:
         if recent_rounds <= 0:
             return set()
@@ -131,6 +241,352 @@ class GatewayStateStore:
         except ValueError:
             return None
 
+    def record_recent_context_injection(
+        self,
+        session_id: str,
+        round_id: int,
+        injected_at: datetime | None = None,
+    ) -> None:
+        injected_at = injected_at or datetime.now()
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO recent_context_injections
+            (session_id, round_id, injected_at)
+            VALUES (?, ?, ?)
+            """,
+            (session_id, int(round_id), injected_at.isoformat(timespec="seconds")),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_last_recent_context_at(self, session_id: str) -> datetime | None:
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT injected_at
+            FROM recent_context_injections
+            WHERE session_id = ?
+            ORDER BY injected_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        try:
+            return datetime.fromisoformat(str(row["injected_at"]))
+        except ValueError:
+            return None
+
+    def record_injection_debug(
+        self,
+        session_id: str,
+        round_id: int,
+        payload: dict[str, Any],
+        *,
+        max_entries: int = 80,
+    ) -> int:
+        created_at = datetime.now().isoformat(timespec="seconds")
+        body = json.dumps(payload, ensure_ascii=False)
+        conn = self._connect()
+        cursor = conn.execute(
+            """
+            INSERT INTO injection_debug (session_id, round_id, created_at, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (session_id, int(round_id), created_at, body),
+        )
+        debug_id = int(cursor.lastrowid or 0)
+        conn.execute(
+            """
+            DELETE FROM injection_debug
+            WHERE id NOT IN (
+                SELECT id FROM injection_debug ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (max(1, int(max_entries)),),
+        )
+        conn.commit()
+        conn.close()
+        return debug_id
+
+    def record_conversation_turn(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        round_id: int,
+        user_text: str,
+        assistant_text: str = "",
+        model: str = "",
+        client: str = "",
+        route: str = "",
+        created_at: datetime | None = None,
+        max_entries: int = 500,
+    ) -> int:
+        created_at = created_at or datetime.now(timezone.utc)
+        created_iso = created_at.isoformat(timespec="seconds")
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "default").strip() or "default"
+        conn = self._connect()
+        cursor = conn.execute(
+            """
+            INSERT OR REPLACE INTO conversation_turns
+            (profile_id, session_id, round_id, created_at, user_text, assistant_text, model, client, route)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                safe_profile_id,
+                safe_session_id,
+                int(round_id),
+                created_iso,
+                str(user_text or ""),
+                str(assistant_text or ""),
+                str(model or ""),
+                str(client or ""),
+                str(route or ""),
+            ),
+        )
+        if max_entries > 0:
+            conn.execute(
+                """
+                DELETE FROM conversation_turns
+                WHERE profile_id = ?
+                  AND id NOT IN (
+                    SELECT id FROM conversation_turns
+                    WHERE profile_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                  )
+                """,
+                (safe_profile_id, safe_profile_id, max(1, int(max_entries))),
+            )
+        conn.commit()
+        turn_id = int(cursor.lastrowid or 0)
+        conn.close()
+        return turn_id
+
+    def list_recent_conversation_turns(
+        self,
+        *,
+        profile_id: str,
+        limit: int = 10,
+        hours: float = 6.0,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(50, int(limit or 10)))
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(0.0, float(hours or 0)))
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT id, profile_id, session_id, round_id, created_at,
+                   user_text, assistant_text, model, client, route
+            FROM conversation_turns
+            WHERE profile_id = ? AND created_at >= ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (safe_profile_id, cutoff.isoformat(timespec="seconds"), safe_limit),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "id": row["id"],
+                "profile_id": row["profile_id"],
+                "session_id": row["session_id"],
+                "round_id": row["round_id"],
+                "created_at": row["created_at"],
+                "user_text": row["user_text"] or "",
+                "assistant_text": row["assistant_text"] or "",
+                "model": row["model"] or "",
+                "client": row["client"] or "",
+                "route": row["route"] or "",
+            }
+            for row in rows
+        ]
+
+    def list_injection_debug(
+        self,
+        *,
+        session_id: str = "",
+        limit: int = 20,
+        include_context: bool = True,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(100, int(limit)))
+        conn = self._connect()
+        if session_id:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, round_id, created_at, payload_json
+                FROM injection_debug
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, round_id, created_at, payload_json
+                FROM injection_debug
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        conn.close()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError:
+                payload = {"raw": row["payload_json"]}
+            if isinstance(payload, dict) and not include_context:
+                payload = dict(payload)
+                payload.pop("stable_context", None)
+                payload.pop("dynamic_context", None)
+            items.append(
+                {
+                    "id": row["id"],
+                    "session_id": row["session_id"],
+                    "round_id": row["round_id"],
+                    "created_at": row["created_at"],
+                    "payload": payload,
+                }
+            )
+        return items
+
+    def record_upstream_usage(
+        self,
+        *,
+        session_id: str,
+        round_id: int,
+        model: str,
+        route: str,
+        usage: dict[str, Any],
+        max_entries: int = 200,
+    ) -> int:
+        created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        safe_usage = dict(usage or {})
+        prompt_tokens = safe_usage.get("prompt_tokens") or safe_usage.get("input_tokens")
+        completion_tokens = safe_usage.get("completion_tokens") or safe_usage.get("output_tokens")
+        prompt_details = safe_usage.get("prompt_tokens_details")
+        cached_tokens = None
+        if isinstance(prompt_details, dict):
+            cached_tokens = prompt_details.get("cached_tokens")
+
+        conn = self._connect()
+        cursor = conn.execute(
+            """
+            INSERT INTO upstream_usage (
+                session_id, round_id, created_at, model, route,
+                prompt_tokens, completion_tokens,
+                prompt_cache_hit_tokens, prompt_cache_miss_tokens,
+                cached_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                usage_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(session_id or "default"),
+                int(round_id),
+                created_at,
+                str(model or ""),
+                str(route or ""),
+                _optional_int(prompt_tokens),
+                _optional_int(completion_tokens),
+                _optional_int(safe_usage.get("prompt_cache_hit_tokens")),
+                _optional_int(safe_usage.get("prompt_cache_miss_tokens")),
+                _optional_int(cached_tokens),
+                _optional_int(safe_usage.get("cache_read_input_tokens")),
+                _optional_int(safe_usage.get("cache_creation_input_tokens")),
+                json.dumps(safe_usage, ensure_ascii=False),
+            ),
+        )
+        usage_id = int(cursor.lastrowid or 0)
+        if max_entries > 0:
+            conn.execute(
+                """
+                DELETE FROM upstream_usage
+                WHERE id NOT IN (
+                    SELECT id FROM upstream_usage ORDER BY id DESC LIMIT ?
+                )
+                """,
+                (max(1, int(max_entries)),),
+            )
+        conn.commit()
+        conn.close()
+        return usage_id
+
+    def list_upstream_usage(
+        self,
+        *,
+        session_id: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(100, int(limit or 20)))
+        conn = self._connect()
+        if session_id:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, round_id, created_at, model, route,
+                       prompt_tokens, completion_tokens,
+                       prompt_cache_hit_tokens, prompt_cache_miss_tokens,
+                       cached_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                       usage_json
+                FROM upstream_usage
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, round_id, created_at, model, route,
+                       prompt_tokens, completion_tokens,
+                       prompt_cache_hit_tokens, prompt_cache_miss_tokens,
+                       cached_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                       usage_json
+                FROM upstream_usage
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        conn.close()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                usage = json.loads(row["usage_json"] or "{}")
+            except json.JSONDecodeError:
+                usage = {}
+            items.append(
+                {
+                    "id": row["id"],
+                    "session_id": row["session_id"],
+                    "round_id": row["round_id"],
+                    "created_at": row["created_at"],
+                    "model": row["model"] or "",
+                    "route": row["route"] or "",
+                    "prompt_tokens": row["prompt_tokens"],
+                    "completion_tokens": row["completion_tokens"],
+                    "prompt_cache_hit_tokens": row["prompt_cache_hit_tokens"],
+                    "prompt_cache_miss_tokens": row["prompt_cache_miss_tokens"],
+                    "cached_tokens": row["cached_tokens"],
+                    "cache_read_input_tokens": row["cache_read_input_tokens"],
+                    "cache_creation_input_tokens": row["cache_creation_input_tokens"],
+                    "usage": usage,
+                }
+            )
+        return items
+
     def get_cooldown_multiplier(
         self,
         session_id: str,
@@ -150,3 +606,12 @@ class GatewayStateStore:
             return 1.0
         progress = elapsed_hours / cooldown_hours
         return round(cooldown_floor + (1.0 - cooldown_floor) * progress, 4)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

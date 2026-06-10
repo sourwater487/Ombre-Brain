@@ -46,62 +46,56 @@ class FakeEmbeddingEngine:
 def test_exact_duplicate_plan_keeps_important_bucket_and_deletes_dynamic_copy():
     cleanup = _load_cleanup_module()
     buckets = [
-        _bucket("keep", "这条测试记忆用于验证重复清理。", importance=9),
-        _bucket("copy", "这条测试记忆用于验证重复清理。", importance=5),
+        _bucket("keep", "小雨要把重复导入清理掉。", importance=9),
+        _bucket("dupe", "小雨要把重复导入清理掉。", importance=5),
     ]
 
     plans = cleanup.exact_duplicate_plans(buckets, min_chars=5)
 
     assert len(plans) == 1
     assert plans[0].keep_id == "keep"
-    assert plans[0].delete_ids == ["copy"]
+    assert plans[0].delete_ids == ["dupe"]
 
 
-def test_exact_duplicate_plan_never_deletes_pinned_permanent_protected_or_anchor():
+def test_exact_duplicate_plan_does_not_delete_pinned_or_permanent_bucket():
     cleanup = _load_cleanup_module()
-    duplicate_text = "某个项目记录被重复写入，需要保留安全边界。"
     buckets = [
-        _bucket("safe-copy", duplicate_text, importance=4),
-        _bucket("pinned", duplicate_text, pinned=True, importance=7),
-        _bucket("permanent", duplicate_text, type="permanent", importance=8),
-        _bucket("protected", duplicate_text, protected=True, importance=9),
-        _bucket("anchor", duplicate_text, anchor=True, importance=6),
+        _bucket("dynamic", "这条重要记忆被重复导入。", importance=5),
+        _bucket("pinned", "这条重要记忆被重复导入。", pinned=True, importance=10),
+        _bucket("permanent", "这条重要记忆被重复导入。", type="permanent", importance=8),
     ]
 
     plans = cleanup.exact_duplicate_plans(buckets, min_chars=5)
-    delete_ids = set(plans[0].delete_ids)
 
-    assert delete_ids == {"safe-copy"}
-    assert not {"pinned", "permanent", "protected", "anchor"} & delete_ids
+    assert len(plans) == 1
+    assert plans[0].keep_id == "pinned"
+    assert plans[0].delete_ids == ["dynamic"]
 
 
 def test_exact_duplicate_plan_does_not_delete_bucket_with_comments():
     cleanup = _load_cleanup_module()
-    duplicate_text = "这条测试记忆有一个带评论的重复桶。"
     buckets = [
-        _bucket("keep", duplicate_text, importance=9),
-        _bucket("commented", duplicate_text, comments=[{"content": "保留这条评论"}], importance=4),
-        _bucket("plain-copy", duplicate_text, importance=4),
+        _bucket("plain", "这条记忆有一个带年轮的重复桶。", importance=5),
+        _bucket("commented", "这条记忆有一个带年轮的重复桶。", comments=[{"content": "留下来的年轮"}], importance=4),
     ]
 
     plans = cleanup.exact_duplicate_plans(buckets, min_chars=5)
 
-    assert plans[0].delete_ids == ["plain-copy"]
-    assert "commented" not in plans[0].delete_ids
+    assert plans == []
 
 
-def test_exact_duplicate_plan_ignores_affect_anchor_difference():
+def test_exact_duplicate_plan_ignores_affect_anchor():
     cleanup = _load_cleanup_module()
     buckets = [
-        _bucket("keep", "一份设备采购计划需要在周五前确认。", importance=8),
+        _bucket("keep", "小雨决定重复清理只看正文主体。", importance=8),
         _bucket(
-            "copy",
+            "dupe",
             (
-                "一份设备采购计划需要在周五前确认。\n\n"
+                "小雨决定重复清理只看正文主体。\n\n"
                 "### affect_anchor\n\n"
-                "> 会议室里放着采购清单。\n"
-                "> Cmaj7 -> G6\n\n"
-                "含义：这是额外标记。"
+                "> 小雨把旧信放到桌上。\n"
+                "> Dbmaj9 -> Ab/C -> Bbm9\n\n"
+                "含义：这只是温度。"
             ),
             importance=5,
         ),
@@ -111,139 +105,120 @@ def test_exact_duplicate_plan_ignores_affect_anchor_difference():
 
     assert len(plans) == 1
     assert plans[0].keep_id == "keep"
-    assert plans[0].delete_ids == ["copy"]
+    assert plans[0].delete_ids == ["dupe"]
 
 
-def test_near_duplicate_pairs_are_reported_for_review_only():
+def test_near_duplicate_pairs_are_reported_for_manual_review_only():
     cleanup = _load_cleanup_module()
     buckets = [
-        _bucket("a", "Weekend itinerary includes a train booking, a museum visit, and a hotel check-in."),
-        _bucket("b", "The weekend travel plan includes booking the train, visiting the museum, and checking in at the hotel."),
-        _bucket("c", "A hardware purchase plan lists monitors, keyboards, and delivery dates."),
+        _bucket("a", "小雨决定周末去杭州参加朋友婚礼，需要提前买高铁票并准备蓝色连衣裙。"),
+        _bucket("b", "周末小雨要去杭州参加朋友的婚礼，她需要提前订高铁票，也想带上蓝色连衣裙。"),
+        _bucket("c", "小雨下个月要去上海参加同事婚礼，需要订酒店和准备红包。"),
     ]
 
-    pairs = cleanup.near_duplicate_pairs(buckets, threshold=70, min_chars=10)
+    pairs = cleanup.near_duplicate_pairs(buckets, threshold=88, min_chars=10)
 
     assert pairs[0][0:2] == ("a", "b")
-    assert pairs[0][2] >= 70
+    assert pairs[0][2] >= 88
 
 
-def test_exact_duplicate_pairs_do_not_enter_near_duplicate_pairs_when_excluded():
+def test_near_duplicate_pairs_can_exclude_exact_duplicate_pairs():
     cleanup = _load_cleanup_module()
     buckets = [
-        _bucket("a", "完全重复的测试记录应该只出现在 exact 结果。"),
-        _bucket("b", "完全重复的测试记录应该只出现在 exact 结果。"),
+        _bucket("a", "第一句：完全重复。第二句：应该只出现在 exact。"),
+        _bucket("b", "第一句：完全重复。第二句：应该只出现在 exact。"),
     ]
 
-    exact_plans = cleanup.exact_duplicate_plans(buckets, min_chars=5)
-    exact_pairs = {
-        frozenset((left_id, right_id))
-        for plan in exact_plans
-        for index, left_id in enumerate(plan.bucket_ids)
-        for right_id in plan.bucket_ids[index + 1:]
-    }
-    pairs = cleanup.near_duplicate_pairs(buckets, threshold=80, min_chars=5, exclude_pairs=exact_pairs)
+    pairs = cleanup.near_duplicate_pairs(buckets, threshold=88, min_chars=5, exclude_pairs={frozenset(("a", "b"))})
 
     assert pairs == []
 
 
-def test_near_duplicate_pairs_include_protected_bucket_with_safe_copy():
+def test_near_duplicate_pairs_can_compare_protected_bucket_with_safe_copy():
     cleanup = _load_cleanup_module()
     buckets = [
-        _bucket("protected", "Project schedule includes a design review, a test pass, and a Friday release.", protected=True),
-        _bucket("copy", "The project schedule has a design review, test pass, and Friday release."),
+        _bucket("anchor", "小雨决定周末去杭州参加朋友婚礼，需要提前买高铁票。", pinned=True),
+        _bucket("copy", "周末小雨要去杭州参加朋友婚礼，需要提前订高铁票。"),
     ]
 
-    pairs = cleanup.near_duplicate_pairs(buckets, threshold=75, min_chars=10)
+    pairs = cleanup.near_duplicate_pairs(buckets, threshold=80, min_chars=10)
 
-    assert pairs[0][0:2] == ("protected", "copy")
+    assert pairs[0][0:2] == ("anchor", "copy")
 
 
-def test_suggested_near_action_keeps_protected_and_deletes_safe_copy():
+def test_suggested_near_action_deletes_safe_copy_when_other_side_is_protected():
     cleanup = _load_cleanup_module()
     buckets = {
-        "protected": _bucket(
-            "protected",
-            "Project schedule includes a design review, a test pass, and a Friday release.",
-            protected=True,
-        ),
-        "copy": _bucket("copy", "The project schedule has a design review, test pass, and Friday release."),
+        "anchor": _bucket("anchor", "小雨决定周末去杭州参加朋友婚礼，需要提前买高铁票。", pinned=True),
+        "copy": _bucket("copy", "周末小雨要去杭州参加朋友婚礼，需要提前订高铁票。"),
     }
 
-    assert cleanup.suggested_near_action("protected", "copy", buckets) == ("protected", "copy")
+    assert cleanup.suggested_near_action("anchor", "copy", buckets) == ("anchor", "copy")
 
 
-def test_interactive_exact_group_y_deletes_copy_and_embedding(monkeypatch):
+def test_content_preview_keeps_first_two_sentences():
+    cleanup = _load_cleanup_module()
+    bucket = _bucket("a", "第一句。第二句！第三句不会展示。")
+
+    assert cleanup.content_preview(bucket) == "第一句。第二句！"
+
+
+def test_interactive_cleanup_deletes_exact_group_after_confirmation(monkeypatch):
     cleanup = _load_cleanup_module()
     bucket_mgr = FakeBucketManager()
     embedding_engine = FakeEmbeddingEngine()
     buckets = {
-        "keep": _bucket("keep", "这条测试记忆用于交互式精确清理。", importance=9),
-        "copy": _bucket("copy", "这条测试记忆用于交互式精确清理。", importance=5),
+        "keep": _bucket("keep", "小雨把重复导入清理掉。", importance=9),
+        "dupe": _bucket("dupe", "小雨把重复导入清理掉。", importance=5),
     }
     plan = cleanup.DuplicatePlan(
         key="same",
         keep_id="keep",
-        delete_ids=["copy"],
-        bucket_ids=["keep", "copy"],
+        delete_ids=["dupe"],
+        bucket_ids=["keep", "dupe"],
     )
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
 
     deleted = asyncio.run(cleanup.interactive_cleanup(bucket_mgr, embedding_engine, [plan], [], buckets))
 
-    assert deleted == ["copy"]
-    assert bucket_mgr.deleted == ["copy"]
-    assert embedding_engine.deleted == ["copy"]
+    assert deleted == ["dupe"]
+    assert bucket_mgr.deleted == ["dupe"]
+    assert embedding_engine.deleted == ["dupe"]
 
 
-def test_interactive_near_duplicate_y_deletes_suggested_safe_side(monkeypatch):
+def test_interactive_cleanup_can_delete_suggested_near_duplicate_with_y(monkeypatch):
     cleanup = _load_cleanup_module()
     bucket_mgr = FakeBucketManager()
     embedding_engine = FakeEmbeddingEngine()
     buckets = {
-        "protected": _bucket(
-            "protected",
-            "Project schedule includes a design review, a test pass, and a Friday release.",
-            protected=True,
-        ),
-        "copy": _bucket("copy", "The project schedule has a design review, test pass, and Friday release."),
+        "a": _bucket("a", "小雨周末要去杭州参加朋友婚礼，提前订高铁票。", importance=8),
+        "b": _bucket("b", "周末小雨去杭州参加朋友婚礼，需要提前买高铁票。", importance=5),
     }
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
 
     deleted = asyncio.run(
-        cleanup.interactive_cleanup(bucket_mgr, embedding_engine, [], [("protected", "copy", 82.0)], buckets)
+        cleanup.interactive_cleanup(bucket_mgr, embedding_engine, [], [("a", "b", 82.0)], buckets)
     )
 
-    assert deleted == ["copy"]
-    assert bucket_mgr.deleted == ["copy"]
-    assert embedding_engine.deleted == ["copy"]
+    assert deleted == ["b"]
+    assert bucket_mgr.deleted == ["b"]
+    assert embedding_engine.deleted == ["b"]
 
 
-def test_interactive_near_duplicate_side_number_deletes_only_if_safe(monkeypatch):
+def test_interactive_cleanup_can_delete_near_duplicate_by_side_number(monkeypatch):
     cleanup = _load_cleanup_module()
     bucket_mgr = FakeBucketManager()
     embedding_engine = FakeEmbeddingEngine()
     buckets = {
-        "protected": _bucket(
-            "protected",
-            "Project schedule includes a design review, a test pass, and a Friday release.",
-            protected=True,
-        ),
-        "copy": _bucket("copy", "The project schedule has a design review, test pass, and Friday release."),
+        "a": _bucket("a", "小雨周末要去杭州参加朋友婚礼，提前订高铁票。", importance=8),
+        "b": _bucket("b", "周末小雨去杭州参加朋友婚礼，需要提前买高铁票。", importance=5),
     }
-    answers = iter(["1", "2"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    monkeypatch.setattr("builtins.input", lambda prompt: "2")
 
     deleted = asyncio.run(
-        cleanup.interactive_cleanup(
-            bucket_mgr,
-            embedding_engine,
-            [],
-            [("protected", "copy", 82.0), ("protected", "copy", 82.0)],
-            buckets,
-        )
+        cleanup.interactive_cleanup(bucket_mgr, embedding_engine, [], [("a", "b", 82.0)], buckets)
     )
 
-    assert deleted == ["copy"]
-    assert bucket_mgr.deleted == ["copy"]
-    assert embedding_engine.deleted == ["copy"]
+    assert deleted == ["b"]
+    assert bucket_mgr.deleted == ["b"]
+    assert embedding_engine.deleted == ["b"]

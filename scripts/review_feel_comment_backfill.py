@@ -106,8 +106,6 @@ def print_plan(index: int, total: int, plan: dict, existing: dict | None) -> Non
     if existing:
         if existing.get("action") == "whisper":
             print("已有确认: 保留为 whisper/无源 feel")
-        elif existing.get("action") == "skip":
-            print("已有确认: 跳过")
         elif existing.get("source_bucket_id"):
             print(f"已有确认: {existing.get('source_bucket_id')}")
 
@@ -133,21 +131,16 @@ def ask_choice(plan: dict, existing: dict | None) -> tuple[str, str]:
     candidates = plan.get("candidates") or []
     while True:
         if candidates:
-            prompt = "输入 y 接受第 1 个候选，1-3 选择候选，n 手动输入 bucket_id，w 标记 whisper，s 跳过，q 退出"
+            prompt = "输入 y 接受第 1 个候选，1-3 选择候选，n 手动输入 bucket_id，w 保留为 whisper，s 跳过，q 退出"
         else:
-            prompt = "输入 n 手动输入 bucket_id，w 标记 whisper，s 跳过，q 退出"
-        if existing and (
-            existing.get("source_bucket_id")
-            or existing.get("action") in {"whisper", "skip"}
-        ):
+            prompt = "输入 n 手动输入 bucket_id，w 保留为 whisper，s 跳过，q 退出"
+        if existing and (existing.get("source_bucket_id") or existing.get("action") == "whisper"):
             prompt += "，回车保留已有"
         answer = input(f"{prompt}: ").strip()
 
         if not answer and existing:
             if existing.get("action") == "whisper":
                 return "whisper", ""
-            if existing.get("action") == "skip":
-                return "skip", ""
             if existing.get("source_bucket_id"):
                 return "comment", str(existing["source_bucket_id"]).strip()
         if answer.lower() == "q":
@@ -160,7 +153,7 @@ def ask_choice(plan: dict, existing: dict | None) -> tuple[str, str]:
             return "comment", str(candidates[0].get("bucket_id") or "").strip()
         if answer.isdigit() and candidates:
             idx = int(answer)
-            if 1 <= idx <= min(3, len(candidates)):
+            if 1 <= idx <= len(candidates):
                 return "comment", str(candidates[idx - 1].get("bucket_id") or "").strip()
         if answer.lower() == "n":
             manual = input("请输入源记忆 bucket_id（空=跳过）: ").strip()
@@ -189,7 +182,7 @@ def main() -> None:
 
     print(f"读取计划：{plan_path}")
     print(f"写入 mapping：{mapping_path}")
-    print("说明：只会写 mapping，不会改 bucket。真正写入年轮要运行 apply 脚本。")
+    print("说明：只会写 mapping，不会改 bucket。真正写入年轮要回到菜单走“预演/应用”。")
 
     try:
         for index, plan in enumerate(plans, 1):
@@ -205,10 +198,10 @@ def main() -> None:
     with open(mapping_path, "w", encoding="utf-8") as f:
         json.dump({"mappings": mappings}, f, ensure_ascii=False, indent=2)
 
-    confirmed = sum(1 for item in mappings if item.get("action") == "comment" and item.get("source_bucket_id"))
+    confirmed = sum(1 for item in mappings if item.get("source_bucket_id"))
     whispers = sum(1 for item in mappings if item.get("action") == "whisper")
-    skipped = sum(1 for item in mappings if item.get("action") == "skip")
-    print(f"\n完成：确认年轮 {confirmed} 条，标记 whisper {whispers} 条，跳过 {skipped} 条。")
+    skipped = len(mappings) - confirmed - whispers
+    print(f"\n完成：确认年轮 {confirmed} 条，保留 whisper {whispers} 条，跳过 {skipped} 条。")
     print(f"已写入：{mapping_path}")
 
 

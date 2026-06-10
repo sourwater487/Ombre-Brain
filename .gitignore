@@ -7,8 +7,12 @@ __pycache__/
 .claude/hooks/__pycache__/
 .vscode/
 config.yaml
+compose.local.yml
+connection_guide.txt
+start_mobile.sh
 buckets/
 state/
+output/
 *.log
 server.log
 plan.md

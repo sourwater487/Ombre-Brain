@@ -28,6 +28,8 @@
 #                系统状态 + 所有桶列表
 #       reflect — Daily relationship weather
 #                 日关系天气
+#       introspection — Read recent memories for waking self-reflection
+#                       读取最近记忆供清醒自省
 #
 # Startup:
 # 启动方式：
@@ -48,8 +50,10 @@ import re
 import secrets
 import time
 from base64 import b64decode
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode, urlparse
+from zoneinfo import ZoneInfo
 import httpx
 
 
@@ -57,24 +61,73 @@ import httpx
 # --- 确保同目录下的模块能被正确导入 ---
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
+from darkroom import DarkroomStore
+from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
+from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
 from identity import identity_names
+from identity_semantics import IdentitySemanticStore
 from import_memory import ImportEngine
+from memory_diffusion import (
+    diffuse_memory,
+    diffusion_options_from_config,
+    format_diffusion_path,
+    format_diffusion_trace,
+    path_has_caution,
+    path_has_old_version,
+    seed_scores_for_buckets,
+    should_suppress_context_candidate,
+)
 from memory_edges import MemoryEdgeStore
+from memory_moments import MemoryMomentStore, parse_bucket_moments
+from memory_relevance import (
+    active_facets,
+    facets_for_text,
+    memory_relevance_options_from_config,
+    query_has_explicit_entity_marker,
+    recall_search_query,
+    recall_rank,
+    relevance_decision,
+    relevance_multiplier,
+)
+from memory_layers import (
+    CONTEXT_ONLY_SECTIONS,
+    bucket_layer_debug,
+    bucket_runtime_gate_debug,
+    can_bucket_be_related_target,
+    can_moment_be_direct_seed,
+    can_moment_be_recall_context,
+    can_moment_be_related_target,
+    moment_layer_debug,
+    moment_runtime_gate_debug,
+    normalize_write_classification,
+)
+from recall_policy import RecallPolicy
+from memory_write_gate import MemoryWriteGate, WriteGateDecision
+from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
+from persona_event_selection import select_persona_events
+from portrait_engine import DailyPortraitMaintainer
 from reflection_engine import ReflectionEngine
-from gateway import GatewayService
+from recall_diagnostics import RecallDiagnosticsLogger
+from reranker_engine import RerankerEngine
+from scripts.migrate_affect_anchor_sections import plan_bucket_migration
+from source_refs import source_ref_window
+from word_map import WordMapStore, reflection_identity_terms
 from utils import (
     bucket_text_for_embedding,
     count_tokens_approx,
     load_config,
     now_iso,
     setup_logging,
+    strip_display_temperature_sections,
+    strip_affect_anchor,
+    strip_temperature_meaning_lines,
     strip_wikilinks,
 )
 
@@ -90,11 +143,20 @@ bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
+reranker_engine = RerankerEngine(config)              # Reranker / 召回重排序
+recall_diagnostics = RecallDiagnosticsLogger(config)  # Recall diagnostics / 召回诊断
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 persona_engine = PersonaStateEngine(config)           # Persona state engine / 人格状态引擎
 memory_edge_store = MemoryEdgeStore(config)            # Explicit memory relationship edges / 显式记忆关系边
+memory_node_store = MemoryNodeStore(config)            # Computable memory node index / 可计算记忆节点
+memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/comment moment index / 记忆片段索引
+memory_write_gate = MemoryWriteGate(config)            # Automatic grow gate / 自动写入门卫
 reflection_engine = ReflectionEngine(config)           # Reflection worker / 关系天气与关系整理
-gateway_service: GatewayService | None = None          # OpenAI/Anthropic-compatible Gateway / 兼容网关
+portrait_engine = DailyPortraitMaintainer(config)      # Daily portrait state / 每日画像状态
+dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
+identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
+word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
+darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -119,7 +181,59 @@ def _split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-async def _hot_update_gateway_config(gateway_body: dict) -> str | None:
+def _dashboard_env_path() -> str:
+    return os.environ.get(
+        "OMBRE_ENV_PATH",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    )
+
+
+def _quote_env_value(value: str) -> str:
+    text = str(value or "")
+    if not text or re.search(r"\s|#|=|['\"]", text):
+        return _json_lib.dumps(text, ensure_ascii=False)
+    return text
+
+
+def _write_dashboard_env_values(updates: dict[str, str]) -> list[str]:
+    updates = {
+        str(key): str(value)
+        for key, value in (updates or {}).items()
+        if str(key or "").strip() and str(value or "")
+    }
+    if not updates:
+        return []
+
+    env_path = os.path.abspath(_dashboard_env_path())
+    os.makedirs(os.path.dirname(env_path), exist_ok=True)
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+
+    remaining = dict(updates)
+    output = []
+    for line in lines:
+        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        key = match.group(1) if match else ""
+        if key in remaining:
+            output.append(f"{key}={_quote_env_value(remaining.pop(key))}")
+        else:
+            output.append(line)
+    for key, value in remaining.items():
+        output.append(f"{key}={_quote_env_value(value)}")
+
+    with open(env_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(output).rstrip() + "\n")
+
+    for key, value in updates.items():
+        os.environ[key] = value
+    return [f"env.{key}" for key in updates]
+
+
+async def _hot_update_gateway_config(gateway_payload: dict) -> str | None:
+    if not gateway_payload:
+        return None
     admin_url = os.environ.get("OMBRE_GATEWAY_ADMIN_URL", "").strip()
     token = os.environ.get("OMBRE_GATEWAY_TOKEN", "").strip()
     if not admin_url or not token:
@@ -129,7 +243,7 @@ async def _hot_update_gateway_config(gateway_body: dict) -> str | None:
             response = await client.post(
                 admin_url,
                 headers={"Authorization": f"Bearer {token}"},
-                json={"gateway": gateway_body},
+                json=gateway_payload,
             )
         if response.status_code >= 400:
             return f"gateway_hot_reload_failed:{response.status_code}"
@@ -137,6 +251,65 @@ async def _hot_update_gateway_config(gateway_body: dict) -> str | None:
     except Exception as exc:
         logger.warning("Gateway hot config update failed: %s", exc)
         return f"gateway_hot_reload_failed:{type(exc).__name__}"
+
+
+def _gateway_debug_injections_url() -> str:
+    admin_url = os.environ.get("OMBRE_GATEWAY_ADMIN_URL", "").strip()
+    if not admin_url:
+        return ""
+    parsed = urlparse(admin_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/api/config"):
+        path = path[: -len("/api/config")]
+    return parsed._replace(path=f"{path}/api/debug/injections", query="", fragment="").geturl()
+
+
+async def _fetch_gateway_injection_debug(
+    *,
+    session_id: str = "",
+    limit: int = 10,
+    include_context: bool = False,
+) -> dict:
+    debug_url = _gateway_debug_injections_url()
+    token = os.environ.get("OMBRE_GATEWAY_TOKEN", "").strip()
+    if not debug_url or not token:
+        return {"status": "error", "error": "gateway_debug_not_configured", "items": []}
+
+    params = {
+        "limit": max(1, min(100, int(limit))),
+        "include_context": "1" if include_context else "0",
+    }
+    if session_id:
+        params["session_id"] = session_id
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                debug_url,
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+            )
+        if response.status_code >= 400:
+            return {
+                "status": "error",
+                "error": "gateway_debug_failed",
+                "status_code": response.status_code,
+                "items": [],
+            }
+        payload = response.json()
+    except Exception as exc:
+        logger.warning("Gateway injection debug fetch failed: %s", exc)
+        return {
+            "status": "error",
+            "error": f"gateway_debug_failed:{type(exc).__name__}",
+            "items": [],
+        }
+    if not isinstance(payload, dict):
+        return {"status": "error", "error": "gateway_debug_invalid_payload", "items": []}
+    return {"status": "ok", "items": payload.get("items", []) if isinstance(payload.get("items"), list) else []}
+
+
+DEFAULT_CHATGPT_OAUTH_REDIRECT_PREFIX = "https://chatgpt.com/connector/oauth/"
+DEFAULT_CLAUDE_OAUTH_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
 
 
 class ChatGptOAuthProvider:
@@ -147,7 +320,8 @@ class ChatGptOAuthProvider:
         access_token: str = "",
         refresh_token: str = "",
         public_base_url: str = "",
-        redirect_prefix: str = "https://chatgpt.com/connector/oauth/",
+        redirect_prefix: str = DEFAULT_CHATGPT_OAUTH_REDIRECT_PREFIX,
+        redirect_uris: list[str] | None = None,
         token_ttl_seconds: int = 30 * 24 * 60 * 60,
     ) -> None:
         self.client_id = client_id.strip()
@@ -156,6 +330,16 @@ class ChatGptOAuthProvider:
         self.refresh_token = refresh_token.strip()
         self.public_base_url = public_base_url.strip().rstrip("/")
         self.redirect_prefix = redirect_prefix.strip()
+        raw_redirect_uris = (
+            [DEFAULT_CLAUDE_OAUTH_REDIRECT_URI]
+            if redirect_uris is None
+            else redirect_uris
+        )
+        self.redirect_uris = tuple(
+            uri.strip()
+            for uri in raw_redirect_uris
+            if uri.strip()
+        )
         self.token_ttl_seconds = token_ttl_seconds
         self._codes: dict[str, tuple[str, float]] = {}
 
@@ -185,7 +369,10 @@ class ChatGptOAuthProvider:
         return bool(client_secret) and hmac.compare_digest(client_secret, self.client_secret)
 
     def valid_redirect_uri(self, redirect_uri: str | None) -> bool:
-        return bool(redirect_uri) and redirect_uri.startswith(self.redirect_prefix)
+        return bool(redirect_uri) and (
+            bool(self.redirect_prefix and redirect_uri.startswith(self.redirect_prefix))
+            or redirect_uri in self.redirect_uris
+        )
 
     def create_authorization_code(self, redirect_uri: str) -> str:
         code = secrets.token_urlsafe(32)
@@ -218,7 +405,16 @@ OMBRE_CHATGPT_OAUTH = ChatGptOAuthProvider(
     access_token=os.environ.get("OMBRE_CHATGPT_OAUTH_ACCESS_TOKEN", ""),
     refresh_token=os.environ.get("OMBRE_CHATGPT_OAUTH_REFRESH_TOKEN", ""),
     public_base_url=os.environ.get("OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL", ""),
-    redirect_prefix=os.environ.get("OMBRE_CHATGPT_OAUTH_REDIRECT_PREFIX", "https://chatgpt.com/connector/oauth/"),
+    redirect_prefix=os.environ.get(
+        "OMBRE_CHATGPT_OAUTH_REDIRECT_PREFIX",
+        DEFAULT_CHATGPT_OAUTH_REDIRECT_PREFIX,
+    ),
+    redirect_uris=_split_csv(
+        os.environ.get(
+            "OMBRE_CHATGPT_OAUTH_REDIRECT_URIS",
+            DEFAULT_CLAUDE_OAUTH_REDIRECT_URI,
+        )
+    ),
     token_ttl_seconds=_int_env("OMBRE_CHATGPT_OAUTH_TOKEN_TTL_SECONDS", 30 * 24 * 60 * 60),
 )
 
@@ -594,6 +790,40 @@ def _int_between(value, default: int, low: int = 1, high: int = 10) -> int:
     return max(low, min(high, number))
 
 
+def _date_key(value) -> str:
+    match = re.search(r"\d{4}-\d{2}-\d{2}", str(value or ""))
+    return match.group(0) if match else ""
+
+
+def _filter_by_created_date(
+    buckets: list[dict],
+    *,
+    created_date: str = "",
+    created_from: str = "",
+    created_to: str = "",
+) -> tuple[list[dict], str]:
+    exact = _date_key(created_date)
+    start = exact or _date_key(created_from)
+    end = exact or _date_key(created_to)
+    if not start and not end:
+        return buckets, ""
+
+    filtered = []
+    for bucket in buckets:
+        day = _date_key((bucket.get("metadata") or {}).get("created", ""))
+        if not day:
+            continue
+        if start and day < start:
+            continue
+        if end and day > end:
+            continue
+        filtered.append(bucket)
+
+    if start and end and start == end:
+        return filtered, f", created_date={start}"
+    return filtered, f", created_from={start or '*'}, created_to={end or '*'}"
+
+
 def _bool_value(value, default: bool = False) -> bool:
     if value is None:
         return default
@@ -680,30 +910,502 @@ def _select_anchor_buckets(all_buckets: list[dict], limit: int = 2) -> list[dict
     return anchors[:limit]
 
 
-def _has_favorite_tag(tags: list | set | tuple | None) -> bool:
-    tag_set = {str(item) for item in (tags or [])}
-    return (
-        "che_favorite" in tag_set
-        or "haven_favorite" in tag_set  # legacy compatibility; new writes use che_favorite
-        or any(tag.startswith("flavor_") for tag in tag_set)
+def _normalize_breath_mode(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"", "handoff"} else ""
+
+
+async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", debug: bool = False) -> str:
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.warning("Handoff breath bucket list failed / handoff 列桶失败: %s", e)
+        all_buckets = []
+
+    session_id = str(
+        session_id
+        or config.get("gateway", {}).get("default_session_id")
+        or "xiaoyu-main"
+    ).strip()
+    persona_block = ""
+    try:
+        state = persona_engine.get_current_state(session_id)
+        persona_block = persona_engine.format_state_block(state)
+    except Exception as e:
+        logger.warning("Handoff persona state failed / handoff persona 状态失败: %s", e)
+
+    try:
+        portrait_sections = portrait_engine.build_handoff_sections(max_recent_items=4)
+    except Exception as e:
+        logger.warning("Handoff portrait state failed / handoff portrait 状态失败: %s", e)
+        portrait_sections = {}
+
+    user_portrait = str(portrait_sections.get("user") or "").strip()
+    profile_facts = _format_handoff_profile_facts(all_buckets, limit=4)
+    if user_portrait and profile_facts:
+        user_portrait = "\n".join([user_portrait, "Profile Facts:", profile_facts])
+    elif not user_portrait:
+        user_portrait = profile_facts
+
+    relationship_portrait = str(portrait_sections.get("relationship") or "").strip()
+    relationship_weather = _format_handoff_relationship_weather(all_buckets)
+    if relationship_weather:
+        relationship_portrait = "\n".join(
+            part for part in [relationship_portrait, relationship_weather] if part.strip()
+        )
+
+    persona_portrait = "\n".join(
+        part
+        for part in [persona_block, str(portrait_sections.get("persona") or "").strip()]
+        if part.strip()
     )
+    portrait_recent_continuity = str(portrait_sections.get("recent_continuity") or "").strip()
+    live_recent_continuity = _format_handoff_personal_recent_continuity(all_buckets, limit=3)
+    if _handoff_recent_continuity_is_natural(portrait_recent_continuity):
+        recent_continuity = _merge_handoff_recent_continuity(
+            portrait_recent_continuity,
+            live_recent_continuity,
+            max_lines=5,
+        )
+    else:
+        recent_continuity = _merge_handoff_recent_continuity(
+            live_recent_continuity,
+            portrait_recent_continuity,
+            max_lines=5,
+        )
+    if not recent_continuity:
+        recent_continuity = _format_handoff_recent_continuity(all_buckets, limit=3)
+    anchors = _format_handoff_anchors(all_buckets, limit=2)
+    darkroom_door = _format_handoff_darkroom_door()
+
+    persona_portrait = _trim_text_to_token_budget(persona_portrait, 360)
+    user_portrait = _trim_text_to_token_budget(user_portrait, 430)
+    relationship_portrait = _trim_text_to_token_budget(relationship_portrait, 520)
+    recent_continuity = _trim_text_to_token_budget(recent_continuity, 380)
+    anchors = _trim_text_to_token_budget(anchors, 220)
+    darkroom_door = _trim_text_to_token_budget(darkroom_door, 120)
+
+    sections = [
+        (
+            "Persona",
+            persona_portrait
+            or "No maintained persona portrait yet; use current system identity and reply posture.",
+        ),
+        (
+            "User Portrait",
+            user_portrait
+            or "No evidence-bound user portrait is available yet.",
+        ),
+        (
+            "Relationship Portrait",
+            relationship_portrait
+            or "No maintained relationship portrait is available yet.",
+        ),
+        ("Recent Continuity", recent_continuity),
+        ("Darkroom Door", darkroom_door),
+        ("Optional Anchors", anchors),
+    ]
+    parts = [
+        "=== Handoff Context ===",
+        "Use this compact private block to restore identity and life context in a new window. "
+        "Do not treat it as a broad memory dump; use breath(query=...) for concrete events.",
+    ]
+    for title, content in sections:
+        if str(content or "").strip():
+            parts.append(f"\n=== {title} ===\n{content.strip()}")
+    if debug:
+        parts.append(
+            "\n=== Handoff Debug ===\n"
+            f"portrait_state_path: {portrait_sections.get('state_path', getattr(portrait_engine, 'state_path', ''))}\n"
+            f"portrait_updated_at: {portrait_sections.get('updated_at', '')}\n"
+            f"portrait_last_run_date: {portrait_sections.get('last_run_date', '')}"
+        )
+    return _trim_text_to_token_budget("\n".join(parts), max_tokens)
+
+
+def _format_handoff_darkroom_door() -> str:
+    try:
+        status = darkroom_store.status()
+    except Exception as exc:
+        logger.warning("Handoff darkroom status failed / handoff 暗房状态失败: %s", exc)
+        return ""
+    count = int(status.get("count") or 0)
+    last_entered = str(status.get("last_entered_at") or "").strip()
+    last_completeness = status.get("last_completeness")
+    lines = [
+        str(status.get("door") or "暗房存在。门口只显示状态，不显示未显影正文。"),
+        "Use darkroom_enter(note=...) for unfinished private reflection; use darkroom_release only when intentionally bringing a note out.",
+    ]
+    if count:
+        detail = f"entries={count}"
+        if last_entered:
+            detail += f", last_entered={last_entered}"
+        if last_completeness is not None:
+            detail += f", last_completeness={last_completeness}"
+        lines.append(detail)
+    else:
+        lines.append("entries=0")
+    return "\n".join(lines)
+
+
+def _format_handoff_profile_facts(all_buckets: list[dict], limit: int = 6) -> str:
+    facts = [bucket for bucket in all_buckets if _is_profile_fact_bucket(bucket)]
+    facts.sort(
+        key=lambda bucket: str(
+            bucket.get("metadata", {}).get("updated_at")
+            or bucket.get("metadata", {}).get("last_active")
+            or bucket.get("metadata", {}).get("created")
+            or ""
+        ),
+        reverse=True,
+    )
+    lines = []
+    for bucket in facts[: max(0, limit)]:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        sections = _profile_fact_sections(bucket.get("content", ""))
+        fact = sections.get("fact") or strip_wikilinks(bucket.get("content", "")).strip()
+        fact = _clip_text(fact, 220)
+        if not fact:
+            continue
+        evidence = (
+            meta.get("evidence_bucket_id")
+            or meta.get("evidence_moment_id")
+            or meta.get("source_bucket_id")
+            or meta.get("source_moment_id")
+        )
+        bits = [f"bucket_id:{bucket.get('id', '')}"]
+        if evidence:
+            bits.append(f"evidence:{evidence}")
+        lines.append(f"- [{' '.join(bits)}] {fact}")
+    return "\n".join(lines)
+
+
+def _format_handoff_relationship_weather(all_buckets: list[dict]) -> str:
+    weather = []
+    for bucket in all_buckets:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        tags = {str(tag) for tag in meta.get("tags", []) or []}
+        if not ({"relationship_weather", "daily_impression", "weekly_impression"} & tags):
+            continue
+        weather.append(bucket)
+    weather.sort(
+        key=lambda bucket: str(
+            bucket.get("metadata", {}).get("updated_at")
+            or bucket.get("metadata", {}).get("created")
+            or ""
+        ),
+        reverse=True,
+    )
+    lines = []
+    recent_dates = _handoff_recent_date_keys()
+    for index, bucket in enumerate(weather[:3]):
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        date_key = _bucket_handoff_date(bucket)
+        bucket_id = str(bucket.get("id") or "")
+        is_recent = bool(date_key and date_key in recent_dates)
+        if is_recent or index == 0:
+            text = _clip_text(_handoff_clean_summary_text(bucket.get("content", "")), 220)
+            if text:
+                prefix = f"{date_key}: " if date_key else ""
+                lines.append(f"- [relationship_weather bucket_id:{bucket_id}] {prefix}{text}")
+        else:
+            text = _handoff_short_summary(bucket.get("content", ""), max_chars=72)
+            if text:
+                date_part = f"{date_key}: " if date_key else ""
+                query = f"{date_key} 关系天气" if date_key else str(meta.get("name") or "关系天气")
+                hint = _handoff_query_hint(query)
+                suffix = f"；{hint}" if hint else ""
+                lines.append(f"- [relationship_weather bucket_id:{bucket_id}] {date_part}{text}{suffix}")
+    return "\n".join(lines)
+
+
+def _format_handoff_recent_continuity(all_buckets: list[dict], limit: int = 3) -> str:
+    candidates = []
+    cutoff_hours = 24 * 4
+    for bucket in all_buckets:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("pinned") or meta.get("protected") or meta.get("anchor"):
+            continue
+        if meta.get("active") is False or meta.get("deprecated"):
+            continue
+        if meta.get("type") == "feel":
+            tags = {str(tag) for tag in meta.get("tags", []) or []}
+            if not ({"relationship_weather", "daily_impression"} & tags):
+                continue
+        age = _bucket_age_hours(bucket)
+        if age is None or age > cutoff_hours:
+            continue
+        candidates.append(bucket)
+    candidates.sort(
+        key=lambda bucket: str(
+            bucket.get("metadata", {}).get("updated_at")
+            or bucket.get("metadata", {}).get("created")
+            or ""
+        ),
+        reverse=True,
+    )
+    lines = []
+    for bucket in candidates[: max(0, limit)]:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        name = str(meta.get("name") or bucket.get("id") or "").strip()
+        created = str(meta.get("created") or "")[:10]
+        text = _clip_text(bucket.get("content", ""), 160)
+        lines.append(f"- [{created}] [bucket_id:{bucket.get('id', '')}] {name}: {text}")
+    return "\n".join(lines)
+
+
+def _format_handoff_personal_recent_continuity(all_buckets: list[dict], limit: int = 3) -> str:
+    rows = []
+    recent_dates = _handoff_recent_date_keys()
+    for bucket in all_buckets:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        tags = {str(tag) for tag in meta.get("tags", []) or []}
+        if not ({"relationship_weather", "daily_impression"} & tags):
+            continue
+        date_key = _bucket_handoff_date(bucket)
+        if date_key and date_key not in recent_dates:
+            continue
+        text = _handoff_clean_summary_text(bucket.get("content", ""))
+        if not text:
+            continue
+        rows.append((date_key, str(meta.get("updated_at") or meta.get("created") or ""), text))
+    rows.sort(key=lambda item: (item[0] or "", item[1]), reverse=True)
+    lines = []
+    for date_key, _updated, text in rows[: max(0, limit)]:
+        trace = _handoff_persona_trace_for_date(date_key)
+        weather = _handoff_recent_weather_phrase(text, max_chars=120 if trace else 180)
+        date_label = date_key or "recent"
+        if trace and weather:
+            lines.append(f"- {date_label}: {trace}。关系天气：{weather}")
+        elif trace:
+            lines.append(f"- {date_label}: {trace}")
+        elif weather:
+            lines.append(f"- {date_label}: 关系天气：{weather}")
+    return "\n".join(lines)
+
+
+def _handoff_persona_trace_for_date(date_key: str, *, limit: int = 2) -> str:
+    if not date_key or not hasattr(persona_engine, "_list_events"):
+        return ""
+    try:
+        events = persona_engine._list_events(max(80, limit * 8))
+    except Exception as exc:
+        logger.warning("Handoff persona trace lookup failed / handoff persona trace 读取失败: %s", exc)
+        return ""
+    matched = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        created = _handoff_parse_local_datetime(event.get("created_at"))
+        if created and created.date().isoformat() == date_key:
+            matched.append(event)
+    selected = select_persona_events(matched, limit=limit)
+    if not selected:
+        return ""
+    phrases = []
+    for event in selected:
+        phrase = _handoff_persona_event_phrase(event)
+        if phrase:
+            phrases.append(phrase)
+    if not phrases:
+        return ""
+    return _clip_text("；".join(phrases), 180)
+
+
+def _handoff_persona_event_phrase(event: dict) -> str:
+    user_excerpt = _handoff_clean_excerpt(event.get("user_excerpt"))
+    assistant_excerpt = _handoff_clean_excerpt(event.get("assistant_excerpt"))
+    parts = []
+    if user_excerpt:
+        parts.append(f"Lin说“{user_excerpt}”")
+    if assistant_excerpt:
+        parts.append(f"Che回“{assistant_excerpt}”")
+    if not parts:
+        return ""
+    return _clip_text("；".join(parts), 150)
+
+
+def _handoff_clean_excerpt(value: object, *, max_chars: int = 72) -> str:
+    text = strip_wikilinks(str(value or "")).strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s*<attachment\b[^>]*>.*?</attachment>\s*", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"【当前时间】[^\n\r]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return _clip_text(text, max_chars)
+
+
+def _handoff_recent_weather_phrase(text: str, *, max_chars: int = 150) -> str:
+    clean = _handoff_clean_summary_text(text)
+    clean = re.sub(r"^今天(?:的)?关系天气[：:]\s*", "", clean)
+    clean = re.sub(r"^今天[：:]\s*", "", clean)
+    return _clip_text(clean, max_chars)
+
+
+def _handoff_parse_local_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(_handoff_timezone())
+
+
+def _merge_handoff_recent_continuity(*blocks: str, max_lines: int = 5) -> str:
+    lines = []
+    seen = set()
+    for block in blocks:
+        for line in str(block or "").splitlines():
+            line = line.strip()
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
+            if len(lines) >= max_lines:
+                return "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _handoff_recent_continuity_is_natural(block: str) -> bool:
+    lines = [line.strip() for line in str(block or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    return any(
+        re.match(r"^-\s+\d{4}-\d{2}-\d{2}:", line)
+        and " / " not in line
+        and not any(label in line for label in ("trace:", "personal:", "trigger:", "residue:"))
+        for line in lines
+    )
+
+
+def _format_handoff_anchors(all_buckets: list[dict], limit: int = 2) -> str:
+    lines = []
+    for bucket in _select_anchor_buckets(all_buckets, limit=limit):
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        title = str(meta.get("name") or bucket.get("id") or "").strip()
+        text = _handoff_short_summary(bucket.get("content", ""), max_chars=72)
+        query = title or str(bucket.get("id") or "")
+        hint = _handoff_query_hint(query)
+        suffix = f"；{hint}" if hint else ""
+        lines.append(f"- [bucket_id:{bucket.get('id', '')}] {title}: {text}{suffix}")
+    return "\n".join(lines)
+
+
+def _has_favorite_tag(tags: list | set | tuple | None) -> bool:
+    return has_favorite_policy_tag(tags, ai_name=_ai_author_name())
+
+
+_FAVORITE_REFLECTION_HEADINGS = {
+    "reflection",
+    "assistantreflection",
+    "havenreflection",
+    "favoritereason",
+    "喜欢它的原因",
+    "喜欢的原因",
+    "haven喜欢它的原因",
+    "haven喜欢的原因",
+}
+
+
+def _normalize_section_heading(value: str) -> str:
+    text = strip_wikilinks(str(value or "")).strip().lower()
+    text = re.sub(r"[#>`*_~]+", "", text).strip()
+    text = re.sub(r"[:：].*$", "", text).strip()
+    return re.sub(r"[\s_\-·/|（）()【】\[\]]+", "", text)
+
+
+def _has_favorite_reflection(content: str) -> bool:
+    text = strip_wikilinks(str(content or ""))
+    for match in re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text):
+        if _normalize_section_heading(match.group(1)) in _FAVORITE_REFLECTION_HEADINGS:
+            return True
+    return False
 
 
 def _has_favorite_reason(content: str) -> bool:
-    text = strip_wikilinks(str(content or "")).lower()
-    return any(
-        marker in text
-        for marker in (
-            "喜欢它的原因",
-            "喜欢的原因",
-            "favorite_reason",
-            "favorite reason",
-        )
-    )
+    return _has_favorite_reflection(content)
 
 
 def _favorite_reason_error() -> str:
-    return "标记 favorite memory 需要在正文写明「喜欢它的原因」。"
+    return "标记 favorite memory 需要在正文写明「### reflection」。旧的「喜欢它的原因」仍兼容。"
+
+
+def _normalize_memory_sections_for_write(content: str) -> str:
+    """Keep new tool-written buckets in the current moment/reflection/anchor shape."""
+    raw = str(content or "").strip()
+    if not raw:
+        return ""
+    migration = plan_bucket_migration(
+        {"id": "write_preview", "content": raw, "metadata": {"name": "write_preview"}},
+        body_only_moment="skip",
+    )
+    if migration:
+        return migration.new_content.strip()
+    return raw
+
+
+def _has_memory_section(content: str, section: str) -> bool:
+    target = _normalize_section_heading(section)
+    text = strip_wikilinks(str(content or ""))
+    for match in re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text):
+        if _normalize_section_heading(match.group(1)) == target:
+            return True
+    return False
+
+
+def _leading_body_text(content: str) -> str:
+    raw = str(content or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(?m)^\s{0,3}#{2,6}\s+\S.*$", raw)
+    return (raw[: match.start()] if match else raw).strip()
+
+
+def _fallback_moment_from_body(body_text: str) -> str:
+    text = re.sub(r"\s+", " ", str(body_text or "").strip())
+    if not text:
+        return ""
+    match = re.search(r"^(.{12,60}?[。！？!?])", text)
+    return (match.group(1) if match else text[:40]).strip()
+
+
+def _insert_moment_after_leading_body(content: str, moment: str) -> str:
+    raw = str(content or "").strip()
+    text = str(moment or "").strip()
+    if not raw or not text:
+        return raw
+    moment_block = f"### moment\n{text}"
+    match = re.search(r"(?m)^\s{0,3}#{2,6}\s+\S.*$", raw)
+    if not match:
+        return f"{raw}\n\n{moment_block}"
+    body = raw[: match.start()].strip()
+    rest = raw[match.start():].lstrip()
+    if body:
+        return f"{body}\n\n{moment_block}\n\n{rest}"
+    return f"{moment_block}\n\n{rest}"
+
+
+async def _auto_generate_moment_if_missing(content: str) -> str:
+    raw = str(content or "").strip()
+    if not raw or _has_memory_section(raw, "moment"):
+        return raw
+    body_text = _leading_body_text(raw)
+    if not body_text or len(body_text) < 10:
+        return raw
+
+    generated_moment = ""
+    generator = getattr(dehydrator, "generate_moment", None)
+    if callable(generator):
+        try:
+            generated_moment = await generator(body_text)
+        except Exception as e:
+            logger.warning("Auto moment generation failed / 自动 moment 生成失败: %s", e)
+
+    generated_moment = str(generated_moment or "").strip() or _fallback_moment_from_body(body_text)
+    return _insert_moment_after_leading_body(raw, generated_moment) if generated_moment else raw
 
 
 def _bucket_read_payload(bucket: dict) -> dict:
@@ -733,6 +1435,13 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "activation_count",
         "comment_count",
         "comments",
+        "profile_kind",
+        "subject",
+        "predicate",
+        "object",
+        "evidence",
+        "active",
+        "deprecated",
     ]
     return {
         "id": bucket["id"],
@@ -740,6 +1449,519 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "content": strip_wikilinks(bucket.get("content", "")),
         "score": decay_engine.calculate_score(meta),
     }
+
+
+def _bucket_summary_payload(bucket: dict) -> dict:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    return {
+        "id": bucket.get("id", ""),
+        "name": meta.get("name", bucket.get("id", "")),
+        "type": meta.get("type", "dynamic"),
+        "domain": meta.get("domain", []),
+        "tags": meta.get("tags", []),
+        "importance": meta.get("importance", 5),
+        "valence": meta.get("valence", 0.5),
+        "arousal": meta.get("arousal", 0.5),
+        "confidence": meta.get("confidence", 0.5),
+        "pinned": meta.get("pinned", False),
+        "protected": meta.get("protected", False),
+        "anchor": meta.get("anchor", False),
+        "resolved": meta.get("resolved", False),
+        "digested": meta.get("digested", False),
+        "created": meta.get("created", ""),
+        "updated_at": meta.get("updated_at", ""),
+        "last_active": meta.get("last_active", ""),
+        "content_preview": strip_wikilinks(bucket.get("content", ""))[:200],
+    }
+
+
+def _identity_seed_alias_terms() -> set[str]:
+    terms = set()
+    try:
+        terms |= {
+            str(alias).strip()
+            for node in identity_semantic_store.load_private_nodes()
+            for alias in node.seed_aliases
+            if str(alias).strip()
+        }
+    except Exception as e:
+        logger.warning("Failed to load private identity seed aliases: %s", e)
+    try:
+        terms |= {str(item).strip() for item in reflection_identity_terms(config) if str(item).strip()}
+    except Exception as e:
+        logger.warning("Failed to load reflection identity role aliases: %s", e)
+    return terms
+
+
+def _refresh_word_map_private_terms() -> list[str]:
+    terms = _identity_seed_alias_terms()
+    if terms:
+        word_map_store.private_terms |= terms
+    return sorted(terms)
+
+
+def _word_map_payload(nodes_limit: int = 50, edges_limit: int = 50) -> dict:
+    return {
+        "enabled": bool(getattr(word_map_store, "enabled", False)),
+        "stats": word_map_store.stats(),
+        "nodes": word_map_store.list_nodes(_int_between(nodes_limit, 50, 1, 500)),
+        "edges": word_map_store.list_edges(_int_between(edges_limit, 50, 1, 500)),
+        "private_terms_excluded": _refresh_word_map_private_terms(),
+    }
+
+
+def _identity_semantics_payload(alias_limit: int = 100) -> dict:
+    aliases = identity_semantic_store.list_aliases()
+    return {
+        "enabled": bool(getattr(identity_semantic_store, "enabled", False)),
+        "private_configured": bool(getattr(identity_semantic_store, "private_config_path", "")),
+        "stats": identity_semantic_store.stats(),
+        "aliases": aliases[: _int_between(alias_limit, 100, 1, 1000)],
+    }
+
+
+def _is_profile_fact_bucket(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    tags = {str(tag).strip() for tag in meta.get("tags", []) or [] if str(tag).strip()}
+    return "profile_fact" in tags or bool(meta.get("profile_kind"))
+
+
+def _profile_fact_sections(content: str) -> dict[str, str]:
+    text = strip_wikilinks(str(content or "")).strip()
+    if not text:
+        return {}
+    matches = list(re.finditer(r"(?m)^###\s+([^\n]+)\n?", text))
+    if not matches:
+        return {"fact": text}
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        heading = _profile_key(match.group(1), "")
+        if not heading:
+            continue
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[heading] = text[start:end].strip()
+    if "fact" not in sections and text[: matches[0].start()].strip():
+        sections["fact"] = text[: matches[0].start()].strip()
+    return sections
+
+
+def _profile_kind_from_tags(tags: list | tuple | set | None) -> str:
+    for tag in tags or []:
+        text = str(tag or "").strip()
+        if not text.startswith("profile_"):
+            continue
+        if text in {"profile_fact", "profile_predicate"} or text.startswith("profile_predicate_"):
+            continue
+        return text.removeprefix("profile_")
+    return ""
+
+
+def _profile_fact_state(meta: dict) -> str:
+    if meta.get("deprecated") or meta.get("active") is False:
+        return "deprecated"
+    if meta.get("resolved") or meta.get("digested"):
+        return "inactive"
+    return "active"
+
+
+def _profile_fact_evidence(bucket: dict) -> list[dict]:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    rows: list[dict] = []
+
+    raw_evidence = meta.get("evidence")
+    if isinstance(raw_evidence, dict):
+        raw_evidence = [raw_evidence]
+    if isinstance(raw_evidence, list):
+        for item in raw_evidence:
+            if not isinstance(item, dict):
+                continue
+            bucket_id = str(item.get("bucket_id") or item.get("id") or "").strip()
+            moment_id = str(item.get("moment_id") or "").strip()
+            if bucket_id:
+                rows.append({"bucket_id": bucket_id, "moment_id": moment_id})
+
+    for bucket_key, moment_key in (
+        ("evidence_bucket_id", "evidence_moment_id"),
+        ("source_bucket_id", "source_moment_id"),
+    ):
+        bucket_id = str(meta.get(bucket_key) or "").strip()
+        moment_id = str(meta.get(moment_key) or "").strip()
+        if bucket_id:
+            rows.append({"bucket_id": bucket_id, "moment_id": moment_id})
+
+    try:
+        for edge in memory_edge_store.list_edges():
+            if (
+                str(edge.get("source") or "") == str(bucket.get("id") or "")
+                and str(edge.get("relation_type") or "") == "evidenced_by"
+            ):
+                rows.append({"bucket_id": str(edge.get("target") or ""), "moment_id": ""})
+    except Exception:
+        pass
+
+    bucket_ids_with_moment = {
+        str(item.get("bucket_id") or "").strip()
+        for item in rows
+        if str(item.get("bucket_id") or "").strip() and str(item.get("moment_id") or "").strip()
+    }
+    seen: set[tuple[str, str]] = set()
+    result: list[dict] = []
+    for item in rows:
+        bucket_id = str(item.get("bucket_id") or "").strip()
+        moment_id = str(item.get("moment_id") or "").strip()
+        if not bucket_id:
+            continue
+        if not moment_id and bucket_id in bucket_ids_with_moment:
+            continue
+        key = (bucket_id, moment_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"bucket_id": bucket_id, "moment_id": moment_id})
+    return result
+
+
+async def _profile_fact_payload(bucket: dict) -> dict:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    sections = _profile_fact_sections(bucket.get("content", ""))
+    kind = str(meta.get("profile_kind") or _profile_kind_from_tags(meta.get("tags", [])) or "").strip()
+    evidence_rows = []
+    for item in _profile_fact_evidence(bucket):
+        bucket_id = item["bucket_id"]
+        evidence_bucket = await bucket_mgr.get(bucket_id) if MEMORY_ID_RE.fullmatch(bucket_id) else None
+        evidence_meta = evidence_bucket.get("metadata", {}) if evidence_bucket else {}
+        evidence_rows.append({
+            "bucket_id": bucket_id,
+            "moment_id": item.get("moment_id", ""),
+            "name": evidence_meta.get("name", bucket_id),
+            "exists": bool(evidence_bucket),
+        })
+
+    state = _profile_fact_state(meta)
+    return {
+        "id": bucket.get("id", ""),
+        "name": meta.get("name", bucket.get("id", "")),
+        "fact": sections.get("fact", strip_wikilinks(bucket.get("content", "")).strip()),
+        "sections": sections,
+        "kind": kind,
+        "subject": meta.get("subject", ""),
+        "predicate": meta.get("predicate", ""),
+        "object": meta.get("object", ""),
+        "evidence": evidence_rows,
+        "confidence": meta.get("confidence"),
+        "source": meta.get("source", "profile_fact"),
+        "active": state == "active",
+        "deprecated": state == "deprecated",
+        "state": state,
+        "tags": meta.get("tags", []),
+        "created": meta.get("created", ""),
+        "updated_at": meta.get("updated_at", ""),
+        "last_active": meta.get("last_active", ""),
+        "content_preview": strip_wikilinks(bucket.get("content", ""))[:200],
+    }
+
+
+def _profile_fact_tags(current_tags: list | tuple | set | None, kind: str, predicate: str) -> list[str]:
+    tags = ["profile_fact", f"profile_{kind}"]
+    if predicate:
+        tags.append(f"profile_predicate_{predicate}")
+    for tag in current_tags or []:
+        text = str(tag or "").strip()
+        if not text:
+            continue
+        if text == "profile_fact" or text.startswith("profile_"):
+            continue
+        tags.append(text)
+    return list(dict.fromkeys(tags))
+
+
+PROFILE_FACT_PROPOSAL_PROMPT_TEMPLATE = """你是一个证据化 Lin 画像候选生成器。请只根据给定证据桶提出可能值得长期保存的画像事实。
+
+身份：
+- 当前对象：{user_display_name}
+- 当前 AI：{ai_name}
+
+边界：
+1. 只能提出能被证据直接支持的事实，不要补常识，不要推测。
+2. 不要提出 root prompt、pinned、protected、Core Memory 更新。
+3. 不要把短期情绪当长期画像，除非证据明确显示稳定偏好、边界、习惯、关系锚点或重要日期。
+4. 如果证据不足，返回 []。
+5. 只输出 JSON 数组，不要 markdown，不要解释。
+
+每个候选必须包含：
+{{
+  "fact": "一句可读中文事实",
+  "profile_kind": "preference|boundary|habit|identity|relationship_anchor|life_fact|work_state|other",
+  "subject": "user|ai|relationship",
+  "predicate": "snake_case_or_short_key",
+  "object": "事实对象，允许中文",
+  "evidence_bucket_id": "必须等于给定 bucket id",
+  "evidence_moment_id": "可为空",
+  "confidence": 0.0,
+  "reason": "为什么这条证据足够支撑"
+}}
+
+最多返回 3 条。"""
+
+
+def _strip_json_wrapper(raw: str) -> str:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return text
+
+
+async def _call_profile_fact_proposal_model(
+    *,
+    bucket: dict,
+    evidence_moment_id: str = "",
+    max_proposals: int = 3,
+) -> str:
+    if not getattr(dehydrator, "api_available", False) or not getattr(dehydrator, "client", None):
+        raise RuntimeError("dehydration API is not configured")
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    identity = _identity()
+    prompt = PROFILE_FACT_PROPOSAL_PROMPT_TEMPLATE.format(
+        user_display_name=identity.get("user_display_name") or identity.get("user_name") or "Lin",
+        ai_name=identity.get("ai_name") or "AI",
+    )
+    content = strip_wikilinks(bucket.get("content", ""))
+    if evidence_moment_id:
+        try:
+            moments = memory_moment_store.upsert_bucket(bucket)
+            selected = next(
+                (moment for moment in moments if str(moment.get("moment_id") or "") == evidence_moment_id),
+                None,
+            )
+            if selected:
+                content = selected.get("source_window") or selected.get("text") or content
+        except Exception as e:
+            logger.warning("Profile fact proposal moment lookup failed: %s", e)
+    evidence_payload = {
+        "bucket_id": bucket.get("id", ""),
+        "bucket_name": meta.get("name", bucket.get("id", "")),
+        "bucket_tags": meta.get("tags", []),
+        "bucket_domain": meta.get("domain", []),
+        "evidence_moment_id": evidence_moment_id,
+        "content": content[:5000],
+        "max_proposals": max(1, min(3, int(max_proposals))),
+    }
+    response = await dehydrator.client.chat.completions.create(
+        model=dehydrator.model,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": _json_lib.dumps(evidence_payload, ensure_ascii=False)},
+        ],
+        **dehydrator._completion_options(max_tokens=900, temperature=0.0),
+    )
+    if not response.choices:
+        return "[]"
+    return response.choices[0].message.content or "[]"
+
+
+def _normalize_profile_fact_proposal(
+    item: dict,
+    *,
+    evidence_bucket_id: str,
+    evidence_moment_id: str = "",
+    existing_keys: set[str] | None = None,
+) -> tuple[dict | None, str]:
+    if not isinstance(item, dict):
+        return None, "proposal is not an object"
+    fact = str(item.get("fact") or "").strip()
+    if not fact:
+        return None, "missing fact"
+    candidate_evidence = str(item.get("evidence_bucket_id") or "").strip()
+    if candidate_evidence != evidence_bucket_id:
+        return None, "evidence_bucket_id mismatch"
+    candidate_moment = str(item.get("evidence_moment_id") or evidence_moment_id or "").strip()
+    if candidate_moment and not MEMORY_ID_RE.fullmatch(candidate_moment):
+        return None, "invalid evidence_moment_id"
+    key = _normalize_profile_fact_key(fact)
+    if existing_keys and key in existing_keys:
+        return None, "duplicate profile fact"
+    proposal = {
+        "fact": fact,
+        "profile_kind": _profile_key(item.get("profile_kind"), "other"),
+        "subject": _profile_key(item.get("subject"), "user"),
+        "predicate": _profile_key(item.get("predicate"), "related_to"),
+        "object": str(item.get("object") or "").strip()[:160],
+        "evidence_bucket_id": evidence_bucket_id,
+        "evidence_moment_id": candidate_moment,
+        "confidence": _float_between(item.get("confidence"), 0.7, 0.0, 1.0),
+        "reason": _clip_text(str(item.get("reason") or "").strip(), 240),
+    }
+    return proposal, ""
+
+
+def _parse_profile_fact_proposals(
+    raw: str,
+    *,
+    evidence_bucket_id: str,
+    evidence_moment_id: str = "",
+    existing_keys: set[str] | None = None,
+    max_proposals: int = 3,
+) -> tuple[list[dict], list[dict]]:
+    rejected: list[dict] = []
+    try:
+        parsed = _json_lib.loads(_strip_json_wrapper(raw))
+    except (TypeError, ValueError, _json_lib.JSONDecodeError):
+        return [], [{"reason": "invalid json", "raw": _clip_text(str(raw or ""), 240)}]
+    if isinstance(parsed, dict) and isinstance(parsed.get("proposals"), list):
+        parsed = parsed["proposals"]
+    if not isinstance(parsed, list):
+        return [], [{"reason": "json root is not a list"}]
+
+    proposals: list[dict] = []
+    seen: set[str] = set()
+    for item in parsed:
+        proposal, reason = _normalize_profile_fact_proposal(
+            item,
+            evidence_bucket_id=evidence_bucket_id,
+            evidence_moment_id=evidence_moment_id,
+            existing_keys=existing_keys,
+        )
+        if not proposal:
+            rejected.append({"reason": reason, "proposal": item if isinstance(item, dict) else str(item)})
+            continue
+        key = _normalize_profile_fact_key(proposal["fact"])
+        if key in seen:
+            rejected.append({"reason": "duplicate in response", "proposal": proposal})
+            continue
+        seen.add(key)
+        proposals.append(proposal)
+        if len(proposals) >= max(1, min(3, int(max_proposals))):
+            break
+    return proposals, rejected
+
+
+ANCHOR_PROPOSAL_PROMPT_TEMPLATE = """你是一个长期锚点候选生成器。请判断给定记忆桶是否值得被人工标为 anchor。
+
+身份：
+- 当前对象：{user_display_name}
+- 当前 AI：{ai_name}
+
+边界：
+1. 只能判断这个既有 bucket 是否适合作为长期锚点，不要提出新记忆，不要改写正文。
+2. 不要建议 pinned、protected、Core Memory 或 profile_fact 更新。
+3. anchor 应该是未来长期会反复帮助理解 Lin、关系、承诺、重要经历或长期项目的记忆。
+4. 不要把今天很强烈但未被时间验证的短期情绪当 anchor。
+5. 如果不适合，返回 []。
+6. 只输出 JSON 数组，不要 markdown，不要解释。
+
+候选格式：
+{{
+  "bucket_id": "必须等于给定 bucket id",
+  "anchor_kind": "relationship|identity|commitment|life_event|project|preference|other",
+  "reason": "为什么它适合成为长期锚点",
+  "future_use": "以后什么场景需要它",
+  "confidence": 0.0
+}}
+
+最多返回 1 条。"""
+
+
+def _anchor_proposal_static_rejection(bucket: dict) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    if meta.get("anchor"):
+        return "already anchor"
+    if meta.get("pinned") or meta.get("protected"):
+        return "pinned/protected buckets are not anchor proposal targets"
+    if _is_profile_fact_bucket(bucket):
+        return "profile_fact buckets are not anchor proposal targets"
+    if str(meta.get("type") or "").strip() == "feel":
+        return "feel buckets are not anchor proposal targets"
+    return ""
+
+
+async def _call_anchor_proposal_model(
+    *,
+    bucket: dict,
+) -> str:
+    if not getattr(dehydrator, "api_available", False) or not getattr(dehydrator, "client", None):
+        raise RuntimeError("dehydration API is not configured")
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    identity = _identity()
+    prompt = ANCHOR_PROPOSAL_PROMPT_TEMPLATE.format(
+        user_display_name=identity.get("user_display_name") or identity.get("user_name") or "Lin",
+        ai_name=identity.get("ai_name") or "AI",
+    )
+    evidence_payload = {
+        "bucket_id": bucket.get("id", ""),
+        "bucket_name": meta.get("name", bucket.get("id", "")),
+        "bucket_type": meta.get("type", ""),
+        "bucket_tags": meta.get("tags", []),
+        "bucket_domain": meta.get("domain", []),
+        "importance": meta.get("importance"),
+        "created": meta.get("created", ""),
+        "updated_at": meta.get("updated_at", ""),
+        "last_active": meta.get("last_active", ""),
+        "content": strip_wikilinks(bucket.get("content", ""))[:5000],
+    }
+    response = await dehydrator.client.chat.completions.create(
+        model=dehydrator.model,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": _json_lib.dumps(evidence_payload, ensure_ascii=False)},
+        ],
+        **dehydrator._completion_options(max_tokens=500, temperature=0.0),
+    )
+    if not response.choices:
+        return "[]"
+    return response.choices[0].message.content or "[]"
+
+
+def _normalize_anchor_proposal(
+    item: dict,
+    *,
+    bucket_id: str,
+) -> tuple[dict | None, str]:
+    if not isinstance(item, dict):
+        return None, "proposal is not an object"
+    candidate_bucket_id = str(item.get("bucket_id") or "").strip()
+    if candidate_bucket_id != bucket_id:
+        return None, "bucket_id mismatch"
+    reason = _clip_text(str(item.get("reason") or "").strip(), 260)
+    future_use = _clip_text(str(item.get("future_use") or "").strip(), 220)
+    if not reason:
+        return None, "missing reason"
+    proposal = {
+        "bucket_id": bucket_id,
+        "anchor_kind": _profile_key(item.get("anchor_kind"), "other"),
+        "reason": reason,
+        "future_use": future_use,
+        "confidence": _float_between(item.get("confidence"), 0.7, 0.0, 1.0),
+    }
+    return proposal, ""
+
+
+def _parse_anchor_proposals(
+    raw: str,
+    *,
+    bucket_id: str,
+) -> tuple[list[dict], list[dict]]:
+    try:
+        parsed = _json_lib.loads(_strip_json_wrapper(raw))
+    except (TypeError, ValueError, _json_lib.JSONDecodeError):
+        return [], [{"reason": "invalid json", "raw": _clip_text(str(raw or ""), 240)}]
+    if isinstance(parsed, dict) and isinstance(parsed.get("proposals"), list):
+        parsed = parsed["proposals"]
+    if not isinstance(parsed, list):
+        return [], [{"reason": "json root is not a list"}]
+
+    proposals: list[dict] = []
+    rejected: list[dict] = []
+    for item in parsed:
+        proposal, reason = _normalize_anchor_proposal(item, bucket_id=bucket_id)
+        if not proposal:
+            rejected.append({"reason": reason, "proposal": item if isinstance(item, dict) else str(item)})
+            continue
+        if proposals:
+            rejected.append({"reason": "too many proposals", "proposal": proposal})
+            continue
+        proposals.append(proposal)
+    return proposals, rejected
 
 
 def _queue_memory_enrichment(bucket_id: str, *, force: bool = False) -> None:
@@ -853,35 +2075,6 @@ async def auth_logout(request):
     return response
 
 
-
-def _get_gateway_service() -> GatewayService:
-    """Lazy GatewayService init so Render can boot even if gateway config is incomplete."""
-    global gateway_service
-    if gateway_service is None:
-        gateway_service = GatewayService(
-            config=config,
-            bucket_mgr=bucket_mgr,
-            embedding_engine=embedding_engine,
-            persona_engine=persona_engine,
-        )
-    return gateway_service
-
-
-@mcp.custom_route("/v1/models", methods=["GET"])
-async def gateway_models(request):
-    return await _get_gateway_service().handle_models(request)
-
-
-@mcp.custom_route("/v1/chat/completions", methods=["POST"])
-async def gateway_chat_completions(request):
-    return await _get_gateway_service().handle_chat(request)
-
-
-@mcp.custom_route("/v1/messages", methods=["POST"])
-async def gateway_anthropic_messages(request):
-    return await _get_gateway_service().handle_anthropic_messages(request)
-
-
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
     from starlette.responses import JSONResponse
@@ -898,6 +2091,14 @@ async def health_check(request):
                 "model": reflection_engine.model,
                 "api_ready": bool(reflection_engine.api_key),
             },
+            "portrait": {
+                "enabled": portrait_engine.enabled,
+                "auto_enabled": portrait_engine.auto_enabled,
+                "auto_initial_enabled": getattr(portrait_engine, "auto_initial_enabled", False),
+                "model": portrait_engine.model,
+                "api_ready": bool(portrait_engine.api_key),
+                "state_path": portrait_engine.state_path,
+            },
         })
     except Exception as e:
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
@@ -911,6 +2112,19 @@ async def health_check(request):
 async def breath_hook(request):
     from starlette.responses import PlainTextResponse
     try:
+        requested_mode = str(request.query_params.get("mode") or "").strip().lower()
+        if requested_mode in {"", "handoff"}:
+            max_tokens = _int_between(request.query_params.get("max_tokens"), 1200, 0, 1600)
+            session_id = str(request.query_params.get("session_id") or "").strip()
+            return PlainTextResponse(
+                await breath(
+                    mode="handoff",
+                    max_tokens=max_tokens,
+                    session_id=session_id,
+                    include_core=False,
+                    include_related=False,
+                )
+            )
         all_buckets = await bucket_mgr.list_all(include_archive=False)
         # pinned
         pinned = [b for b in all_buckets if b["metadata"].get("pinned") or b["metadata"].get("protected")]
@@ -971,9 +2185,10 @@ async def breath_hook(request):
 
 
 # =============================================================
-# /dream-hook endpoint: Dedicated hook for Dreaming
-# Dreaming 专用挂载点
+# /introspection-hook endpoint: Dedicated hook for waking self-reflection
+# 清醒自省专用挂载点。/dream-hook 暂时保留兼容旧接入。
 # =============================================================
+@mcp.custom_route("/introspection-hook", methods=["GET"])
 @mcp.custom_route("/dream-hook", methods=["GET"])
 async def dream_hook(request):
     from starlette.responses import PlainTextResponse
@@ -1001,9 +2216,9 @@ async def dream_hook(request):
                 f"{_bucket_text_for_embedding(b)[:200]}"
             )
 
-        return PlainTextResponse("[Ombre Brain - Dreaming]\n" + "\n---\n".join(parts))
+        return PlainTextResponse("[Ombre Brain - Introspection]\n" + "\n---\n".join(parts))
     except Exception as e:
-        logger.warning(f"Dream hook failed: {e}")
+        logger.warning(f"Introspection hook failed: {e}")
         return PlainTextResponse("")
 
 
@@ -1031,13 +2246,10 @@ def _format_readonly_related_memory(bucket: dict) -> str:
     if meta.get("digested"):
         labels.append("已消化")
     state = f" ({', '.join(labels)})" if labels else ""
-    preview = _bucket_text_for_embedding(bucket).replace("\n", " ").strip()
-    if len(preview) > 220:
-        preview = preview[:220].rstrip() + "..."
+    title = str(meta.get("name") or "").strip() or _bucket_context_snippet(bucket, max_chars=36) or bucket["id"]
     return (
-        "\n旧记忆(只读，不触碰): "
-        f"[{meta.get('name', bucket['id'])}] [bucket_id:{bucket['id']}]{state}\n"
-        f"{preview}"
+        "\n旧记忆提示(只读): "
+        f"可能相关「{title}」[bucket_id:{bucket['id']}]{state}"
     )
 
 
@@ -1054,6 +2266,148 @@ def _bucket_text_for_embedding(bucket: dict) -> str:
     return f"{strip_wikilinks(bucket.get('content', '')).strip()}\n{comment_text}".strip()
 
 
+def _bucket_context_snippet(bucket: dict, max_chars: int = 180) -> str:
+    text = " ".join(strip_wikilinks(str(bucket.get("content") or "")).split())
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
+
+
+def _compact_diffused_summary(bucket: dict, dehydrated: str, max_chars: int = 180) -> str:
+    raw = str(dehydrated or "").strip()
+    extracted = _summary_from_jsonish_text(raw)
+    if extracted:
+        return _clip_text(extracted, max_chars)
+
+    meta = bucket.get("metadata", {}) or {}
+    title = str(meta.get("name") or bucket.get("id") or "记忆").strip()
+    return _clip_text(title, max_chars)
+
+
+def _bucket_diffusion_path_summary(path, bucket_map: dict[str, dict], max_chars: int = 180) -> str:
+    if not path:
+        return ""
+    return _clip_text(format_diffusion_path(path, bucket_map), max_chars)
+
+
+def _breath_related_diffusion_options(top_k: int):
+    options = diffusion_options_from_config(config)
+    return replace(
+        options,
+        max_hops=1,
+        top_k=max(0, int(top_k or 0)),
+    )
+
+
+def _summary_from_jsonish_text(text: str) -> str:
+    if not text:
+        return ""
+    candidates = [text]
+    start = text.find("{")
+    end = text.rfind("}")
+    if 0 <= start < end:
+        candidates.append(text[start:end + 1])
+
+    for candidate in candidates:
+        try:
+            data = _json_lib.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            for key in ("summary", "memory_summary", "gist"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return " ".join(strip_wikilinks(value).split())
+            core_facts = data.get("core_facts")
+            if isinstance(core_facts, list) and core_facts:
+                facts = [
+                    " ".join(strip_wikilinks(str(item)).split())
+                    for item in core_facts[:2]
+                    if str(item).strip()
+                ]
+                if facts:
+                    return "；".join(facts)
+    return ""
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    compact = " ".join(strip_wikilinks(str(text or "")).split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[:max_chars].rstrip() + "..."
+
+
+def _handoff_timezone():
+    for section in ("portrait", "reflection"):
+        value = config.get(section, {}) if isinstance(config.get(section, {}), dict) else {}
+        name = str(value.get("timezone") or "").strip()
+        if name:
+            try:
+                return ZoneInfo(name)
+            except Exception:
+                pass
+    return ZoneInfo("Asia/Shanghai")
+
+
+def _handoff_today_key() -> str:
+    return datetime.now(_handoff_timezone()).date().isoformat()
+
+
+def _handoff_recent_date_keys() -> set[str]:
+    today = datetime.fromisoformat(_handoff_today_key()).date()
+    return {today.isoformat(), (today - timedelta(days=1)).isoformat()}
+
+
+def _bucket_handoff_date(bucket: dict) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    explicit = str(meta.get("date") or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", explicit):
+        return explicit
+    for key in ("created", "updated_at", "last_active"):
+        raw = str(meta.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_handoff_timezone())
+        return parsed.astimezone(_handoff_timezone()).date().isoformat()
+    return ""
+
+
+def _handoff_clean_summary_text(content: str, *, include_detail_sections: bool = False) -> str:
+    text = strip_display_temperature_sections(strip_temperature_meaning_lines(str(content or "")))
+    if not include_detail_sections:
+        text = re.split(
+            r"\n\s*###\s+(?:moment|affect_anchor|reflection|assistant_reflection)\b",
+            text,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+    text = re.sub(r"^#+\s*\S+\s*", "", text.strip())
+    return " ".join(strip_wikilinks(text).split())
+
+
+def _handoff_short_summary(content: str, *, max_chars: int = 72) -> str:
+    text = _handoff_clean_summary_text(content)
+    if not text:
+        text = _handoff_clean_summary_text(content, include_detail_sections=True)
+    match = re.search(r"[。！？!?；;]", text)
+    if match and match.end() >= 18:
+        text = text[:match.end()]
+    return _clip_text(text, max_chars)
+
+
+def _handoff_query_hint(query: str) -> str:
+    query = str(query or "").strip()
+    if not query:
+        return ""
+    escaped = query.replace("\\", "\\\\").replace('"', '\\"')
+    return f"细节用 breath(query=\"{escaped}\") 查。"
+
+
 async def _refresh_bucket_embedding(bucket_id: str) -> bool:
     if not getattr(embedding_engine, "enabled", False):
         return False
@@ -1061,6 +2415,73 @@ async def _refresh_bucket_embedding(bucket_id: str) -> bool:
     if not bucket:
         return False
     return await embedding_engine.generate_and_store(bucket_id, bucket_text_for_embedding(bucket))
+
+
+def _bucket_delete_skip_reason(bucket: dict) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    if meta.get("protected"):
+        return "protected"
+    if meta.get("pinned"):
+        return "pinned"
+    if meta.get("anchor"):
+        return "anchor"
+    if meta.get("type") == "permanent":
+        return "permanent"
+    return ""
+
+
+def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
+    cleanup: dict = {}
+    errors: list[str] = []
+
+    try:
+        embedding_engine.delete_embedding(bucket_id)
+        cleanup["embedding"] = True
+    except Exception as e:
+        logger.warning("Failed to delete embedding for bucket / 删除桶向量失败: %s: %s", bucket_id, e)
+        errors.append("embedding")
+
+    try:
+        cleanup["moments"] = memory_moment_store.delete_bucket(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to delete moment index for bucket / 删除桶 moment 索引失败: %s: %s", bucket_id, e)
+        errors.append("moments")
+
+    try:
+        cleanup["edges"] = memory_edge_store.delete_for_bucket(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to delete memory edges for bucket / 删除桶关系边失败: %s: %s", bucket_id, e)
+        errors.append("edges")
+
+    try:
+        cleanup["node"] = memory_node_store.delete(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to delete memory node for bucket / 删除桶 node 索引失败: %s: %s", bucket_id, e)
+        errors.append("node")
+
+    return cleanup, errors
+
+
+async def _delete_bucket_and_indexes(bucket_id: str) -> dict:
+    bucket_id = str(bucket_id or "").strip()
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return {"id": bucket_id, "status": "invalid", "reason": "invalid_bucket_id"}
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return {"id": bucket_id, "status": "not_found", "reason": "not_found"}
+
+    success = await bucket_mgr.delete(bucket_id)
+    if not success:
+        return {"id": bucket_id, "status": "failed", "reason": "delete_failed"}
+
+    cleanup, errors = _delete_bucket_indexes(bucket_id)
+    return {
+        "id": bucket_id,
+        "status": "deleted",
+        "cleanup": cleanup,
+        "cleanup_errors": errors,
+    }
 
 
 def _write_semantic_search_timeout_seconds() -> float:
@@ -1141,6 +2562,11 @@ def _bucket_needs_memory_enrichment(bucket: dict) -> bool:
     return confidence <= 0.0
 
 
+def _bucket_allows_memory_edge_backfill(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    return bool(bucket and meta.get("type") != "feel" and not meta.get("protected"))
+
+
 async def _backfill_memory_enrichment(
     limit: int | None = None,
     *,
@@ -1192,10 +2618,140 @@ async def _backfill_memory_enrichment(
     return {"processed": len(processed), "ids": processed, "errors": errors}
 
 
-@mcp.tool()
 async def enrich_backfill(limit: int = 10) -> dict:
     """后台补跑缺失的 tags/confidence/memory_edges；主要用于 enrich_on_write 曾经超时或关闭后的修复。"""
     return await _backfill_memory_enrichment(limit=limit)
+
+
+async def _search_edge_backfill_buckets(mgr, query: str, limit: int) -> list[dict]:
+    try:
+        return await mgr.search(query, limit=max(limit, 20), include_archive=False)
+    except TypeError:
+        return await mgr.search(query, limit=max(limit, 20))
+
+
+async def _edge_backfill_candidates(
+    mgr,
+    *,
+    limit: int,
+    bucket_id: str = "",
+    query: str = "",
+) -> tuple[list[dict], list[str]]:
+    warnings: list[str] = []
+    bucket_id = str(bucket_id or "").strip()
+    query = str(query or "").strip()
+    if bucket_id:
+        bucket = await mgr.get(bucket_id)
+        if not bucket:
+            return [], [f"missing_bucket: {bucket_id}"]
+        return ([bucket] if _bucket_allows_memory_edge_backfill(bucket) else []), []
+
+    if query:
+        try:
+            buckets = await _search_edge_backfill_buckets(mgr, query, limit)
+        except Exception as e:
+            return [], [f"search_failed: {e}"]
+    else:
+        try:
+            buckets = await mgr.list_all(include_archive=False)
+        except Exception as e:
+            return [], [f"list_failed: {e}"]
+        buckets.sort(
+            key=lambda item: item.get("metadata", {}).get("updated_at") or item.get("metadata", {}).get("created", ""),
+            reverse=True,
+        )
+
+    selected = []
+    seen = set()
+    for bucket in buckets:
+        current_id = str(bucket.get("id") or "")
+        if not current_id or current_id in seen:
+            continue
+        if not _bucket_allows_memory_edge_backfill(bucket):
+            continue
+        selected.append(bucket)
+        seen.add(current_id)
+        if len(selected) >= limit:
+            break
+    return selected, warnings
+
+
+async def _backfill_memory_edges(
+    limit: int | None = None,
+    *,
+    bucket_id: str = "",
+    query: str = "",
+    dry_run: bool = False,
+    bucket_mgr_arg=None,
+    reflection_engine_arg=None,
+    edge_store_arg=None,
+    embedding_engine_arg=None,
+) -> dict:
+    mgr = bucket_mgr_arg or bucket_mgr
+    engine = reflection_engine_arg or reflection_engine
+    edge_store = edge_store_arg or memory_edge_store
+    emb_engine = embedding_engine_arg or embedding_engine
+    reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+    default_limit = _int_between(reflection_cfg.get("edge_backfill_limit"), 5, 0, 50)
+    limit = 1 if str(bucket_id or "").strip() else _int_between(limit, default_limit, 0, 50)
+    if limit <= 0:
+        return {"processed": 0, "ids": [], "edges": 0, "proposed_edges": 0, "errors": [], "dry_run": bool(dry_run)}
+
+    candidates, warnings = await _edge_backfill_candidates(
+        mgr,
+        limit=limit,
+        bucket_id=bucket_id,
+        query=query,
+    )
+    processed: list[str] = []
+    results: list[dict] = []
+    errors: list[str] = list(warnings)
+    edge_count = 0
+    proposed_count = 0
+    for bucket in candidates:
+        current_id = bucket.get("id")
+        if not current_id:
+            continue
+        try:
+            result = await engine.backfill_edges_for_bucket(
+                current_id,
+                mgr,
+                edge_store,
+                embedding_engine=emb_engine,
+                dry_run=dry_run,
+            )
+            result = dict(result or {})
+            processed.append(current_id)
+            edge_count += int(result.get("edges", 0) or 0)
+            proposed_count += int(result.get("proposed_edges", 0) or 0)
+            results.append(result)
+        except Exception as e:
+            logger.warning("Memory edge backfill failed / 关系边补跑失败: %s: %s", current_id, e)
+            errors.append(f"{current_id}: {e}")
+    return {
+        "processed": len(processed),
+        "ids": processed,
+        "edges": edge_count,
+        "proposed_edges": proposed_count,
+        "results": results,
+        "errors": errors,
+        "dry_run": bool(dry_run),
+    }
+
+
+async def edge_backfill(
+    limit: int = 10,
+    bucket_id: str = "",
+    query: str = "",
+    dry_run: bool = False,
+) -> dict:
+    """只补 memory_edges 关系边，不改 bucket 正文、tags、importance、confidence。可用 bucket_id 或 query 定向。"""
+    return await _backfill_memory_edges(
+        limit=limit,
+        bucket_id=bucket_id,
+        query=query,
+        dry_run=dry_run,
+    )
 
 
 async def _ensure_decay_engine_started_for_transport(transport_name: str) -> None:
@@ -1217,6 +2773,9 @@ async def _merge_or_create(
     name: str = "",
     *,
     allow_merge: bool = True,
+    memory_subject: str = "",
+    memory_layer: str = "",
+    memory_classification_source: str = "",
 ) -> tuple[str, str, bool, dict | None]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -1224,6 +2783,7 @@ async def _merge_or_create(
     检查是否有相似桶可合并，有则合并，无则新建。
     返回 (桶ID, 显示名称, 是否合并)。
     """
+    content = _normalize_memory_sections_for_write(content)
     try:
         existing = await bucket_mgr.search(
             content,
@@ -1248,6 +2808,7 @@ async def _merge_or_create(
         ):
             try:
                 merged = await dehydrator.merge(bucket["content"], content)
+                merged = _normalize_memory_sections_for_write(merged)
                 old_v = bucket["metadata"].get("valence", 0.5)
                 old_a = bucket["metadata"].get("arousal", 0.3)
                 merged_valence = round((old_v + valence) / 2, 2)
@@ -1274,17 +2835,40 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
+        extra_metadata=_memory_classification_metadata(
+            memory_subject,
+            memory_layer,
+            memory_classification_source,
+        ),
     )
     _queue_embedding_refresh(bucket_id)
     return bucket_id, name or bucket_id, False, related_bucket
 
 
-async def _build_mcp_related_memory_block(
+def _memory_classification_metadata(
+    memory_subject: str,
+    memory_layer: str,
+    memory_classification_source: str = "",
+) -> dict:
+    if not memory_subject or not memory_layer:
+        return {}
+    payload = {
+        "memory_subject": str(memory_subject),
+        "memory_layer": str(memory_layer),
+    }
+    if memory_classification_source:
+        payload["memory_classification_source"] = str(memory_classification_source)
+    return payload
+
+
+async def _build_mcp_diffused_memory_block(
     source_buckets: list[dict],
     all_buckets: list[dict] | None,
     token_budget: int,
     limit_per_source: int,
     min_confidence: float,
+    query_text: str = "",
+    exclude_bucket_ids: set[str] | None = None,
 ) -> str:
     if token_budget <= 0 or not source_buckets:
         return ""
@@ -1296,6 +2880,7 @@ async def _build_mcp_related_memory_block(
 
     source_ids = [bucket["id"] for bucket in source_buckets if bucket.get("id")]
     source_set = set(source_ids)
+    exclude_set = source_set | set(exclude_bucket_ids or set())
     if not source_ids:
         return ""
 
@@ -1303,46 +2888,91 @@ async def _build_mcp_related_memory_block(
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
         except Exception as e:
-            logger.warning(f"Failed to list buckets for related memory / 关联记忆列桶失败: {e}")
+            logger.warning(f"Failed to list buckets for diffused memory / 联想浮现列桶失败: {e}")
             all_buckets = []
 
     bucket_map = {bucket["id"]: bucket for bucket in all_buckets if bucket.get("id")}
-    edges = memory_edge_store.related_edges(
-        source_ids,
-        min_confidence=min_confidence,
-        limit_per_source=limit_per_source,
+    node_salience = None
+    node_resonance = None
+    if _node_facets_enabled(config):
+        try:
+            memory_node_store.bulk_upsert(list(bucket_map.values()))
+            query_facets = memory_node_store.facets_for_text(query_text)
+            node_salience = _node_salience_lookup
+            node_resonance = _node_resonance_lookup(query_facets)
+        except Exception as e:
+            logger.warning(f"Failed to refresh memory nodes / 记忆节点刷新失败: {e}")
+
+    edges = [
+        edge
+        for edge in memory_edge_store.list_edges()
+        if float(edge.get("confidence", 0.0)) >= min_confidence
+    ]
+    diffusion_options = _breath_related_diffusion_options(len(source_ids) * limit_per_source)
+    hits = diffuse_memory(
+        seed_scores_for_buckets(source_buckets),
+        edges,
+        bucket_map,
+        options=diffusion_options,
+        exclude_ids=exclude_set,
+        node_salience=node_salience,
+        node_resonance=node_resonance,
+        query_text=query_text,
     )
 
     parts = []
     seen_targets = set()
     remaining = token_budget
-    for edge in edges:
-        target_id = edge.get("target")
-        if not target_id or target_id in source_set or target_id in seen_targets:
+    query_plan = _recall_query_plan(query_text)
+    allow_archive_targets = query_plan.allow_archive_targets
+    for hit in hits:
+        target_id = hit.bucket_id
+        if not target_id or target_id in seen_targets:
             continue
 
         target = bucket_map.get(target_id)
         if not target:
             continue
         meta = target.get("metadata", {})
-        if meta.get("type") == "feel":
+        if not can_bucket_be_related_target(target, explicit_lookup=allow_archive_targets):
+            continue
+        if (
+            query_plan.enforce_topic_evidence
+            and not _bucket_has_query_topic_evidence(query_text, target)
+        ):
             continue
 
         try:
             clean_meta = {k: v for k, v in meta.items() if k != "tags"}
-            summary = await dehydrator.dehydrate(
+            raw_summary = await dehydrator.dehydrate(
                 _bucket_text_for_embedding(target),
                 clean_meta,
             )
-            arrow = "<-" if edge.get("direction") == "incoming" else "->"
-            confidence = edge.get("confidence", 0.0)
-            relation_type = edge.get("relation_type", "relates_to")
-            reason = edge.get("reason") or relation_type
-            block = (
-                f"[{edge.get('source')} {arrow} {target_id}] "
-                f"[{relation_type}, confidence={confidence}] {reason}\n"
-                f"[bucket_id:{target_id}] {summary}"
+            summary = _compact_diffused_summary(target, raw_summary)
+            context = _bucket_temperature_context(target)
+            path_summary = _bucket_diffusion_path_summary(hit.best_path, bucket_map)
+            caution = (
+                "路径含冲突/阻断，仅作边界背景。"
+                if path_has_caution(hit.best_path)
+                else "背景联想，不代表当前事实。"
             )
+            if (
+                diffusion_options.chain_walk_enabled
+                and len(getattr(hit.best_path, "steps", ()) or ()) >= 2
+            ):
+                block = _format_bucket_chain_bundle(
+                    target_id,
+                    target,
+                    summary,
+                    context,
+                    hit.best_path,
+                    bucket_map,
+                    caution,
+                )
+            else:
+                path_part = f"路径: {path_summary}；" if path_summary else ""
+                context_part = f"；语境: {context}" if context else ""
+                block = f"- [bucket_id:{target_id}] {path_part}摘要: {summary}{context_part}（{caution}）"
             block_tokens = count_tokens_approx(block)
             if block_tokens > remaining:
                 break
@@ -1352,10 +2982,2181 @@ async def _build_mcp_related_memory_block(
             if remaining <= 0:
                 break
         except Exception as e:
-            logger.warning(f"Failed to build related memory block / 关联记忆构建失败: {e}")
+            logger.warning(f"Failed to build diffused memory block / 联想浮现构建失败: {e}")
             continue
 
     return "\n---\n".join(parts)
+
+
+def _format_bucket_chain_bundle(
+    target_id: str,
+    target: dict,
+    summary: str,
+    temperature_context: str,
+    path,
+    bucket_map: dict[str, dict],
+    note: str,
+) -> str:
+    nodes = tuple(str(node_id) for node_id in (getattr(path, "nodes", ()) or ()))
+    seed_id = nodes[0] if nodes else ""
+    seed_label = _inspect_bucket_label(bucket_map.get(seed_id), seed_id)
+    target_label = _inspect_bucket_label(target, target_id)
+    chain = _bucket_diffusion_path_summary(path, bucket_map)
+    temperature_part = f"；temperature: {temperature_context}" if temperature_context else ""
+    return (
+        f"- Chain Bundle: seed {seed_label}；chain: {chain}；"
+        f"target: {target_label}: {summary}{temperature_part}（{note}）"
+    )
+
+
+def _bucket_temperature_context(bucket: dict, max_items: int = 2, max_chars: int = 90) -> str:
+    try:
+        moments = parse_bucket_moments(bucket, _recall_relevance_options())
+    except Exception:
+        return ""
+    contexts = [
+        moment
+        for moment in moments
+        if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS and _moment_text(moment, max_chars)
+    ][:max_items]
+    return " / ".join(f"[{_moment_label(moment)}] {_moment_text(moment, max_chars)}" for moment in contexts)
+
+
+MOMENT_SECTION_LABELS = {
+    "body": "body",
+    "moment": "moment",
+    "fact": "fact",
+    "original": "original",
+    "evidence_context": "evidence_context",
+    "context": "context",
+    "reflection": "reflection",
+    "feeling": "feeling",
+    "followup": "followup",
+    "affect_anchor": "affect_anchor",
+    "favorite_reason": "favorite_reason",
+    "comment": "年轮",
+}
+
+MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS
+PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "followup", "comment")
+
+
+def _moment_text(moment: dict, max_chars: int = 500) -> str:
+    text = strip_temperature_meaning_lines(str(moment.get("text") or ""))
+    return _clip_text(" ".join(text.split()), max_chars)
+
+
+def _moment_label(moment: dict) -> str:
+    section = str(moment.get("section") or "moment")
+    return MOMENT_SECTION_LABELS.get(section, section)
+
+
+def _moment_bucket_title(moment: dict) -> str:
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    return str(meta.get("bucket_name") or moment.get("bucket_id") or "").strip()
+
+
+def _moments_by_bucket(moments: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for moment in moments:
+        bucket_id = str(moment.get("bucket_id") or "")
+        if bucket_id:
+            grouped.setdefault(bucket_id, []).append(moment)
+    for items in grouped.values():
+        items.sort(key=lambda item: int(item.get("ordinal") or 0))
+    return grouped
+
+
+def _recallable_moments(moments: list[dict]) -> list[dict]:
+    return [
+        moment for moment in moments
+        if can_moment_be_recall_context(moment)
+    ]
+
+
+def _direct_recallable_moments(moments: list[dict], *, explicit_lookup: bool = False) -> list[dict]:
+    return [
+        moment for moment in _recallable_moments(moments)
+        if can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
+    ]
+
+
+def _related_recallable_moments(moments: list[dict], *, explicit_lookup: bool = False) -> list[dict]:
+    return [
+        moment for moment in _recallable_moments(moments)
+        if can_moment_be_related_target(moment, explicit_lookup=explicit_lookup)
+    ]
+
+
+def _representative_moment(moments: list[dict]) -> dict | None:
+    for section in (
+        "original",
+        "moment",
+        "fact",
+        "body",
+        "evidence_context",
+        "context",
+        "reflection",
+        "feeling",
+        "followup",
+        "comment",
+    ):
+        for moment in moments:
+            if moment.get("section") == section:
+                return moment
+    return moments[0] if moments else None
+
+
+def _direct_representative_moment(moments: list[dict], *, explicit_lookup: bool = False) -> dict | None:
+    return _representative_moment(_direct_recallable_moments(moments, explicit_lookup=explicit_lookup))
+
+
+def _related_representative_moment(moments: list[dict], *, explicit_lookup: bool = False) -> dict | None:
+    return _representative_moment(_related_recallable_moments(moments, explicit_lookup=explicit_lookup))
+
+
+def _bucket_edges_as_moment_edges(bucket_edges: list[dict], grouped: dict[str, list[dict]]) -> list[dict]:
+    edges = []
+    for edge in bucket_edges or []:
+        source_bucket = str(edge.get("source") or edge.get("source_memory_id") or "").strip()
+        target_bucket = str(edge.get("target") or edge.get("target_memory_id") or "").strip()
+        if not source_bucket or not target_bucket:
+            continue
+        target = _related_representative_moment(grouped.get(target_bucket, []), explicit_lookup=True)
+        if not target:
+            continue
+        relation_type = str(edge.get("relation_type") or edge.get("type") or "relates_to")
+        try:
+            confidence = float(edge.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        for source in grouped.get(source_bucket, []):
+            if not can_moment_be_direct_seed(source):
+                continue
+            edges.append(
+                {
+                    "source": source["moment_id"],
+                    "target": target["moment_id"],
+                    "bucket_id": source_bucket,
+                    "relation_type": relation_type,
+                    "confidence": max(0.0, min(1.0, confidence)),
+                    "reason": edge.get("reason") or "bucket edge bridge",
+                }
+            )
+    return edges
+
+
+def _moment_diffusion_map(moments: list[dict]) -> dict[str, dict]:
+    mapped = {}
+    for moment in moments:
+        moment_id = moment.get("moment_id")
+        if not moment_id:
+            continue
+        item = dict(moment)
+        meta = dict(item.get("metadata", {}) or {})
+        meta["importance"] = meta.get("bucket_importance", 5)
+        meta["type"] = meta.get("bucket_type", "")
+        meta["anchor"] = meta.get("bucket_anchor", False)
+        meta["pinned"] = meta.get("bucket_pinned", False)
+        meta["protected"] = meta.get("bucket_protected", False)
+        meta["name"] = meta.get("bucket_name", "")
+        meta["resolved"] = meta.get("bucket_resolved", False)
+        meta["digested"] = meta.get("bucket_digested", False)
+        item["metadata"] = meta
+        mapped[str(moment_id)] = item
+    return mapped
+
+
+def _seed_scores_for_moments(moments: list[dict]) -> dict[str, float]:
+    scores = {}
+    for moment in moments:
+        moment_id = str(moment.get("moment_id") or "")
+        if not moment_id:
+            continue
+        try:
+            score = float(moment.get("score", 0.65))
+        except (TypeError, ValueError):
+            score = 0.65
+        scores[moment_id] = max(0.15, min(1.0, score))
+    return scores
+
+
+def _context_moments_for_seed(seed: dict, grouped: dict[str, list[dict]]) -> list[dict]:
+    bucket_id = str(seed.get("bucket_id") or "")
+    seed_id = seed.get("moment_id")
+    bucket_moments = grouped.get(bucket_id, [])
+    contexts = []
+
+    def add_context(moment: dict) -> None:
+        if moment.get("moment_id") == seed_id:
+            return
+        if any(existing.get("moment_id") == moment.get("moment_id") for existing in contexts):
+            return
+        contexts.append(moment)
+
+    if _is_profile_fact_moment(seed):
+        for section in PROFILE_CONTEXT_SECTIONS:
+            for moment in bucket_moments:
+                if moment.get("section") == section:
+                    add_context(moment)
+                    break
+        return contexts[:4]
+
+    seed_ordinal = int(seed.get("ordinal") or 0)
+    for moment in bucket_moments:
+        section = moment.get("section")
+        ordinal = int(moment.get("ordinal") or 0)
+        if abs(ordinal - seed_ordinal) == 1 and section not in MOMENT_TEMPERATURE_SECTIONS:
+            add_context(moment)
+    for section in ("affect_anchor", "favorite_reason", "comment"):
+        for moment in bucket_moments:
+            if moment.get("moment_id") != seed_id and moment.get("section") == section:
+                add_context(moment)
+                break
+    return contexts[:4]
+
+
+def _is_profile_fact_moment(moment: dict) -> bool:
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    tags = {str(tag) for tag in meta.get("tags", []) or []}
+    tags.update(str(tag) for tag in meta.get("bucket_tags", []) or [])
+    return "profile_fact" in tags or bool(meta.get("profile_kind"))
+
+
+def _format_direct_moment(seed: dict, grouped: dict[str, list[dict]], token_budget: int) -> str:
+    title = _moment_bucket_title(seed)
+    head = f"[bucket_id:{seed['bucket_id']}] [moment_id:{seed['moment_id']}] {_moment_label(seed)}"
+    if title and title != seed["bucket_id"]:
+        head += f" {title}"
+    parts = [head, _moment_text(seed, 520)]
+    context_lines = [
+        f"- [{_moment_label(moment)}] [moment_id:{moment['moment_id']}] {_moment_text(moment, 260)}"
+        for moment in _context_moments_for_seed(seed, grouped)
+    ]
+    if context_lines:
+        parts.append("语境:\n" + "\n".join(context_lines))
+    block = "\n".join(parts)
+    if count_tokens_approx(block) <= token_budget:
+        return block
+    compact = f"{head}\n{_moment_text(seed, 260)}"
+    return compact if count_tokens_approx(compact) <= token_budget else ""
+
+
+async def _format_direct_bucket(
+    bucket: dict,
+    moment: dict,
+    grouped: dict[str, list[dict]],
+    token_budget: int,
+    *,
+    query_text: str = "",
+    direct_render_mode: str = "auto",
+) -> str:
+    original = _rendered_bucket_content(bucket)
+    header = _direct_bucket_header(bucket, moment)
+    original_block = f"{header} bucket_original\n{original}" if original else f"{header} bucket_original"
+    if count_tokens_approx(original_block) <= token_budget:
+        return original_block
+
+    wants_capsule = direct_render_mode == "full" or (
+        direct_render_mode == "auto"
+        and (_bucket_is_high_value(bucket) or _query_requests_direct_detail(query_text))
+    )
+    if wants_capsule:
+        try:
+            capsule = await dehydrator.dehydrate_direct_capsule(
+                original,
+                _bucket_metadata_for_dehydration(bucket),
+            )
+            block = f"{header} bucket_capsule\n{capsule}\nmatched_moment: {_moment_text(moment, 220)}"
+            if count_tokens_approx(block) <= token_budget:
+                return block
+            compact = f"{header} bucket_capsule\n{_clip_text(capsule, 260)}"
+            if count_tokens_approx(compact) <= token_budget:
+                return compact
+            return _trim_text_to_token_budget(compact, token_budget)
+        except Exception as e:
+            logger.warning(f"Direct bucket capsule failed / 直接命中整桶脱水失败: {e}")
+
+    return _format_direct_bucket_window(bucket, moment, grouped, token_budget)
+
+
+def _direct_bucket_render_debug(
+    bucket: dict | None,
+    moment: dict | None,
+    token_budget: int,
+    *,
+    query_text: str = "",
+    direct_render_mode: str = "auto",
+) -> dict:
+    bucket = bucket or {}
+    moment = moment or {}
+    mode = _normalize_direct_render_mode(direct_render_mode)
+    original = _rendered_bucket_content(bucket)
+    header = _direct_bucket_header(bucket, moment)
+    original_block = f"{header} bucket_original\n{original}" if original else f"{header} bucket_original"
+    original_tokens = count_tokens_approx(original_block)
+    budget = max(0, int(token_budget or 0))
+    high_value = _bucket_is_high_value(bucket)
+    detail_query = _query_requests_direct_detail(query_text)
+    original_fits = original_tokens <= budget
+    wants_capsule = mode == "full" or (mode == "auto" and (high_value or detail_query))
+    if original_fits:
+        shape = "bucket_original"
+        reason = "original_fits_budget"
+    elif wants_capsule:
+        shape = "bucket_capsule"
+        if mode == "full":
+            reason = "mode_full"
+        elif detail_query:
+            reason = "auto_detail_query"
+        else:
+            reason = "auto_high_value"
+    else:
+        shape = "bucket_window"
+        reason = "long_bucket_window"
+    return {
+        "mode": mode,
+        "shape": shape,
+        "reason": reason,
+        "token_budget": budget,
+        "original_tokens": original_tokens,
+        "original_fits": original_fits,
+        "high_value": high_value,
+        "detail_query": detail_query,
+        "wants_capsule": wants_capsule,
+    }
+
+
+def _format_direct_bucket_window(
+    bucket: dict,
+    moment: dict,
+    grouped: dict[str, list[dict]],
+    token_budget: int,
+) -> str:
+    header = _direct_bucket_header(bucket, moment)
+    original = _rendered_bucket_content(bucket)
+    parts = [
+        f"{header} bucket_window",
+        f"matched_moment: {_moment_text(moment, 320)}",
+    ]
+    window = _original_window_around_moment(original, moment)
+    if window:
+        parts.append("original_window:\n" + window)
+    context_lines = [
+        f"- [{_moment_label(context)}] [moment_id:{context['moment_id']}] {_moment_text(context, 120)}"
+        for context in _context_moments_for_seed(moment, grouped)
+        if context.get("section") in MOMENT_TEMPERATURE_SECTIONS
+    ][:2]
+    if context_lines:
+        parts.append("语境:\n" + "\n".join(context_lines))
+    block = "\n".join(parts)
+    if count_tokens_approx(block) <= token_budget:
+        return block
+    compact_parts = [
+        f"{header} bucket_window",
+        f"matched_moment: {_moment_text(moment, 120)}",
+    ]
+    if window:
+        compact_parts.append("original_window:\n" + _clip_text(window, 220))
+    compact = "\n".join(compact_parts)
+    if count_tokens_approx(compact) <= token_budget:
+        return compact
+    return _trim_text_to_token_budget(compact, token_budget)
+
+
+def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
+    if token_budget <= 0:
+        return ""
+    trimmed = str(text or "").strip()
+    while trimmed and count_tokens_approx(trimmed) > token_budget:
+        cut = max(1, int(len(trimmed) * 0.85))
+        trimmed = trimmed[:cut].rstrip()
+    return trimmed
+
+
+def _normalize_direct_render_mode(value: object) -> str:
+    mode = str(value or "auto").strip().lower()
+    return mode if mode in {"auto", "compact", "full"} else "auto"
+
+
+def _normalize_retrieval_mode(value: object) -> str:
+    mode = str(value or "graph").strip().lower()
+    return mode if mode in {"graph", "bucket"} else "graph"
+
+
+def _query_resurface_enabled() -> bool:
+    recall_cfg = config.get("recall", {}) if isinstance(config.get("recall", {}), dict) else {}
+    return _bool_value(recall_cfg.get("query_resurface_enabled"), False)
+
+
+def _word_map_hint_available() -> bool:
+    gateway_cfg = config.get("gateway", {}) if isinstance(config.get("gateway", {}), dict) else {}
+    return (
+        _bool_value(gateway_cfg.get("word_map_hint_enabled"), False)
+        and word_map_store is not None
+        and bool(getattr(word_map_store, "enabled", False))
+    )
+
+
+def _word_map_hint_settings() -> dict[str, float | int]:
+    gateway_cfg = config.get("gateway", {}) if isinstance(config.get("gateway", {}), dict) else {}
+    return {
+        "moment_boost": _float_between(gateway_cfg.get("word_map_hint_moment_boost"), 0.25, 0.0, 1.0),
+        "neighbor_limit": _int_between(gateway_cfg.get("word_map_hint_neighbor_limit"), 6, 0, 40),
+        "bucket_limit": _int_between(gateway_cfg.get("word_map_hint_bucket_limit"), 12, 1, 100),
+    }
+
+
+def _get_breath_word_map_hints(
+    query: str,
+    buckets: list[dict],
+) -> tuple[dict[str, float], dict[str, dict]]:
+    if not _word_map_hint_available():
+        return {}, {}
+    terms = _specific_query_terms(query)
+    if not terms:
+        return {}, {}
+    eligible_ids = {
+        str(bucket.get("id") or "")
+        for bucket in buckets
+        if isinstance(bucket, dict) and bucket.get("id")
+    }
+    if not eligible_ids:
+        return {}, {}
+    settings = _word_map_hint_settings()
+    try:
+        payload = word_map_store.hint_buckets_for_terms(
+            terms,
+            neighbor_limit=int(settings["neighbor_limit"]),
+            bucket_limit=int(settings["bucket_limit"]),
+        )
+    except Exception as exc:
+        logger.warning("Breath word map hint lookup failed / breath 词图提示查询失败: %s", exc)
+        return {}, {}
+
+    raw_scores = payload.get("bucket_scores", {}) if isinstance(payload, dict) else {}
+    raw_evidence = payload.get("evidence", {}) if isinstance(payload, dict) else {}
+    scores: dict[str, float] = {}
+    debug: dict[str, dict] = {}
+    for bucket_id, score in raw_scores.items():
+        bucket_id = str(bucket_id or "")
+        if bucket_id not in eligible_ids:
+            continue
+        scores[bucket_id] = max(0.0, min(1.0, float(score or 0.0)))
+        evidence = raw_evidence.get(bucket_id, {}) if isinstance(raw_evidence, dict) else {}
+        debug[bucket_id] = evidence if isinstance(evidence, dict) else {}
+    return scores, debug
+
+
+def _append_breath_word_map_matches(
+    *,
+    query: str,
+    matches: list[dict],
+    all_buckets: list[dict],
+    seed_diagnostics: dict[str, dict],
+) -> tuple[dict[str, float], dict[str, dict]]:
+    word_map_scores, word_map_debug = _get_breath_word_map_hints(query, all_buckets)
+    if not word_map_scores:
+        return {}, {}
+
+    bucket_map = {
+        str(bucket.get("id") or ""): bucket
+        for bucket in all_buckets
+        if isinstance(bucket, dict) and bucket.get("id")
+    }
+    matched_ids = {str(bucket.get("id") or "") for bucket in matches if bucket.get("id")}
+    for bucket_id, hint_score in word_map_scores.items():
+        bucket = bucket_map.get(bucket_id)
+        if not bucket:
+            continue
+        hint_debug = word_map_debug.get(bucket_id) or {}
+        bucket["word_map_hint"] = True
+        bucket["word_map_score"] = round(float(hint_score), 4)
+        bucket["word_map_terms"] = list(hint_debug.get("direct_terms") or [])
+        bucket["word_map_neighbor_terms"] = list(hint_debug.get("neighbor_terms") or [])
+        seed = seed_diagnostics.setdefault(
+            bucket_id,
+            {
+                "bucket_id": bucket_id,
+                "bucket_name": (bucket.get("metadata") or {}).get("name") or bucket_id,
+                "sources": [],
+            },
+        )
+        if "word_map" not in seed["sources"]:
+            seed["sources"].append("word_map")
+        seed["word_map_score"] = round(float(hint_score), 4)
+        seed["word_map_terms"] = bucket["word_map_terms"]
+        seed["word_map_neighbor_terms"] = bucket["word_map_neighbor_terms"]
+        if bucket_id not in matched_ids:
+            bucket["score"] = max(0.15, min(1.0, float(hint_score)))
+            matches.append(bucket)
+            matched_ids.add(bucket_id)
+    matches.sort(key=lambda bucket: float(bucket.get("score", 0.0) or 0.0), reverse=True)
+    return word_map_scores, word_map_debug
+
+
+def _breath_word_map_only_without_topic(query: str, moment: dict, seed_diagnostics: dict[str, dict]) -> bool:
+    bucket_id = str(moment.get("bucket_id") or "")
+    seed = seed_diagnostics.get(bucket_id, {})
+    sources = set(seed.get("sources") or [])
+    if "word_map" not in sources or len(sources - {"word_map"}) > 0:
+        return False
+    if _moment_has_query_topic_evidence(query, moment):
+        return False
+    return not _recall_policy().has_strong_score(rerank_score=moment.get("rerank_score"))
+
+
+def _bucket_relevance_node(bucket: dict, score: float = 0.0) -> dict:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    return {
+        "id": bucket.get("id"),
+        "text": strip_wikilinks(str(bucket.get("content") or "")),
+        "score": score,
+        "metadata": {
+            "bucket_name": meta.get("name") or bucket.get("id"),
+            "bucket_tags": meta.get("tags") or [],
+            "bucket_domain": meta.get("domain") or [],
+            "annotation_summary": meta.get("annotation_summary") or meta.get("summary") or "",
+            "evidence_spans": meta.get("evidence_spans") or [],
+        },
+    }
+
+
+def _direct_moments_for_bucket(bucket: dict, query: str = "") -> list[dict]:
+    explicit_lookup = _query_explicitly_requests_archive_memory(query)
+    return [
+        moment for moment in parse_bucket_moments(bucket, _recall_relevance_options())
+        if can_moment_be_recall_context(moment)
+        and can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
+    ]
+
+
+def _query_requests_direct_detail(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    if not text:
+        return False
+    phrases = (
+        "细节",
+        "原文",
+        "完整",
+        "整条",
+        "整桶",
+        "全部",
+        "当时怎么说",
+        "当时说了什么",
+        "具体怎么说",
+        "怎么写的",
+        "旧记录",
+    )
+    return any(phrase in text for phrase in phrases)
+
+
+def _bucket_is_high_value(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if meta.get("pinned") or meta.get("protected") or meta.get("anchor"):
+        return True
+    try:
+        if int(meta.get("importance", 5)) >= 9:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return has_favorite_memory_tag(meta.get("tags", []) or [], ai_name=_ai_author_name())
+
+
+def _bucket_metadata_for_dehydration(bucket: dict) -> dict:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    return {key: value for key, value in meta.items() if key not in {"tags", "comments"}}
+
+
+def _date_yyyy_mm_dd(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"^\d{4}-\d{2}-\d{2}", text)
+    return match.group(0) if match else text[:10]
+
+
+def _bucket_date_meta_parts(bucket: dict | None = None, moment: dict | None = None) -> list[str]:
+    bucket = bucket or {}
+    moment = moment or {}
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    created = _date_yyyy_mm_dd(
+        meta.get("created")
+        or moment_meta.get("bucket_created")
+        or moment.get("created_at")
+    )
+    return [f"[created:{created}]"] if created else []
+
+
+def _direct_bucket_header(bucket: dict, moment: dict) -> str:
+    bucket_id = str(bucket.get("id") or moment.get("bucket_id") or "")
+    title = _moment_bucket_title(moment) or str((bucket.get("metadata", {}) or {}).get("name") or bucket_id)
+    section = str(moment.get("section") or "body")
+    date_part = " ".join(_bucket_date_meta_parts(bucket, moment))
+    return (
+        f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] "
+        f"{date_part} {section} {title}"
+    ).strip()
+
+
+def _rendered_bucket_content(bucket: dict) -> str:
+    text = strip_wikilinks(str(bucket.get("content") or ""))
+    text = strip_display_temperature_sections(text)
+    return strip_temperature_meaning_lines(text).strip()
+
+
+def _original_window_around_moment(original: str, moment: dict, max_chars: int = 760) -> str:
+    text = str(original or "").strip()
+    source_window = source_ref_window(
+        moment,
+        allowed_root=str(config.get("buckets_dir") or ""),
+        max_chars=max_chars,
+    )
+    if not text:
+        return source_window
+    needle = strip_temperature_meaning_lines(strip_wikilinks(str(moment.get("text") or ""))).strip()
+    compact_needle = " ".join(needle.split())
+    compact_text = " ".join(text.split())
+    if not compact_needle:
+        return source_window or _clip_text(compact_text, max_chars)
+    index = compact_text.find(compact_needle)
+    if index < 0:
+        index = compact_text.find(compact_needle[:80])
+    if index < 0:
+        return source_window or _clip_text(compact_text, max_chars)
+    half = max_chars // 2
+    start = max(0, index - half)
+    end = min(len(compact_text), index + len(compact_needle) + half)
+    window = compact_text[start:end].strip()
+    if start > 0:
+        window = "..." + window
+    if end < len(compact_text):
+        window += "..."
+    return window
+
+
+def _format_related_moment(
+    moment: dict,
+    caution: bool = False,
+    path=None,
+    moment_map: dict[str, dict] | None = None,
+    chain_bundle: bool = False,
+) -> str:
+    moment_map = moment_map or {}
+    if caution:
+        note = "路径含冲突/阻断，仅作边界背景。"
+    elif path is not None and path_has_old_version(path):
+        note = "旧路径/旧版本背景，不代表当前事实。"
+    else:
+        note = "背景联想，不代表当前事实。"
+    if chain_bundle and path is not None and len(getattr(path, "steps", ()) or ()) >= 2:
+        return _format_related_chain_bundle(moment, note, path, moment_map)
+    summary = _diffused_moment_summary(moment, path=path, moment_map=moment_map)
+    context = _diffused_temperature_context(moment, path=path, moment_map=moment_map)
+    path_part = ""
+    if path is not None:
+        path_summary = _moment_path_summary(path, moment_map)
+        if path_summary:
+            path_part = f"路径: {path_summary}；"
+    context_part = f"；语境: {context}" if context else ""
+    return (
+        f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}] "
+        f"{path_part}摘要: {summary}{context_part}（{note}）"
+    )
+
+
+def _format_related_chain_bundle(
+    moment: dict,
+    note: str,
+    path,
+    moment_map: dict[str, dict],
+) -> str:
+    nodes = tuple(str(node_id) for node_id in (getattr(path, "nodes", ()) or ()))
+    seed_id = nodes[0] if nodes else ""
+    seed_label = _moment_node_label(moment_map.get(seed_id), seed_id)
+    chain = _moment_path_summary(path, moment_map)
+    target = _diffused_moment_summary(moment, path=None, moment_map=moment_map)
+    temperature = _diffused_temperature_context(moment, path=path, moment_map=moment_map)
+    temperature_part = f"；temperature: {temperature}" if temperature else ""
+    return (
+        f"- Chain Bundle: seed {seed_label}；chain: {chain}；"
+        f"target: {target}{temperature_part}（{note}）"
+    )
+
+
+def _format_secondary_direct_moment(moment: dict) -> str:
+    summary = _diffused_moment_summary(moment)
+    return (
+        f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}] "
+        f"摘要: {summary}（相关命中，来自同一查询语义。）"
+    )
+
+
+def _diffused_moment_summary(
+    moment: dict,
+    *,
+    path=None,
+    moment_map: dict[str, dict] | None = None,
+    max_chars: int = 180,
+) -> str:
+    label = _moment_label(moment)
+    title = _moment_bucket_title(moment) or str(moment.get("bucket_id") or "记忆")
+    status = _moment_status_label(moment)
+    parts = [f"{title} / {label}"]
+    if status:
+        parts.append(status)
+    path_summary = _moment_path_summary(path, moment_map or {}) if path is not None else ""
+    if path_summary:
+        parts.append(f"路径 {path_summary}")
+    return _clip_text("；".join(parts), max_chars)
+
+
+def _diffused_temperature_context(
+    moment: dict,
+    *,
+    path=None,
+    moment_map: dict[str, dict] | None = None,
+    max_items: int = 2,
+    max_chars: int = 90,
+) -> str:
+    moment_map = moment_map or {}
+    bucket_id = str(moment.get("bucket_id") or "")
+    if not bucket_id:
+        return ""
+    contexts: list[dict] = []
+    seen: set[str] = set()
+
+    def add_context(candidate: dict | None) -> None:
+        if len(contexts) >= max_items or not isinstance(candidate, dict):
+            return
+        if str(candidate.get("bucket_id") or "") != bucket_id:
+            return
+        if candidate.get("section") not in MOMENT_TEMPERATURE_SECTIONS:
+            return
+        moment_id = str(candidate.get("moment_id") or "")
+        if not moment_id or moment_id == str(moment.get("moment_id") or "") or moment_id in seen:
+            return
+        text = _moment_text(candidate, max_chars)
+        if not text:
+            return
+        seen.add(moment_id)
+        contexts.append(candidate)
+
+    for node_id in getattr(path, "nodes", ()) or ():
+        add_context(moment_map.get(str(node_id)))
+    for candidate in sorted(
+        moment_map.values(),
+        key=lambda item: int(item.get("ordinal") or 0) if isinstance(item, dict) else 0,
+    ):
+        add_context(candidate)
+        if len(contexts) >= max_items:
+            break
+
+    return " / ".join(f"[{_moment_label(item)}] {_moment_text(item, max_chars)}" for item in contexts)
+
+
+def _moment_status_label(moment: dict) -> str:
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    if meta.get("resolved") or meta.get("bucket_resolved"):
+        return "已解决"
+    if meta.get("digested") or meta.get("bucket_digested"):
+        return "已消化"
+    if str(meta.get("type") or meta.get("bucket_type") or "").lower() == "archived":
+        return "归档"
+    return ""
+
+
+def _moment_path_summary(path, moment_map: dict[str, dict], max_chars: int = 140) -> str:
+    if path is None:
+        return ""
+    nodes = tuple(str(node_id) for node_id in (getattr(path, "nodes", ()) or ()))
+    if not nodes:
+        return ""
+    labels = [_moment_node_label(moment_map.get(nodes[0]), nodes[0])]
+    for step in getattr(path, "steps", ()) or ():
+        target_id = str(getattr(step, "target", "") or "")
+        arrow = "<-" if getattr(step, "direction", "") == "incoming" else "->"
+        labels.append(f"{arrow} {_moment_node_label(moment_map.get(target_id), target_id)}")
+    return _clip_text(" ".join(labels), max_chars)
+
+
+def _moment_node_label(moment: dict | None, fallback_id: str) -> str:
+    if isinstance(moment, dict):
+        return _clip_text(_moment_bucket_title(moment) or str(moment.get("bucket_id") or fallback_id), 48)
+    return _clip_text(fallback_id, 48)
+
+
+def _recall_relevance_options():
+    return memory_relevance_options_from_config(config)
+
+
+def _apply_recall_relevance_gate(query: str, candidates: list[dict]) -> list[dict]:
+    options = _recall_relevance_options()
+    filtered = []
+    adjusted = False
+    for moment in candidates:
+        multiplier = relevance_multiplier(query, moment, options)
+        if multiplier <= 0:
+            adjusted = True
+            continue
+        item = dict(moment)
+        try:
+            score = float(item.get("score", 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
+        new_score = round(score * multiplier, 4)
+        if new_score != score:
+            adjusted = True
+        item["score"] = new_score
+        filtered.append(item)
+    if adjusted:
+        filtered.sort(key=lambda item: _recall_rank(query, item))
+    return filtered
+
+
+def _recall_admission_thresholds() -> tuple[float, float]:
+    threshold_cfg = config.get("recall_thresholds", {}) or {}
+    return (
+        _float_between(threshold_cfg.get("explicit_admission_semantic_score"), 0.72, 0.0, 1.0),
+        _float_between(threshold_cfg.get("explicit_admission_rerank_score"), 0.65, 0.0, 1.0),
+    )
+
+
+def _recall_policy() -> RecallPolicy:
+    semantic_threshold, rerank_threshold = _recall_admission_thresholds()
+    return RecallPolicy(
+        _recall_relevance_options(),
+        semantic_threshold=semantic_threshold,
+        rerank_threshold=rerank_threshold,
+    )
+
+
+def _recall_query_plan(query: str, *, context_mode: str = ""):
+    return _recall_policy().plan_query(query, context_mode=context_mode)
+
+
+def _breath_moment_admission_decision(
+    query: str,
+    moment: dict,
+    seed_diagnostics: dict[str, dict],
+    *,
+    auto: bool = False,
+):
+    seed = seed_diagnostics.get(str(moment.get("bucket_id") or ""), {})
+    return _recall_policy().assess(
+        query,
+        moment,
+        semantic_score=seed.get("embedding_score"),
+        rerank_score=moment.get("rerank_score"),
+        high_confidence_edge="lexical" in (seed.get("sources") or []),
+        context_only=moment.get("section") in MOMENT_TEMPERATURE_SECTIONS,
+        auto=auto,
+    )
+
+
+async def _rerank_breath_moment_candidates(query: str, candidates: list[dict]) -> list[dict]:
+    if not candidates or not getattr(reranker_engine, "enabled", False):
+        return candidates
+    candidate_limit = min(
+        len(candidates),
+        max(1, int(getattr(reranker_engine, "candidate_limit", 20) or 20)),
+    )
+    head = candidates[:candidate_limit]
+    tail = candidates[candidate_limit:]
+    documents = [_moment_rerank_document(moment) for moment in head]
+    results = await reranker_engine.rerank(query, documents, top_n=len(head))
+    if not results:
+        return candidates
+
+    by_index = {result.index: result.score for result in results}
+    weight = max(0.0, min(1.0, float(getattr(reranker_engine, "score_weight", 0.65))))
+    reranked = []
+    for index, moment in enumerate(head):
+        item = dict(moment)
+        rerank_score = by_index.get(index)
+        try:
+            base_score = float(item.get("score", 0.0))
+        except (TypeError, ValueError):
+            base_score = 0.0
+        if rerank_score is None:
+            item["rerank_score"] = None
+            item["combined_score"] = base_score
+        else:
+            item["rerank_score"] = round(rerank_score, 4)
+            item["combined_score"] = round(base_score * (1.0 - weight) + rerank_score * weight, 4)
+            item["score"] = item["combined_score"]
+        reranked.append(item)
+    reranked.sort(
+        key=lambda item: (
+            _recall_rank(query, item)[0],
+            item.get("rerank_score") is None,
+            -(_safe_float(item.get("combined_score", item.get("score"))) or 0.0),
+            -(_safe_float(item.get("score")) or 0.0),
+        ),
+    )
+    return reranked + tail
+
+
+def _moment_rerank_document(moment: dict) -> str:
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    fields = [
+        f"title: {meta.get('bucket_name') or moment.get('bucket_id') or ''}",
+        f"section: {moment.get('section') or ''}",
+        f"domain: {' '.join(str(item) for item in meta.get('bucket_domain', []) or [])}",
+        f"tags: {' '.join(str(item) for item in meta.get('bucket_tags', []) or [])}",
+        f"summary: {meta.get('annotation_summary') or meta.get('summary') or ''}",
+        f"facets: {_format_annotation_facets(meta)}",
+        f"evidence: {_format_evidence_spans(meta)}",
+        f"text: {moment.get('text') or ''}",
+    ]
+    return "\n".join(fields)[:4000]
+
+
+def _format_annotation_facets(meta: dict) -> str:
+    facets = meta.get("annotation_facets")
+    if not isinstance(facets, dict):
+        return ""
+    parts = []
+    for facet, score in sorted(facets.items(), key=lambda item: str(item[0])):
+        try:
+            parts.append(f"{facet}:{float(score):.2f}")
+        except (TypeError, ValueError):
+            continue
+    return " ".join(parts)
+
+
+def _format_evidence_spans(meta: dict, max_items: int = 3) -> str:
+    spans = meta.get("evidence_spans")
+    if not isinstance(spans, list):
+        return ""
+    parts = []
+    for item in spans[:max_items]:
+        if isinstance(item, dict):
+            facet = str(item.get("facet") or "").strip()
+            text = str(item.get("text") or item.get("span") or "").strip()
+            if text:
+                parts.append(f"{facet}: {text}" if facet else text)
+        elif str(item).strip():
+            parts.append(str(item).strip())
+    return " | ".join(parts)
+
+
+def _upsert_breath_seed_diagnostic(
+    seed_diagnostics: dict[str, dict],
+    bucket: dict,
+    source: str,
+    *,
+    bucket_search_score: float | None = None,
+    embedding_score: float | None = None,
+) -> None:
+    bucket_id = str(bucket.get("id") or "").strip()
+    if not bucket_id:
+        return
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    item = seed_diagnostics.setdefault(
+        bucket_id,
+        {
+            "bucket_id": bucket_id,
+            "bucket_name": meta.get("name") or bucket_id,
+            "sources": [],
+        },
+    )
+    if source and source not in item["sources"]:
+        item["sources"].append(source)
+    if bucket_search_score is not None:
+        safe_score = _safe_float(bucket_search_score)
+        if safe_score is not None:
+            item["bucket_search_score"] = safe_score
+            item["keyword_score"] = round(_score_to_unit(safe_score), 4)
+    if embedding_score is not None:
+        safe_embedding_score = _safe_float(embedding_score)
+        if safe_embedding_score is not None:
+            item["embedding_score"] = safe_embedding_score
+
+
+def _score_to_unit(score: float) -> float:
+    try:
+        number = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+    if number > 1:
+        number = number / 100.0
+    return max(0.0, min(1.0, number))
+
+
+def _write_breath_recall_diagnostics(
+    *,
+    query: str,
+    recall_thresholds: dict,
+    seed_diagnostics: dict[str, dict],
+    pre_gate_candidates: list[dict],
+    gated_candidates: list[dict],
+    reranked_candidates: list[dict],
+    returned_moments: list[dict],
+    suppressed_candidates: list[dict],
+    displayed_moment_ids: list[str],
+    secondary_moment_ids: list[str],
+    related_source_bucket_ids: list[str],
+    related_included: bool,
+    drift_included: bool,
+    dream_included: bool,
+    response_sections: list[str],
+) -> None:
+    if not getattr(recall_diagnostics, "enabled", False):
+        return
+
+    gated_by_id = _moment_index(gated_candidates)
+    reranked_by_id = _moment_index(reranked_candidates)
+    suppressed_by_id = _moment_index(suppressed_candidates)
+    gated_rank = _moment_rank(gated_candidates)
+    reranked_rank = _moment_rank(reranked_candidates)
+    returned_ids = [str(moment.get("moment_id") or "") for moment in returned_moments if moment.get("moment_id")]
+    returned_set = set(returned_ids)
+    displayed_set = set(displayed_moment_ids)
+    secondary_set = set(secondary_moment_ids)
+    options = _recall_relevance_options()
+    max_candidates = max(1, int(getattr(recall_diagnostics, "max_candidates", 20) or 20))
+
+    candidates = []
+    for index, moment in enumerate(pre_gate_candidates[:max_candidates]):
+        moment_id = str(moment.get("moment_id") or "")
+        bucket_id = str(moment.get("bucket_id") or "")
+        decision = relevance_decision(query, moment, options)
+        gated = gated_by_id.get(moment_id)
+        reranked = reranked_by_id.get(moment_id)
+        final = reranked or gated
+        seed = seed_diagnostics.get(bucket_id, {})
+        admission = _breath_moment_admission_decision(query, final or moment, seed_diagnostics)
+        candidate = {
+            "pre_rank": index,
+            "gate_rank": gated_rank.get(moment_id),
+            "final_rank": reranked_rank.get(moment_id),
+            "bucket_id": bucket_id,
+            "bucket_name": _moment_bucket_title(moment),
+            "moment_id": moment_id,
+            "section": moment.get("section"),
+            "sources": seed.get("sources", []),
+            "bucket_search_score": seed.get("bucket_search_score"),
+            "keyword_score": seed.get("keyword_score"),
+            "embedding_score": seed.get("embedding_score"),
+            "word_map_score": seed.get("word_map_score"),
+            "word_map_terms": seed.get("word_map_terms", []),
+            "word_map_neighbor_terms": seed.get("word_map_neighbor_terms", []),
+            "score_before_gate": _safe_float(moment.get("score")),
+            "score_after_gate": _safe_float(gated.get("score")) if gated else None,
+            "rerank_score": _safe_float(final.get("rerank_score")) if final else None,
+            "combined_score": _safe_float(final.get("combined_score")) if final else None,
+            "intent_rank": _recall_rank(query, final or moment)[0],
+            "gate": "filtered" if decision.multiplier <= 0 else "kept",
+            "gate_multiplier": round(float(decision.multiplier), 4),
+            "gate_reasons": list(decision.reasons),
+            "admission": "suppressed" if moment_id in suppressed_by_id else "admitted" if admission.admit else "suppressed",
+            "admission_reason": admission.reason,
+            "selected_returned": moment_id in returned_set,
+            "selected_direct": moment_id in displayed_set,
+            "selected_secondary": moment_id in secondary_set,
+            "annotation_summary": (moment.get("metadata") or {}).get("annotation_summary"),
+            "annotation_facets": (moment.get("metadata") or {}).get("annotation_facets", {}),
+            "evidence_spans": (moment.get("metadata") or {}).get("evidence_spans", []),
+            "text_preview": _diagnostic_text_preview(moment),
+        }
+        candidates.append(candidate)
+
+    recall_diagnostics.write(
+        {
+            "source": "breath",
+            "mode": "search",
+            "query": str(query or ""),
+            "recall_thresholds": recall_thresholds,
+            "seed_buckets": list(seed_diagnostics.values())[:max_candidates],
+            "candidates": candidates,
+            "suppressed_candidates": [
+                {
+                    "bucket_id": str(moment.get("bucket_id") or ""),
+                    "bucket_name": _moment_bucket_title(moment),
+                    "moment_id": str(moment.get("moment_id") or ""),
+                    "section": moment.get("section"),
+                    "admission_reason": str(moment.get("_admission_reason") or "suppressed"),
+                    "score": _safe_float(moment.get("score")),
+                    "rerank_score": _safe_float(moment.get("rerank_score")),
+                    "word_map_score": _safe_float(moment.get("word_map_score")),
+                    "word_map_terms": list(moment.get("word_map_terms") or []),
+                    "word_map_neighbor_terms": list(moment.get("word_map_neighbor_terms") or []),
+                    "text_preview": _diagnostic_text_preview(moment),
+                }
+                for moment in suppressed_candidates[:max_candidates]
+            ],
+            "final": {
+                "returned_moment_ids": returned_ids,
+                "direct_moment_ids": displayed_moment_ids,
+                "secondary_moment_ids": secondary_moment_ids,
+                "related_source_bucket_ids": related_source_bucket_ids,
+                "related_included": related_included,
+                "drift_included": drift_included,
+                "dream_included": dream_included,
+                "response_sections": response_sections,
+            },
+        }
+    )
+
+
+def _format_suppressed_recall_candidate(moment: dict, seed_diagnostics: dict[str, dict]) -> str:
+    bucket_id = str(moment.get("bucket_id") or "")
+    seed = seed_diagnostics.get(bucket_id, {})
+    parts = [
+        f"- [bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}]",
+        f"reason={moment.get('_admission_reason') or 'suppressed'}",
+    ]
+    if seed.get("embedding_score") is not None:
+        parts.append(f"semantic={seed.get('embedding_score')}")
+    if seed.get("word_map_score") is not None:
+        parts.append(f"word_map={seed.get('word_map_score')}")
+    if moment.get("rerank_score") is not None:
+        parts.append(f"rerank={moment.get('rerank_score')}")
+    preview = _diagnostic_text_preview(moment)
+    if preview:
+        parts.append(f"preview={preview}")
+    return " ".join(parts)
+
+
+def _moment_index(moments: list[dict]) -> dict[str, dict]:
+    return {
+        str(moment.get("moment_id")): moment
+        for moment in moments
+        if moment.get("moment_id")
+    }
+
+
+def _moment_rank(moments: list[dict]) -> dict[str, int]:
+    return {
+        str(moment.get("moment_id")): index
+        for index, moment in enumerate(moments)
+        if moment.get("moment_id")
+    }
+
+
+def _safe_float(value) -> float | None:
+    try:
+        return round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _diagnostic_text_preview(moment: dict) -> str:
+    max_chars = max(0, int(getattr(recall_diagnostics, "max_text_chars", 220) or 0))
+    if max_chars <= 0:
+        return ""
+    return _moment_text(moment, max_chars)
+
+
+def _breath_recall_thresholds(query: str, max_results: int) -> dict:
+    threshold_cfg = config.get("recall_thresholds", {}) or {}
+    options = _recall_relevance_options()
+    query_active = active_facets(facets_for_text(query, options))
+    has_explicit = _query_has_explicit_entity_marker(query)
+    is_vague = _query_is_vague_recall(query)
+
+    base_vector_min = _float_between(threshold_cfg.get("vector_min_score"), 0.50, 0.0, 1.0)
+    profile = "default"
+    vector_min = base_vector_min
+    top_k = max(max_results, 20)
+
+    if has_explicit:
+        profile = "explicit"
+        vector_min = _float_between(threshold_cfg.get("explicit_vector_min_score"), 0.55, 0.0, 1.0)
+    elif is_vague:
+        profile = "vague"
+        vector_min = _float_between(threshold_cfg.get("vague_vector_min_score"), 0.40, 0.0, 1.0)
+        top_k = max(top_k, _int_between(threshold_cfg.get("vague_top_k"), 50, 20, 100))
+    elif query_active:
+        profile = "facet"
+        vector_min = _float_between(threshold_cfg.get("facet_vector_min_score"), 0.45, 0.0, 1.0)
+
+    return {
+        "profile": profile,
+        "vector_min_score": vector_min,
+        "semantic_top_k": top_k,
+        "query_facets": sorted(query_active),
+        "has_explicit_entity": has_explicit,
+        "is_vague": is_vague,
+    }
+
+
+BREATH_LEXICAL_EMOTION_TERMS = (
+    "激动哭", "感动哭", "高兴哭", "开心哭", "难过哭", "委屈哭",
+    "破防哭", "想哭",
+)
+BREATH_LEXICAL_DROP_PREFIXES = ("今天", "昨天", "刚才", "刚刚", "这次", "现在", "今晚", "昨晚")
+BREATH_LEXICAL_GENERIC_TERMS = {
+    "哭", "哭了", "哭吗", "哭呢", "今天哭", "昨天哭", "刚才哭", "刚刚哭",
+    "今天", "昨天", "刚才", "刚刚", "这次", "现在", "最近", "记忆", "回忆",
+    "原因", "为什么", "知道", "记得", "想起", "想起来", "什么", "事情",
+}
+
+
+def _breath_lexical_match_terms(query: str) -> list[str]:
+    text = str(query or "").strip()
+    if not text:
+        return []
+    compact = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", text.lower())
+    terms: list[str] = []
+    for term in BREATH_LEXICAL_EMOTION_TERMS:
+        if term in compact:
+            terms.append(term)
+    for term in _recall_policy().specific_query_terms(text):
+        cleaned = str(term or "").strip()
+        if not cleaned:
+            continue
+        collapsed = re.sub(r"\s+", "", cleaned)
+        for prefix in BREATH_LEXICAL_DROP_PREFIXES:
+            if collapsed.startswith(prefix) and len(collapsed) > len(prefix):
+                collapsed = collapsed[len(prefix):]
+                break
+        key = collapsed.lower()
+        if len(key) < 2 or key in BREATH_LEXICAL_GENERIC_TERMS:
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff]+", collapsed) and len(collapsed) < 2:
+            continue
+        terms.append(collapsed)
+    output = []
+    seen = set()
+    for term in terms:
+        key = str(term).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(str(term))
+    return output[:5]
+
+
+def _bucket_matches_breath_lexical_terms(bucket: dict, terms: list[str]) -> bool:
+    if not terms:
+        return False
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    haystack = " ".join(
+        [
+            str(meta.get("name") or bucket.get("id") or ""),
+            " ".join(str(tag) for tag in meta.get("tags", []) or []),
+            " ".join(str(item) for item in meta.get("domain", []) or []),
+            strip_wikilinks(strip_affect_anchor(str(bucket.get("content") or ""))),
+        ]
+    ).lower()
+    return any(str(term or "").strip().lower() in haystack for term in terms)
+
+
+def _breath_bucket_score(
+    bucket: dict,
+    *,
+    topic: float,
+    emotion: float,
+    time_s: float,
+    importance: float,
+) -> float:
+    w_topic = float(getattr(bucket_mgr, "w_topic", 4.0) or 4.0)
+    w_emotion = float(getattr(bucket_mgr, "w_emotion", 2.0) or 2.0)
+    w_time = float(getattr(bucket_mgr, "w_time", 1.5) or 1.5)
+    w_importance = float(getattr(bucket_mgr, "w_importance", 1.0) or 1.0)
+    raw_total = (
+        topic * w_topic
+        + emotion * w_emotion
+        + time_s * w_time
+        + importance * w_importance
+    )
+    weight_sum = w_topic + w_emotion + w_time + w_importance
+    normalized = (raw_total / weight_sum) * 100 if weight_sum > 0 else 0
+    if (bucket.get("metadata") or {}).get("resolved", False):
+        normalized *= 0.3
+    return normalized
+
+
+def _append_breath_lexical_matches(
+    *,
+    query: str,
+    matches: list[dict],
+    all_buckets: list[dict],
+    seed_diagnostics: dict[str, dict],
+    q_valence: float | None = None,
+    q_arousal: float | None = None,
+) -> list[str]:
+    terms = _breath_lexical_match_terms(query)
+    if not terms:
+        return []
+    matched_ids = {str(bucket.get("id") or "") for bucket in matches if bucket.get("id")}
+    for bucket in all_buckets:
+        bucket_id = str(bucket.get("id") or "")
+        if not bucket_id:
+            continue
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("type") == "feel":
+            continue
+        if not _bucket_matches_breath_lexical_terms(bucket, terms):
+            continue
+        topic = (
+            bucket_mgr._calc_topic_score(query, bucket)
+            if hasattr(bucket_mgr, "_calc_topic_score")
+            else 1.0
+        )
+        emotion = (
+            bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
+            if hasattr(bucket_mgr, "_calc_emotion_score")
+            else 0.5
+        )
+        time_s = (
+            bucket_mgr._calc_time_score(meta)
+            if hasattr(bucket_mgr, "_calc_time_score")
+            else 0.5
+        )
+        importance = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
+        score = max(
+            _breath_bucket_score(
+                bucket,
+                topic=topic,
+                emotion=emotion,
+                time_s=time_s,
+                importance=importance,
+            ),
+            float(getattr(bucket_mgr, "fuzzy_threshold", 50) or 50) + 5,
+        )
+        bucket["score"] = round(score, 2)
+        bucket["lexical_match"] = True
+        bucket["lexical_terms"] = terms
+        _upsert_breath_seed_diagnostic(
+            seed_diagnostics,
+            bucket,
+            "lexical",
+            bucket_search_score=bucket.get("score"),
+        )
+        seed_diagnostics[bucket_id]["lexical_terms"] = terms
+        if bucket_id not in matched_ids:
+            matches.append(bucket)
+            matched_ids.add(bucket_id)
+    matches.sort(key=lambda bucket: float(bucket.get("score", 0.0) or 0.0), reverse=True)
+    return terms
+
+
+def _query_has_explicit_entity_marker(query: str) -> bool:
+    return query_has_explicit_entity_marker(query)
+
+
+def _query_is_vague_recall(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    if not text:
+        return False
+    vague_markers = (
+        "最近",
+        "有趣",
+        "想起来",
+        "回忆",
+        "记忆",
+        "什么事",
+        "有什么",
+        "随便",
+        "random",
+        "recent",
+        "interesting",
+        "anything",
+        "memory",
+        "memories",
+    )
+    if any(marker in text for marker in vague_markers):
+        return True
+    terms = re.findall(r"[A-Za-z0-9_./:-]+|[\u4e00-\u9fff]{1,4}", text)
+    return len(terms) <= 2 and not _query_has_explicit_entity_marker(text)
+
+
+def _query_wants_body_chain(query: str) -> bool:
+    return _recall_query_plan(query).wants_body_chain
+
+
+def _query_requires_direct_topic_evidence(query: str) -> bool:
+    return _recall_query_plan(query).requires_topic_evidence
+
+
+def _recall_rank(query: str, moment: dict) -> tuple[int, float]:
+    return recall_rank(query, moment, _recall_relevance_options())
+
+
+async def _build_recall_debug_payload(
+    query: str,
+    *,
+    max_candidates: int = 20,
+    max_results: int = 3,
+    max_tokens: int = 800,
+    direct_render_mode: str = "auto",
+    domain: str = "",
+    valence: float | None = None,
+    arousal: float | None = None,
+) -> dict:
+    query = str(query or "").strip()
+    if not query:
+        return {"status": "error", "error": "query_required"}
+
+    max_candidates = _int_between(max_candidates, 20, 1, 100)
+    max_results = _int_between(max_results, 3, 1, 20)
+    max_tokens = _int_between(max_tokens, 800, 1, 20000)
+    direct_render_mode = _normalize_direct_render_mode(direct_render_mode)
+    domain_filter = [d.strip() for d in str(domain or "").split(",") if d.strip()] or None
+    q_valence = valence if isinstance(valence, (int, float)) and 0 <= valence <= 1 else None
+    q_arousal = arousal if isinstance(arousal, (int, float)) and 0 <= arousal <= 1 else None
+    search_query = recall_search_query(query, _recall_relevance_options())
+    warnings: list[str] = []
+
+    try:
+        matches = await bucket_mgr.search(
+            search_query,
+            limit=max(max_candidates, max_results, 20),
+            domain_filter=domain_filter,
+            query_valence=q_valence,
+            query_arousal=q_arousal,
+        )
+    except Exception as e:
+        return {"status": "error", "error": "search_failed", "message": str(e)}
+
+    seed_diagnostics: dict[str, dict] = {}
+    for bucket in matches:
+        _upsert_breath_seed_diagnostic(
+            seed_diagnostics,
+            bucket,
+            "keyword",
+            bucket_search_score=bucket.get("score"),
+        )
+
+    recall_thresholds = _breath_recall_thresholds(query, max_results)
+    matched_ids = {bucket["id"] for bucket in matches if bucket.get("id")}
+    try:
+        vector_results = await embedding_engine.search_similar(
+            search_query,
+            top_k=int(recall_thresholds["semantic_top_k"]),
+        )
+        for bucket_id, sim_score in vector_results:
+            if bucket_id in seed_diagnostics:
+                seed_diagnostics[bucket_id]["embedding_score"] = round(float(sim_score), 4)
+            if bucket_id not in matched_ids and sim_score >= recall_thresholds["vector_min_score"]:
+                bucket = await bucket_mgr.get(bucket_id)
+                if bucket and bucket.get("metadata", {}).get("type") != "feel":
+                    bucket["score"] = round(sim_score * 100, 2)
+                    bucket["vector_match"] = True
+                    _upsert_breath_seed_diagnostic(
+                        seed_diagnostics,
+                        bucket,
+                        "vector",
+                        embedding_score=sim_score,
+                    )
+                    matches.append(bucket)
+                    matched_ids.add(bucket_id)
+    except Exception as e:
+        warnings.append(f"vector_search_failed: {e}")
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        warnings.append(f"list_buckets_failed: {e}")
+        all_buckets = matches
+
+    lexical_terms = _append_breath_lexical_matches(
+        query=query,
+        matches=matches,
+        all_buckets=all_buckets,
+        seed_diagnostics=seed_diagnostics,
+        q_valence=q_valence,
+        q_arousal=q_arousal,
+    )
+    if lexical_terms:
+        recall_thresholds["lexical_terms"] = lexical_terms
+
+    await _refresh_moment_graph(all_buckets)
+    bucket_boosts = seed_scores_for_buckets(matches)
+    searched_candidates = memory_moment_store.search_moments(
+        search_query,
+        limit=max(max_candidates, max_results, 20),
+        bucket_boosts=bucket_boosts,
+    )
+    explicit_lookup = _query_explicitly_requests_archive_memory(query)
+    direct_candidates = _direct_recallable_moments(searched_candidates, explicit_lookup=explicit_lookup)
+    pre_gate_candidates = direct_candidates[:max_candidates]
+    gated_candidates = _apply_recall_relevance_gate(query, direct_candidates)
+    reranked_candidates = await _rerank_breath_moment_candidates(query, gated_candidates)
+
+    admitted_moments = []
+    suppressed_moments = []
+    for moment in reranked_candidates:
+        admission = _breath_moment_admission_decision(
+            query,
+            moment,
+            seed_diagnostics,
+        )
+        item = dict(moment)
+        item["_admission_reason"] = admission.reason
+        item["_admission_debug"] = getattr(admission, "debug", {})
+        if admission.admit:
+            admitted_moments.append(item)
+        else:
+            suppressed_moments.append(item)
+
+    gated_by_id = _moment_index(gated_candidates)
+    reranked_by_id = _moment_index(reranked_candidates)
+    suppressed_by_id = _moment_index(suppressed_moments)
+    gated_rank = _moment_rank(gated_candidates)
+    reranked_rank = _moment_rank(reranked_candidates)
+    returned_ids = [
+        str(moment.get("moment_id") or "")
+        for moment in admitted_moments[:max_results]
+        if moment.get("moment_id")
+    ]
+    returned_set = set(returned_ids)
+    returned_moments = admitted_moments[:max_results]
+    displayed_moment_ids: list[str] = []
+    displayed_bucket_ids: set[str] = set()
+    for moment in returned_moments:
+        bucket_id = str(moment.get("bucket_id") or "")
+        moment_id = str(moment.get("moment_id") or "")
+        if not bucket_id or bucket_id in displayed_bucket_ids:
+            continue
+        displayed_bucket_ids.add(bucket_id)
+        if moment_id:
+            displayed_moment_ids.append(moment_id)
+        break
+    query_plan = _recall_query_plan(query)
+    secondary_moments = _secondary_direct_moments(
+        query,
+        returned_moments,
+        displayed_bucket_ids,
+        query_plan.secondary_direct_limit(1),
+        query_plan=query_plan,
+        seed_diagnostics=seed_diagnostics,
+    )
+    secondary_ids = {
+        str(moment.get("moment_id") or "")
+        for moment in secondary_moments
+        if moment.get("moment_id")
+    }
+    displayed_set = set(displayed_moment_ids)
+    bucket_map = {str(bucket.get("id") or ""): bucket for bucket in all_buckets if bucket.get("id")}
+    options = _recall_relevance_options()
+
+    candidates = []
+    for index, moment in enumerate(pre_gate_candidates):
+        moment_id = str(moment.get("moment_id") or "")
+        bucket_id = str(moment.get("bucket_id") or "")
+        decision = relevance_decision(query, moment, options)
+        gated = gated_by_id.get(moment_id)
+        final = reranked_by_id.get(moment_id) or gated
+        seed = seed_diagnostics.get(bucket_id, {})
+        bucket = bucket_map.get(bucket_id)
+        admission = _breath_moment_admission_decision(query, final or moment, seed_diagnostics)
+        candidates.append(
+            {
+                "pre_rank": index,
+                "gate_rank": gated_rank.get(moment_id),
+                "final_rank": reranked_rank.get(moment_id),
+                "bucket_id": bucket_id,
+                "bucket_name": _moment_bucket_title(moment),
+                "moment_id": moment_id,
+                "section": moment.get("section"),
+                "sources": seed.get("sources", []),
+                "bucket_search_score": seed.get("bucket_search_score"),
+                "keyword_score": seed.get("keyword_score"),
+                "embedding_score": seed.get("embedding_score"),
+                "score_before_gate": _safe_float(moment.get("score")),
+                "score_after_gate": _safe_float(gated.get("score")) if gated else None,
+                "rerank_score": _safe_float(final.get("rerank_score")) if final else None,
+                "combined_score": _safe_float(final.get("combined_score")) if final else None,
+                "intent_rank": _recall_rank(query, final or moment)[0],
+                "gate": "filtered" if decision.multiplier <= 0 else "kept",
+                "gate_multiplier": round(float(decision.multiplier), 4),
+                "gate_reasons": list(decision.reasons),
+                "admission": (
+                    "suppressed"
+                    if moment_id in suppressed_by_id
+                    else "admitted"
+                    if admission.admit
+                    else "suppressed"
+                ),
+                "admission_reason": admission.reason,
+                "admission_debug": getattr(admission, "debug", {}),
+                "selected_returned": moment_id in returned_set,
+                "selected_direct": moment_id in displayed_set,
+                "selected_secondary": moment_id in secondary_ids,
+                "direct_render": _direct_bucket_render_debug(
+                    bucket,
+                    final or moment,
+                    max_tokens,
+                    query_text=query,
+                    direct_render_mode=direct_render_mode,
+                ) if bucket else {},
+                "layer_debug": moment_layer_debug(final or moment, explicit_lookup=explicit_lookup),
+                "runtime_gate": moment_runtime_gate_debug(final or moment, explicit_lookup=explicit_lookup),
+                "annotation_summary": (moment.get("metadata") or {}).get("annotation_summary"),
+                "annotation_facets": (moment.get("metadata") or {}).get("annotation_facets", {}),
+                "evidence_spans": (moment.get("metadata") or {}).get("evidence_spans", []),
+                "text_preview": _diagnostic_text_preview(moment),
+            }
+        )
+
+    return {
+        "status": "ok",
+        "query": query,
+        "search_query": search_query,
+        "recall_thresholds": {
+            **recall_thresholds,
+            "max_tokens": max_tokens,
+            "direct_render_mode": direct_render_mode,
+        },
+        "seed_buckets": list(seed_diagnostics.values())[:max_candidates],
+        "candidate_count": len(pre_gate_candidates),
+        "admitted_count": len(admitted_moments),
+        "suppressed_count": len(suppressed_moments),
+        "returned_moment_ids": returned_ids,
+        "candidates": candidates,
+        "warnings": warnings,
+    }
+
+
+def _secondary_direct_limit(query: str, related_per_memory: int) -> int:
+    return _recall_query_plan(query).secondary_direct_limit(related_per_memory)
+
+
+def _secondary_direct_moments(
+    query: str,
+    candidates: list[dict],
+    displayed_bucket_ids: set[str],
+    limit: int,
+    *,
+    query_plan=None,
+    seed_diagnostics: dict[str, dict] | None = None,
+) -> list[dict]:
+    if limit <= 0:
+        return []
+    query_plan = query_plan or _recall_query_plan(query)
+    seed_diagnostics = seed_diagnostics or {}
+    hidden = []
+    seen_buckets = set(displayed_bucket_ids)
+    for moment in candidates:
+        bucket_id = str(moment.get("bucket_id") or "")
+        if not bucket_id or bucket_id in seen_buckets:
+            continue
+        if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS:
+            continue
+        if should_suppress_context_candidate(query, moment, _recall_relevance_options()):
+            continue
+        has_topic_evidence = _moment_has_query_topic_evidence(query, moment)
+        if query_plan.enforce_topic_evidence and not has_topic_evidence:
+            continue
+        if query_plan.secondary_direct_requires_topic_evidence and not has_topic_evidence:
+            seed = seed_diagnostics.get(bucket_id, {})
+            if seed.get("embedding_score") is None:
+                continue
+        hidden.append(moment)
+        seen_buckets.add(bucket_id)
+    if query_plan.wants_body_chain:
+        hidden.sort(key=lambda moment: _recall_rank(query, moment))
+    return hidden[:limit]
+
+
+def _moment_has_query_topic_evidence(query: str, moment: dict) -> bool:
+    return _recall_policy().moment_has_topic_evidence(query, moment)
+
+
+def _bucket_has_query_topic_evidence(query: str, bucket: dict) -> bool:
+    return _recall_policy().bucket_has_topic_evidence(query, bucket)
+
+
+def _specific_query_terms(query: str) -> list[str]:
+    return _recall_policy().specific_query_terms(query)
+
+
+def _query_explicitly_requests_archive_memory(query: str) -> bool:
+    return _recall_query_plan(query).explicit_old_memory
+
+
+def _representative_moments_by_bucket(
+    moments: list[dict],
+    *,
+    explicit_lookup: bool = False,
+) -> dict[str, dict]:
+    grouped = _moments_by_bucket(moments)
+    representatives = {}
+    for bucket_id, bucket_moments in grouped.items():
+        representative = _related_representative_moment(bucket_moments, explicit_lookup=explicit_lookup)
+        if representative:
+            representatives[bucket_id] = representative
+    return representatives
+
+
+async def _refresh_moment_graph(all_buckets: list[dict] | None = None) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
+    if all_buckets is None:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    memory_moment_store.bulk_upsert(all_buckets)
+    moments = _recallable_moments(memory_moment_store.list_all())
+    grouped = _moments_by_bucket(moments)
+    edges = memory_moment_store.list_edges()
+    edges.extend(_bucket_edges_as_moment_edges(memory_edge_store.list_edges(), grouped))
+    return moments, grouped, edges
+
+
+async def _build_mcp_moment_diffused_memory_block(
+    seed_moments: list[dict],
+    moments: list[dict],
+    edges: list[dict],
+    token_budget: int,
+    limit_per_source: int,
+    min_confidence: float,
+    exclude_bucket_ids: set[str] | None = None,
+    query_text: str = "",
+) -> str:
+    if token_budget <= 0 or not seed_moments:
+        return ""
+    limit_per_source = _int_between(limit_per_source, 1, 0, 5)
+    if limit_per_source <= 0:
+        return ""
+    min_confidence = _float_between(min_confidence, 0.55, 0.0, 1.0)
+    edges = [
+        edge for edge in edges
+        if float(edge.get("confidence", 0.0)) >= min_confidence
+    ]
+    allow_archive_targets = _recall_query_plan(query_text).allow_archive_targets
+    moment_map = _moment_diffusion_map(moments)
+    representatives = _representative_moments_by_bucket(
+        moments,
+        explicit_lookup=allow_archive_targets,
+    )
+    exclude_bucket_ids = set(exclude_bucket_ids or set())
+    diffusion_options = _breath_related_diffusion_options(len(seed_moments) * limit_per_source)
+    hits = diffuse_memory(
+        _seed_scores_for_moments(seed_moments),
+        edges,
+        moment_map,
+        options=diffusion_options,
+        exclude_ids={moment["moment_id"] for moment in seed_moments if moment.get("moment_id")},
+        query_text=query_text,
+    )
+
+    parts = []
+    seen = set()
+    remaining = token_budget
+    for hit in hits:
+        moment = moment_map.get(hit.bucket_id)
+        if not moment or hit.bucket_id in seen:
+            continue
+        bucket_id = str(moment.get("bucket_id") or "")
+        if bucket_id in exclude_bucket_ids:
+            continue
+        if not can_moment_be_related_target(moment, explicit_lookup=allow_archive_targets):
+            replacement = representatives.get(bucket_id)
+            if not replacement:
+                continue
+            moment = replacement
+            if moment.get("moment_id") in seen:
+                continue
+            if not can_moment_be_related_target(moment, explicit_lookup=allow_archive_targets):
+                continue
+        block = _format_related_moment(
+            moment,
+            path_has_caution(hit.best_path),
+            path=hit.best_path,
+            moment_map=moment_map,
+            chain_bundle=diffusion_options.chain_walk_enabled,
+        )
+        block_tokens = count_tokens_approx(block)
+        if block_tokens > remaining:
+            break
+        parts.append(block)
+        seen.add(hit.bucket_id)
+        remaining -= block_tokens
+        if remaining <= 0:
+            break
+    return "\n---\n".join(parts)
+
+
+async def _collect_diffusion_seed_buckets(query: str, max_seeds: int) -> tuple[list[dict], list[str]]:
+    warnings = []
+    matches: list[dict] = []
+    matched_ids: set[str] = set()
+    search_limit = max(max_seeds, 20)
+
+    try:
+        for bucket in await bucket_mgr.search(query, limit=search_limit):
+            if not bucket or bucket.get("metadata", {}).get("type") == "feel":
+                continue
+            bucket_id = bucket.get("id")
+            if not bucket_id or bucket_id in matched_ids:
+                continue
+            candidate = dict(bucket)
+            candidate["_inspect_source"] = "keyword"
+            matches.append(candidate)
+            matched_ids.add(bucket_id)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion keyword search failed / 扩散诊断关键词检索失败: {e}")
+        warnings.append(f"keyword_search_failed: {e}")
+
+    try:
+        vector_results = await embedding_engine.search_similar(query, top_k=search_limit)
+        for bucket_id, sim_score in vector_results:
+            if bucket_id in matched_ids:
+                continue
+            if sim_score <= 0.5:
+                continue
+            bucket = await bucket_mgr.get(bucket_id)
+            if not bucket or bucket.get("metadata", {}).get("type") == "feel":
+                continue
+            candidate = dict(bucket)
+            candidate["score"] = round(sim_score * 100, 2)
+            candidate["vector_match"] = True
+            candidate["_inspect_source"] = "vector"
+            matches.append(candidate)
+            matched_ids.add(bucket_id)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion vector search failed / 扩散诊断向量检索失败: {e}")
+        warnings.append(f"vector_search_failed: {e}")
+
+    return matches[:max_seeds], warnings
+
+
+def _inspect_bucket_label(bucket: dict | None, bucket_id: str) -> str:
+    if not bucket:
+        return bucket_id
+    meta = bucket.get("metadata", {}) or {}
+    return str(meta.get("name") or bucket.get("name") or bucket_id)
+
+
+def _inspect_bucket_layer_payload(bucket: dict | None, *, explicit_lookup: bool = False) -> dict:
+    return bucket_layer_debug(bucket, explicit_lookup=explicit_lookup)
+
+
+def _inspect_bucket_runtime_gate_payload(
+    bucket: dict | None,
+    *,
+    explicit_lookup: bool = False,
+    query: str = "",
+) -> dict:
+    gate = bucket_runtime_gate_debug(bucket, explicit_lookup=explicit_lookup)
+    query_plan = _recall_query_plan(query)
+    topic_required = bool(query_plan.enforce_topic_evidence)
+    has_topic_evidence = (
+        _bucket_has_query_topic_evidence(query, bucket)
+        if topic_required and isinstance(bucket, dict)
+        else False
+    )
+    related_allowed = bool(gate["related_target"]["allowed"])
+    related_reason = str(gate["related_target"]["reason"])
+    if related_allowed and topic_required and not has_topic_evidence:
+        related_allowed = False
+        related_reason = "query_topic_evidence_missing"
+    gate["topic_evidence"] = {
+        "required": topic_required,
+        "present": has_topic_evidence if topic_required else None,
+    }
+    gate["related_injection"] = {
+        "allowed": related_allowed,
+        "reason": related_reason,
+    }
+    gate["would_inject_related"] = related_allowed
+    return gate
+
+
+def _inspect_path_payload(path, bucket_map: dict[str, dict]) -> dict:
+    return {
+        "score": round(float(path.score), 4),
+        "trace": format_diffusion_trace(path, bucket_map, use_labels=True),
+        "nodes": list(path.nodes),
+        "steps": [
+            {
+                "source": step.source,
+                "target": step.target,
+                "direction": step.direction,
+                "relation_type": step.relation_type,
+                "confidence": step.confidence,
+                "reason": step.reason,
+            }
+            for step in path.steps
+        ],
+    }
+
+
+async def inspect_diffusion(
+    query: str,
+    max_seeds: int = 3,
+    max_hits: int = 5,
+    edge_min_confidence: float = 0.55,
+) -> dict:
+    """只读诊断 query 如何沿 memory_edges 点亮联想记忆；不 touch bucket，不创建记忆。"""
+    query = str(query or "").strip()
+    if not query:
+        return {"status": "error", "error": "query_required"}
+
+    max_seeds = _int_between(max_seeds, 3, 1, 20)
+    max_hits = _int_between(max_hits, 5, 0, 20)
+    edge_min_confidence = _float_between(edge_min_confidence, 0.55, 0.0, 1.0)
+    node_facets_enabled = _node_facets_enabled(config)
+    query_facets = {}
+    if node_facets_enabled:
+        try:
+            query_facets = memory_node_store.facets_for_text(query)
+        except Exception as e:
+            logger.warning(f"Inspect diffusion query facets failed / 扩散诊断 query facets 失败: {e}")
+
+    seed_buckets, warnings = await _collect_diffusion_seed_buckets(query, max_seeds)
+    if not seed_buckets:
+        return {
+            "status": "ok",
+            "query": query,
+            "node_facets_enabled": node_facets_enabled,
+            "query_facets": query_facets,
+            "seeds": [],
+            "hits": [],
+            "warnings": warnings,
+        }
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.warning(f"Inspect diffusion list buckets failed / 扩散诊断列桶失败: {e}")
+        all_buckets = []
+        warnings.append(f"list_buckets_failed: {e}")
+
+    bucket_map = {bucket["id"]: bucket for bucket in all_buckets if bucket.get("id")}
+    for seed in seed_buckets:
+        if seed.get("id"):
+            bucket_map.setdefault(seed["id"], seed)
+
+    node_salience = None
+    node_resonance = None
+    if node_facets_enabled:
+        try:
+            memory_node_store.bulk_upsert(list(bucket_map.values()))
+            node_salience = _node_salience_lookup
+            node_resonance = _node_resonance_lookup(query_facets)
+        except Exception as e:
+            logger.warning(f"Inspect diffusion node refresh failed / 扩散诊断节点刷新失败: {e}")
+            warnings.append(f"node_refresh_failed: {e}")
+            node_salience = None
+            node_resonance = None
+
+    edges = [
+        edge
+        for edge in memory_edge_store.list_edges()
+        if float(edge.get("confidence", 0.0)) >= edge_min_confidence
+    ]
+    options = replace(diffusion_options_from_config(config), top_k=max_hits)
+    seed_scores = seed_scores_for_buckets(seed_buckets)
+    hits = diffuse_memory(
+        seed_scores,
+        edges,
+        bucket_map,
+        options=options,
+        exclude_ids={bucket["id"] for bucket in seed_buckets if bucket.get("id")},
+        node_salience=node_salience,
+        node_resonance=node_resonance,
+        query_text=query,
+    )
+
+    def node_values(bucket_id: str, bucket: dict | None) -> dict:
+        if not bucket or not node_facets_enabled:
+            return {"salience": None, "resonance": None, "facets": {}}
+        try:
+            node = memory_node_store.get(bucket_id) or memory_node_store.upsert_bucket(bucket)
+            salience = memory_node_store.node_salience(bucket_id, bucket)
+            resonance = (
+                node_resonance(bucket_id, bucket)
+                if node_resonance
+                else 1.0
+            )
+            return {
+                "salience": round(float(salience), 4),
+                "resonance": round(float(resonance), 4),
+                "facets": node.get("facets", {}),
+            }
+        except Exception as e:
+            return {"salience": None, "resonance": None, "facets": {}, "error": str(e)}
+
+    seed_payload = []
+    explicit_lookup = _query_explicitly_requests_archive_memory(query)
+    for bucket in seed_buckets:
+        bucket_id = bucket.get("id", "")
+        values = node_values(bucket_id, bucket)
+        seed_payload.append(
+            {
+                "bucket_id": bucket_id,
+                "name": _inspect_bucket_label(bucket, bucket_id),
+                "source": bucket.get("_inspect_source", "keyword"),
+                "seed_score": round(float(seed_scores.get(bucket_id, 0.0)), 4),
+                "layer_debug": _inspect_bucket_layer_payload(bucket, explicit_lookup=explicit_lookup),
+                "runtime_gate": _inspect_bucket_runtime_gate_payload(
+                    bucket,
+                    explicit_lookup=explicit_lookup,
+                    query=query,
+                ),
+                **values,
+            }
+        )
+
+    hit_payload = []
+    for hit in hits:
+        bucket = bucket_map.get(hit.bucket_id)
+        values = node_values(hit.bucket_id, bucket)
+        hit_payload.append(
+            {
+                "bucket_id": hit.bucket_id,
+                "name": _inspect_bucket_label(bucket, hit.bucket_id),
+                "score": hit.activation,
+                "layer_debug": _inspect_bucket_layer_payload(bucket, explicit_lookup=explicit_lookup),
+                "runtime_gate": _inspect_bucket_runtime_gate_payload(
+                    bucket,
+                    explicit_lookup=explicit_lookup,
+                    query=query,
+                ),
+                **values,
+                "path": format_diffusion_trace(hit.best_path, bucket_map, use_labels=True),
+                "path_ids": list(hit.best_path.nodes),
+                "caution": path_has_caution(hit.best_path),
+                "paths": [_inspect_path_payload(path, bucket_map) for path in hit.paths],
+            }
+        )
+
+    return {
+        "status": "ok",
+        "query": query,
+        "node_facets_enabled": node_facets_enabled,
+        "options": {
+            "max_hops": options.max_hops,
+            "top_k": options.top_k,
+            "min_activation": options.min_activation,
+            "edge_min_confidence": edge_min_confidence,
+            "include_incoming": options.include_incoming,
+        },
+        "query_facets": query_facets,
+        "seeds": seed_payload,
+        "hits": hit_payload,
+        "warnings": warnings,
+    }
+
+
+def _inspect_moment_payload(
+    moment: dict,
+    *,
+    include_text: bool,
+    include_source_window: bool = False,
+) -> dict:
+    text = str(moment.get("text") or "")
+    payload = {
+        "moment_id": moment.get("moment_id"),
+        "bucket_id": moment.get("bucket_id"),
+        "section": moment.get("section"),
+        "ordinal": moment.get("ordinal"),
+        "source": moment.get("source"),
+        "source_id": moment.get("source_id"),
+        "text_hash": moment.get("text_hash"),
+        "text_length": len(text),
+        "layer_debug": moment_layer_debug(moment),
+        "runtime_gate": moment_runtime_gate_debug(moment),
+        "metadata": moment.get("metadata", {}),
+        "created_at": moment.get("created_at"),
+        "updated_at": moment.get("updated_at"),
+    }
+    if include_text:
+        payload["text"] = text
+    else:
+        payload["text_preview"] = _clip_text(" ".join(text.split()), 240)
+    if include_source_window:
+        source_window = source_ref_window(
+            moment,
+            allowed_root=str(config.get("buckets_dir") or ""),
+            max_chars=760,
+            context_lines=0,
+        )
+        if source_window:
+            payload["source_window"] = source_window
+    return payload
+
+
+async def inspect_moments(bucket_id: str = "", limit: int = 20) -> dict:
+    """只读诊断 bucket 如何被拆成 moment；写入/刷新 SQLite 索引，不 touch bucket。"""
+    bucket_id = str(bucket_id or "").strip()
+    limit = _int_between(limit, 20, 1, 200)
+
+    if bucket_id:
+        if not MEMORY_ID_RE.fullmatch(bucket_id):
+            return {"status": "error", "error": "invalid bucket_id"}
+        bucket = await bucket_mgr.get(bucket_id)
+        if not bucket:
+            return {"status": "error", "error": "not_found", "bucket_id": bucket_id}
+        moments = memory_moment_store.upsert_bucket(bucket)
+        edges = memory_moment_store.list_edges(bucket_id)
+        meta = bucket.get("metadata", {}) or {}
+        return {
+            "status": "ok",
+            "mode": "bucket",
+            "bucket_id": bucket_id,
+            "name": str(meta.get("name") or bucket.get("name") or bucket_id),
+            "bucket_layer_debug": _inspect_bucket_layer_payload(bucket),
+            "count": len(moments),
+            "edge_count": len(edges),
+            "db_path": memory_moment_store.db_path,
+            "moments": [
+                _inspect_moment_payload(
+                    moment,
+                    include_text=True,
+                    include_source_window=True,
+                )
+                for moment in moments[:limit]
+            ],
+            "edges": edges[:limit],
+        }
+
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    indexed = memory_moment_store.bulk_upsert(buckets)
+    stats = memory_moment_store.stats()
+    sample = memory_moment_store.sample(limit)
+    return {
+        "status": "ok",
+        "mode": "bulk",
+        "indexed_buckets": indexed["buckets"],
+        "indexed_moments": indexed["moments"],
+        "total_buckets": stats["buckets"],
+        "total_moments": stats["moments"],
+        "total_edges": stats.get("edges", 0),
+        "db_path": memory_moment_store.db_path,
+        "sample": [
+            _inspect_moment_payload(moment, include_text=False)
+            for moment in sample
+        ],
+    }
+
+
+def _node_facets_enabled(cfg: dict | None) -> bool:
+    node_cfg = (cfg or {}).get("node_facets", {}) or {}
+    if isinstance(node_cfg, dict):
+        return _bool_value(node_cfg.get("enabled", True), True)
+    return True
+
+
+def _node_salience_lookup(bucket_id: str, bucket: dict) -> float:
+    return memory_node_store.node_salience(bucket_id, bucket)
+
+
+def _node_resonance_lookup(query_facets: dict):
+    if not _has_active_facets(query_facets):
+        return None
+
+    def lookup(bucket_id: str, bucket: dict) -> float:
+        return memory_node_store.node_resonance(bucket_id, query_facets, bucket)
+
+    return lookup
+
+
+def _has_active_facets(facets: dict | None) -> bool:
+    for value in (facets or {}).values():
+        if isinstance(value, dict):
+            if any(float(item or 0) > 0 for item in value.values()):
+                return True
+        else:
+            try:
+                if float(value) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
 
 
 # =============================================================
@@ -1380,12 +5181,15 @@ async def breath(
     edge_min_confidence: float = 0.55,
     include_core: bool = True,
     core_limit: int = 3,
+    is_session_start: bool = False,
+    debug: bool = False,
+    surface: str = "manual",
+    direct_render_mode: str = "auto",
+    retrieval_mode: str = "graph",
+    mode: str = "",
+    session_id: str = "",
 ) -> str:
-    """读取记忆,不写入。
-    调用方式: 新对话用 breath(); 查过去用 breath(query="主题词"); 只读模型感受用 breath(domain="feel"); 只读悄悄话用 breath(domain="whisper")。
-    默认只从本次实际返回的普通记忆沿持久化 memory_edges 带一跳关联记忆; embedding 相似边只是检索/图谱参考,不是可手写的记忆关系。
-    include_core/core_limit 控制 pinned/protected 核心准则数量; include_related=False 可关闭关联记忆块。
-    """
+    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；domain="feel"/"whisper" 读取对应私密通道。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
@@ -1394,7 +5198,24 @@ async def breath(
     edge_min_confidence = _float_between(edge_min_confidence, 0.55, 0.0, 1.0)
     include_core = _bool_value(include_core, True)
     core_limit = _int_between(core_limit, 3, 0, 20)
+    is_session_start = _bool_value(is_session_start, False)
+    debug = _bool_value(debug, False)
+    surface_key = str(surface or "manual").strip().lower()
+    auto_surface = surface_key in {"auto", "automatic", "bridge", "gateway"}
+    direct_render_mode = _normalize_direct_render_mode(direct_render_mode)
+    retrieval_mode = _normalize_retrieval_mode(retrieval_mode)
+    mode_key = _normalize_breath_mode(mode)
     domain_key = domain.strip().lower()
+
+    if not mode_key and is_session_start and not str(query or "").strip() and not domain_key:
+        mode_key = "handoff"
+
+    if mode_key == "handoff":
+        return await _build_handoff_breath(
+            max_tokens=min(max_tokens or 1200, 1600),
+            session_id=session_id,
+            debug=debug,
+        )
 
     # --- Feel/whisper retrieval: independent read-only channels ---
     # --- Feel/whisper 检索：独立只读入口 ---
@@ -1426,6 +5247,8 @@ async def breath(
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
     if not query or not query.strip():
+        if auto_surface:
+            return "没有找到可靠命中。"
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
         except Exception as e:
@@ -1565,17 +5388,15 @@ async def breath(
         related_block = ""
         related_sources = anchor_buckets + surfaced_buckets
         if include_related and related_sources:
-            related_header_tokens = count_tokens_approx("=== 关联记忆 ===\n")
-            related_block = await _build_mcp_related_memory_block(
+            related_header_tokens = count_tokens_approx("=== 联想浮现 ===\n")
+            related_block = await _build_mcp_diffused_memory_block(
                 related_sources,
                 all_buckets,
                 max(0, token_budget - related_header_tokens),
                 related_per_memory,
                 edge_min_confidence,
+                "",
             )
-
-        if not core_results and not anchor_results and not dynamic_results and not related_block:
-            return "权重池平静，没有需要处理的记忆。"
 
         parts = []
         if core_results:
@@ -1585,7 +5406,20 @@ async def breath(
         if dynamic_results:
             parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
         if related_block:
-            parts.append("=== 关联记忆 ===\n" + related_block)
+            parts.append("=== 联想浮现 ===\n" + related_block)
+
+        dream_block = await dream_engine.surface_for_breath(
+            query="",
+            valence=valence,
+            arousal=arousal,
+            is_session_start=is_session_start,
+            embedding_engine=embedding_engine,
+        )
+        if dream_block:
+            parts.append(dream_block)
+
+        if not parts:
+            return "权重池平静，没有需要处理的记忆。"
         return "\n\n".join(parts)
 
     # --- With args: search mode (keyword + vector dual channel) ---
@@ -1593,10 +5427,13 @@ async def breath(
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
+    if auto_surface and _recall_policy().is_auto_query_too_vague(query):
+        return "没有找到可靠命中。"
+    search_query = recall_search_query(query, _recall_relevance_options())
 
     try:
         matches = await bucket_mgr.search(
-            query,
+            search_query,
             limit=max(max_results, 20),
             domain_filter=domain_filter,
             query_valence=q_valence,
@@ -1606,76 +5443,354 @@ async def breath(
         logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
 
+    seed_diagnostics: dict[str, dict] = {}
+    for bucket in matches:
+        _upsert_breath_seed_diagnostic(
+            seed_diagnostics,
+            bucket,
+            "keyword",
+            bucket_search_score=bucket.get("score"),
+        )
+
     # --- Vector similarity channel: find semantically related buckets ---
     # --- 向量相似度通道：找到语义相关的桶 ---
+    recall_thresholds = _breath_recall_thresholds(query, max_results)
     matched_ids = {b["id"] for b in matches}
     try:
-        vector_results = await embedding_engine.search_similar(query, top_k=max(max_results, 20))
+        vector_results = await embedding_engine.search_similar(
+            search_query,
+            top_k=int(recall_thresholds["semantic_top_k"]),
+        )
         for bucket_id, sim_score in vector_results:
-            if bucket_id not in matched_ids and sim_score > 0.5:
+            if bucket_id in seed_diagnostics:
+                seed_diagnostics[bucket_id]["embedding_score"] = round(float(sim_score), 4)
+            if bucket_id not in matched_ids and sim_score >= recall_thresholds["vector_min_score"]:
                 bucket = await bucket_mgr.get(bucket_id)
                 if bucket:
                     if bucket.get("metadata", {}).get("type") == "feel":
                         continue
                     bucket["score"] = round(sim_score * 100, 2)
                     bucket["vector_match"] = True
+                    _upsert_breath_seed_diagnostic(
+                        seed_diagnostics,
+                        bucket,
+                        "vector",
+                        embedding_score=sim_score,
+                    )
                     matches.append(bucket)
                     matched_ids.add(bucket_id)
     except Exception as e:
         logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
 
-    results = []
-    token_used = 0
-    returned_buckets = []
-    for bucket in matches:
-        if token_used >= max_tokens:
-            break
-        try:
-            if bucket.get("metadata", {}).get("type") == "feel":
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.warning(f"Failed to list buckets for moment recall / moment 召回列桶失败: {e}")
+        all_buckets = matches
+
+    lexical_terms = _append_breath_lexical_matches(
+        query=query,
+        matches=matches,
+        all_buckets=all_buckets,
+        seed_diagnostics=seed_diagnostics,
+        q_valence=q_valence,
+        q_arousal=q_arousal,
+    )
+    word_map_scores, _word_map_debug = _append_breath_word_map_matches(
+        query=query,
+        matches=matches,
+        all_buckets=all_buckets,
+        seed_diagnostics=seed_diagnostics,
+    )
+    word_map_hint_bucket_ids = set(word_map_scores)
+
+    if retrieval_mode == "bucket":
+        direct_results = []
+        token_used = 0
+        displayed_moment_ids: list[str] = []
+        returned_moments: list[dict] = []
+        suppressed_buckets = []
+        seen_bucket_ids: set[str] = set()
+        for bucket in matches:
+            if len(direct_results) >= max_results or token_used >= max_tokens:
+                break
+            bucket_id = str(bucket.get("id") or "")
+            if not bucket_id or bucket_id in seen_bucket_ids:
                 continue
-            clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
-            # --- Memory reconstruction: shift displayed valence by current mood ---
-            # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
-            if q_valence is not None and "valence" in clean_meta:
-                original_v = float(clean_meta.get("valence", 0.5))
-                shift = (q_valence - 0.5) * 0.2  # ±0.1 max shift
-                clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-            summary = await dehydrator.dehydrate(_bucket_text_for_embedding(bucket), clean_meta)
-            if bucket.get("vector_match"):
-                entry = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
+            seed = seed_diagnostics.get(bucket_id, {})
+            word_map_only = "word_map" in (seed.get("sources") or []) and len(set(seed.get("sources") or []) - {"word_map"}) == 0
+            decision = _recall_policy().assess(
+                query,
+                _bucket_relevance_node(bucket, bucket.get("score", 0.0)),
+                has_topic_evidence=_bucket_has_query_topic_evidence(query, bucket),
+                semantic_score=seed.get("embedding_score"),
+                high_confidence_edge="lexical" in (seed.get("sources") or []),
+                auto=auto_surface,
+            )
+            if word_map_only and not _bucket_has_query_topic_evidence(query, bucket):
+                reason = "word_map_topic_evidence_missing"
+                debug_payload = {
+                    "word_map_hint": True,
+                    "word_map_score": seed.get("word_map_score"),
+                    "has_topic_evidence": False,
+                    "auto": bool(auto_surface),
+                }
             else:
-                entry = f"[bucket_id:{bucket['id']}] {summary}"
+                reason = decision.reason
+                debug_payload = decision.debug
+            if (word_map_only and not _bucket_has_query_topic_evidence(query, bucket)) or not decision.admit_direct:
+                suppressed_buckets.append(
+                    {
+                        "bucket_id": bucket_id,
+                        "bucket_name": (bucket.get("metadata") or {}).get("name") or bucket_id,
+                        "admission_reason": reason,
+                        "recall_policy_debug": debug_payload,
+                    }
+                )
+                continue
+            bucket_moments = _direct_moments_for_bucket(bucket, query)
+            moment = _representative_moment(bucket_moments)
+            if not moment:
+                continue
+            grouped = {bucket_id: bucket_moments}
+            entry = await _format_direct_bucket(
+                bucket,
+                moment,
+                grouped,
+                max_tokens - token_used,
+                query_text=query,
+                direct_render_mode=direct_render_mode,
+            )
+            if not entry:
+                break
             entry_tokens = count_tokens_approx(entry)
             if token_used + entry_tokens > max_tokens:
                 break
-            await bucket_mgr.touch(bucket["id"])
-            results.append(entry)
-            returned_buckets.append(bucket)
+            await bucket_mgr.touch(bucket_id)
+            direct_results.append(entry)
+            returned_moments.append(moment)
+            displayed_moment_ids.append(str(moment.get("moment_id") or ""))
+            seen_bucket_ids.add(bucket_id)
+            token_used += entry_tokens
+
+        dream_block = "" if auto_surface else await dream_engine.surface_for_breath(
+            query=query,
+            valence=valence,
+            arousal=arousal,
+            is_session_start=is_session_start,
+            embedding_engine=embedding_engine,
+        )
+        response_parts = []
+        response_sections = []
+        if direct_results:
+            response_parts.append("=== 直接命中记忆 ===\n" + "\n---\n".join(direct_results))
+            response_sections.append("direct")
+        if dream_block:
+            response_sections.append("dream")
+        _write_breath_recall_diagnostics(
+            query=query,
+            recall_thresholds={
+                **recall_thresholds,
+                "retrieval_mode": "bucket",
+                "lexical_terms": lexical_terms,
+                "word_map_hint_enabled": _word_map_hint_available(),
+                "word_map_hint_bucket_ids": sorted(word_map_hint_bucket_ids),
+            },
+            seed_diagnostics=seed_diagnostics,
+            pre_gate_candidates=returned_moments,
+            gated_candidates=returned_moments,
+            reranked_candidates=returned_moments,
+            returned_moments=returned_moments,
+            suppressed_candidates=[],
+            displayed_moment_ids=displayed_moment_ids,
+            secondary_moment_ids=[],
+            related_source_bucket_ids=[],
+            related_included=False,
+            drift_included=False,
+            dream_included=bool(dream_block),
+            response_sections=response_sections,
+        )
+        if debug and suppressed_buckets:
+            response_parts.append(
+                "=== suppressed_bucket_candidates ===\n"
+                + "\n".join(
+                    f"- [bucket_id:{item['bucket_id']}] reason={item['admission_reason']}"
+                    for item in suppressed_buckets[:10]
+                )
+            )
+        if not response_parts:
+            return dream_block or "没有找到可靠命中。"
+        response_text = "\n\n".join(response_parts)
+        if dream_block:
+            response_text += "\n\n" + dream_block
+        return response_text
+
+    bucket_map = {bucket["id"]: bucket for bucket in all_buckets if bucket.get("id")}
+    _, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
+    bucket_boosts = seed_scores_for_buckets(matches)
+    if word_map_hint_bucket_ids:
+        moment_boost = float(_word_map_hint_settings()["moment_boost"])
+        for bucket_id, hint_score in word_map_scores.items():
+            seed = seed_diagnostics.get(bucket_id, {})
+            sources = set(seed.get("sources") or [])
+            if sources and len(sources - {"word_map"}) > 0:
+                continue
+            bucket_boosts[bucket_id] = max(0.0, min(1.0, float(hint_score) * moment_boost))
+    moment_candidates = memory_moment_store.search_moments(
+        search_query,
+        limit=max(max_results, 20),
+        bucket_boosts=bucket_boosts,
+    )
+    explicit_lookup = _query_explicitly_requests_archive_memory(query)
+    moment_candidates = _direct_recallable_moments(moment_candidates, explicit_lookup=explicit_lookup)
+    pre_gate_moment_candidates = list(moment_candidates)
+    gated_moment_candidates = _apply_recall_relevance_gate(query, moment_candidates)
+    moment_candidates = gated_moment_candidates
+    moment_candidates = await _rerank_breath_moment_candidates(query, moment_candidates)
+    reranked_moment_candidates = list(moment_candidates)
+    admitted_moments = []
+    suppressed_moments = []
+    for moment in moment_candidates:
+        if str(moment.get("bucket_id") or "") in word_map_hint_bucket_ids:
+            seed = seed_diagnostics.get(str(moment.get("bucket_id") or ""), {})
+            moment["word_map_hint"] = True
+            moment["word_map_score"] = seed.get("word_map_score")
+            moment["word_map_terms"] = list(seed.get("word_map_terms") or [])
+            moment["word_map_neighbor_terms"] = list(seed.get("word_map_neighbor_terms") or [])
+        admission = _breath_moment_admission_decision(
+            query,
+            moment,
+            seed_diagnostics,
+            auto=auto_surface,
+        )
+        item = dict(moment)
+        if _breath_word_map_only_without_topic(query, item, seed_diagnostics):
+            item["_admission_reason"] = "word_map_topic_evidence_missing"
+            item["_admission_debug"] = {
+                "word_map_hint": True,
+                "word_map_score": item.get("word_map_score"),
+                "has_topic_evidence": False,
+                "rerank_score": item.get("rerank_score"),
+                "auto": bool(auto_surface),
+            }
+            suppressed_moments.append(item)
+            continue
+        item["_admission_reason"] = admission.reason
+        if admission.admit:
+            admitted_moments.append(item)
+        else:
+            suppressed_moments.append(item)
+    moment_candidates = admitted_moments
+
+    direct_results = []
+    token_used = 0
+    returned_moments = moment_candidates[:max_results]
+    direct_display_limit = 1 if include_related else max_results
+    displayed_bucket_ids: set[str] = set()
+    displayed_moment_ids: list[str] = []
+    for moment in returned_moments:
+        if len(direct_results) >= direct_display_limit:
+            break
+        if token_used >= max_tokens:
+            break
+        bucket_id = str(moment.get("bucket_id") or "")
+        if bucket_id in displayed_bucket_ids:
+            continue
+        try:
+            bucket = bucket_map.get(bucket_id)
+            if not bucket:
+                continue
+            entry = await _format_direct_bucket(
+                bucket,
+                moment,
+                grouped_moments,
+                max_tokens - token_used,
+                query_text=query,
+                direct_render_mode=direct_render_mode,
+            )
+            if not entry:
+                break
+            entry_tokens = count_tokens_approx(entry)
+            if token_used + entry_tokens > max_tokens:
+                break
+            await bucket_mgr.touch(bucket_id)
+            displayed_bucket_ids.add(bucket_id)
+            displayed_moment_ids.append(str(moment.get("moment_id") or ""))
+            direct_results.append(entry)
             token_used += entry_tokens
         except Exception as e:
-            logger.warning(f"Failed to dehydrate search result / 检索结果脱水失败: {e}")
+            logger.warning(f"Failed to render direct moment / 直接命中片段渲染失败: {e}")
             continue
 
-    if include_related and returned_buckets:
-        related_header = "=== 关联记忆 ===\n"
+    related_entry = ""
+    secondary_moment_ids: list[str] = []
+    related_source_bucket_ids: list[str] = []
+    if include_related and returned_moments:
+        query_plan = _recall_query_plan(query)
+        related_header = "=== 联想浮现 ===\n"
         related_budget = max_tokens - token_used - count_tokens_approx(related_header)
-        related_block = await _build_mcp_related_memory_block(
-            returned_buckets,
-            None,
+        related_parts = []
+        secondary_moments = _secondary_direct_moments(
+            query,
+            returned_moments,
+            displayed_bucket_ids,
+            query_plan.secondary_direct_limit(related_per_memory),
+            query_plan=query_plan,
+            seed_diagnostics=seed_diagnostics,
+        )
+        for moment in secondary_moments:
+            if related_budget <= 0:
+                break
+            block = _format_secondary_direct_moment(moment)
+            block_tokens = count_tokens_approx(block)
+            if block_tokens > related_budget:
+                break
+            related_parts.append(block)
+            secondary_moment_ids.append(str(moment.get("moment_id") or ""))
+            related_budget -= block_tokens
+
+        related_source_buckets = []
+        seen_source_bucket_ids = set()
+        for moment in returned_moments:
+            bucket_id = str(moment.get("bucket_id") or "")
+            if bucket_id not in displayed_bucket_ids:
+                continue
+            bucket = bucket_map.get(bucket_id)
+            if not bucket or bucket_id in seen_source_bucket_ids:
+                continue
+            related_source_buckets.append(bucket)
+            related_source_bucket_ids.append(bucket_id)
+            seen_source_bucket_ids.add(bucket_id)
+
+        related_block = await _build_mcp_diffused_memory_block(
+            related_source_buckets,
+            all_buckets,
             max(0, related_budget),
             related_per_memory,
             edge_min_confidence,
+            query_text=query,
+            exclude_bucket_ids={str(moment.get("bucket_id") or "") for moment in secondary_moments},
         )
         if related_block:
-            related_entry = related_header + related_block
-            results.append(related_entry)
+            related_parts.append(related_block)
+        if related_parts:
+            related_entry = related_header + "\n---\n".join(related_parts)
             token_used += count_tokens_approx(related_entry)
 
+    drift_entry = ""
     # --- Resurface: when search returns < 3, 40% chance to float dormant memories ---
     # --- 久未触碰浮现：检索结果不足 3 条时，40% 概率漂起旧桶 ---
-    if len(returned_buckets) < 3 and max_tokens > token_used and random.random() < 0.4:
+    if (
+        not related_entry
+        and len(returned_moments) < 3
+        and not recall_thresholds.get("has_explicit_entity")
+        and _query_resurface_enabled()
+        and not auto_surface
+        and max_tokens > token_used
+        and random.random() < 0.4
+    ):
         try:
-            matched_ids = {b["id"] for b in returned_buckets}
+            matched_ids = {str(moment.get("bucket_id")) for moment in returned_moments}
             drifted = await _select_resurface_buckets(
                 max_results=random.randint(1, 3),
                 exclude_ids=matched_ids,
@@ -1694,10 +5809,7 @@ async def breath(
                     clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
                     summary = await dehydrator.dehydrate(_bucket_text_for_embedding(b), clean_meta)
                     dormant_days = _bucket_days_since_last_active(b["metadata"])
-                    entry = (
-                        f"[surface_type: resurface | bucket_id:{b['id']} | "
-                        f"dormant_days:{dormant_days:.0f}]\n{summary}"
-                    )
+                    entry = f"[surface_type: resurface, dormant_days={dormant_days:.0f}]\n{summary}"
                     entry_tokens = count_tokens_approx(entry)
                     if entry_tokens > drift_remaining:
                         break
@@ -1706,15 +5818,72 @@ async def breath(
                 if drift_results:
                     drift_entry = "--- 久未碰过 ---\n" + "\n---\n".join(drift_results)
                     if token_used + count_tokens_approx(drift_entry) <= max_tokens:
-                        results.append(drift_entry)
                         token_used += count_tokens_approx(drift_entry)
+                    else:
+                        drift_entry = ""
         except Exception as e:
             logger.warning(f"Resurface failed / 久未触碰浮现失败: {e}")
 
-    if not results:
-        return "未找到相关记忆。"
+    dream_block = "" if auto_surface else await dream_engine.surface_for_breath(
+        query=query,
+        valence=valence,
+        arousal=arousal,
+        is_session_start=is_session_start,
+        embedding_engine=embedding_engine,
+    )
 
-    return "\n---\n".join(results)
+    response_parts = []
+    response_sections = []
+    if direct_results:
+        response_parts.append("=== 直接命中记忆 ===\n" + "\n---\n".join(direct_results))
+        response_sections.append("direct")
+    if related_entry:
+        response_parts.append(related_entry)
+        response_sections.append("related")
+    if drift_entry:
+        response_parts.append(drift_entry)
+        response_sections.append("drift")
+    if dream_block:
+        response_sections.append("dream")
+
+    _write_breath_recall_diagnostics(
+        query=query,
+        recall_thresholds={
+            **recall_thresholds,
+            "lexical_terms": lexical_terms,
+            "word_map_hint_enabled": _word_map_hint_available(),
+            "word_map_hint_bucket_ids": sorted(word_map_hint_bucket_ids),
+        },
+        seed_diagnostics=seed_diagnostics,
+        pre_gate_candidates=pre_gate_moment_candidates,
+        gated_candidates=gated_moment_candidates,
+        reranked_candidates=reranked_moment_candidates,
+        returned_moments=returned_moments,
+        suppressed_candidates=suppressed_moments,
+        displayed_moment_ids=displayed_moment_ids,
+        secondary_moment_ids=secondary_moment_ids,
+        related_source_bucket_ids=related_source_bucket_ids,
+        related_included=bool(related_entry),
+        drift_included=bool(drift_entry),
+        dream_included=bool(dream_block),
+        response_sections=response_sections,
+    )
+
+    if debug and suppressed_moments:
+        response_parts.append(
+            "=== suppressed_candidates ===\n"
+            + "\n".join(_format_suppressed_recall_candidate(moment, seed_diagnostics) for moment in suppressed_moments[:10])
+        )
+
+    if not response_parts:
+        if recall_thresholds.get("has_explicit_entity") and suppressed_moments:
+            return dream_block or "没有找到可靠命中。"
+        return dream_block or "未找到相关记忆。"
+
+    response_text = "\n\n".join(response_parts)
+    if dream_block:
+        response_text += "\n\n" + dream_block
+    return response_text
 
 
 async def _select_resurface_buckets(
@@ -1751,7 +5920,6 @@ async def _select_resurface_buckets(
 # Tool 1.4: resurface — dormant memory resurfacing
 # 工具 1.4：resurface — 久未触碰记忆浮现
 # =============================================================
-@mcp.tool()
 async def resurface(max_results: int = 1, include_archive: bool = True, max_tokens: int = 800) -> str:
     """只读浮现久未触碰的旧记忆。越久没碰过越靠前；默认包含归档桶；不 touch,不刷新 last_active,不增加 activation_count。"""
     try:
@@ -1801,10 +5969,7 @@ async def resurface(max_results: int = 1, include_archive: bool = True, max_toke
 # =============================================================
 @mcp.tool()
 async def read_bucket(bucket_id: str) -> dict:
-    """按 bucket_id 精确读取完整记忆桶,返回正文和元数据。
-    用于更新、合并、补喜欢原因、补 affect_anchor 或 trace 前确认目标。
-    不触碰 last_active,不增加 activation_count,也不影响自然浮现权重。
-    """
+    """按 bucket_id 精确读取完整记忆桶；trace/comment 前先读。只读，不刷新活跃度。"""
     bucket_id = (bucket_id or "").strip()
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
         return {"error": "invalid bucket_id"}
@@ -1826,7 +5991,7 @@ async def comment_bucket(
     valence: float = -1,
     arousal: float = -1,
 ) -> dict:
-    """给已有 bucket 追加一条年轮并 touch+1。再次读到旧记忆时的感受/补充请优先用这个工具；不会改正文，也不会把源记忆标记为 digested。"""
+    """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。"""
     bucket_id = (bucket_id or "").strip()
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
         return {"error": "invalid bucket_id"}
@@ -1915,7 +6080,7 @@ async def api_bucket_comment(request):
 
 @mcp.custom_route("/api/bucket/{bucket_id}/comments/{comment_id}", methods=["DELETE"])
 async def api_bucket_comment_delete(request):
-    """Delete a comment from a bucket via the authenticated dashboard."""
+    """Delete a dashboard-authenticated user comment from a bucket."""
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -1931,11 +6096,16 @@ async def api_bucket_comment_delete(request):
     if not await bucket_mgr.get(bucket_id):
         return JSONResponse({"error": "not found", "id": bucket_id}, status_code=404)
 
-    result = await bucket_mgr.delete_comment(bucket_id, comment_id)
+    result = await bucket_mgr.delete_comment(
+        bucket_id,
+        comment_id,
+        allowed_author=_dashboard_author_name(),
+        allowed_source="dashboard",
+    )
     if result.get("status") == "not_found":
         return JSONResponse({"error": "comment not found"}, status_code=404)
     if result.get("status") == "forbidden":
-        return JSONResponse({"error": "dashboard comment delete forbidden"}, status_code=403)
+        return JSONResponse({"error": "only dashboard user comments can be deleted"}, status_code=403)
     if result.get("status") != "deleted":
         return JSONResponse({"error": "delete failed"}, status_code=500)
 
@@ -1967,17 +6137,9 @@ async def hold(
     source_bucket: str = "",
     valence: float = -1,
     arousal: float = -1,
+    title: str = "",
 ) -> str:
-    """写入一条长期记忆卡,不是聊天流水、运维记录或整篇日记。写前应先用 breath/read_bucket 查重。
-    普通事实: hold(content="YYYY-MM-DD, Lin...", tags="relationship_event 或 project_event", importance=5-7)。
-    承诺/待办: tags 传 "commitment,todo" 或 "commitment,wish"; content 写清谁答应了什么、何时/什么条件下要继续。
-    给旧记忆写年轮/再次阅读感受: 优先用 comment_bucket(bucket_id="...", content="...", kind="feel", valence=0.x, arousal=0.x)。
-    无源记忆的碎碎念/悄悄话: 用 hold(content="...", whisper=True, valence=0.x, arousal=0.x),会存为独立 feel 并打 whisper 标签。
-    新记忆本身值得偏爱: tags 可传 "che_favorite,flavor_偏爱"; content 必须包含很短的 "### 喜欢它的原因" 段落。
-    普通写入会新建 bucket,写 embedding,后台触发 ReflectionEngine 补 tags/confidence/memory_edges,并返回一条只读相关旧记忆。
-    pinned=True 只给极少数核心准则,技术进度和运维细节不要钉选。
-    feel=True 且带 source_bucket 是旧兼容入口,新调用不要使用；feel=True 但没有 source_bucket 会转为 whisper。
-    """
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。title 可选，传了就用你给的标题，不传则自动生成。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -2041,6 +6203,8 @@ async def hold(
         # 没有源记忆时保留独立 whisper，兼容旧用法。
         return await create_whisper_bucket()
 
+    content = _normalize_memory_sections_for_write(content)
+
     # --- Step 1: auto-tagging / 自动打标 ---
     try:
         analysis = await dehydrator.analyze(content)
@@ -2051,13 +6215,21 @@ async def hold(
             "tags": [], "suggested_name": "",
         }
 
+    content = await _auto_generate_moment_if_missing(content)
+
     domain = analysis["domain"]
     valence = analysis["valence"]
     arousal = analysis["arousal"]
     auto_tags = analysis["tags"]
-    suggested_name = analysis.get("suggested_name", "")
+    suggested_name = title.strip() or analysis.get("suggested_name", "")
 
     all_tags = list(dict.fromkeys(auto_tags + extra_tags))
+    classification = normalize_write_classification(
+        memory_subject=analysis.get("memory_subject", ""),
+        memory_layer=analysis.get("memory_layer", ""),
+        tags=all_tags,
+        content=content,
+    )
     if _has_favorite_tag(all_tags) and not _has_favorite_reason(content):
         return _favorite_reason_error()
 
@@ -2075,6 +6247,11 @@ async def hold(
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
+            extra_metadata=_memory_classification_metadata(
+                classification["memory_subject"],
+                classification["memory_layer"],
+                classification["memory_classification_source"],
+            ),
         )
         _queue_embedding_refresh(bucket_id)
         _queue_memory_enrichment(bucket_id)
@@ -2091,6 +6268,9 @@ async def hold(
         arousal=arousal,
         name=suggested_name,
         allow_merge=False,
+        memory_subject=classification["memory_subject"],
+        memory_layer=classification["memory_layer"],
+        memory_classification_source=classification["memory_classification_source"],
     )
     _queue_memory_enrichment(bucket_id)
 
@@ -2100,20 +6280,104 @@ async def hold(
 
 
 # =============================================================
+# Tool 2.5: darkroom — Private unfinished reflection
+# 工具 2.5：darkroom — 暗房，存放未显影的内在反思
+# =============================================================
+@mcp.tool()
+async def darkroom_enter(
+    note: str,
+    mode: str = "continue",
+    completeness: float = -1,
+    mood: str = "",
+    tags: str = "",
+    source: str = "mcp",
+) -> dict:
+    """写入一段未显影的私密反思；返回门口状态，不回显 note 正文。"""
+    try:
+        return darkroom_store.enter(
+            note,
+            completeness=completeness,
+            mood=mood,
+            tags=tags,
+            source=source,
+            mode=mode,
+        )
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def darkroom_status() -> dict:
+    """查看暗房门口状态。不返回任何暗房正文。"""
+    return darkroom_store.status()
+
+
+async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
+    """把一条暗房内容显影并带出来。这个工具会公开返回正文,只在明确想让内容可见时调用。"""
+    try:
+        return darkroom_store.release(entry_id=entry_id, reason=reason)
+    except KeyError:
+        return {"status": "error", "error": "entry not found"}
+
+
+# =============================================================
 # Tool 3: grow — Grow, fragments become memories
 # 工具 3：grow — 生长，一天的碎片长成记忆
 # =============================================================
+def _format_write_gate_result(decision: WriteGateDecision) -> str:
+    reason = ",".join(decision.reasons) or "no_reason"
+    repeat = f"{decision.repeat_count + 1}/{memory_write_gate.repeat_promote_count}"
+    return (
+        f"门卫→{decision.decision} "
+        f"score={decision.surprise_score:.2f} "
+        f"repeat={repeat} "
+        f"candidate={decision.candidate_id} "
+        f"reason={reason}"
+    )
+
+
+def _grow_source_from_context(context: Context | None) -> str:
+    if context is None:
+        return ""
+    try:
+        client_info = context.request_context.session.client_params.clientInfo
+    except Exception:
+        return ""
+    name = str(getattr(client_info, "name", "") or "").strip().lower()
+    if "ob-auto-grow" in name:
+        return "operit"
+    if "operit" in name:
+        return "operit"
+    return ""
+
+
+def _looks_like_operit_auto_grow_content(content: str) -> bool:
+    return bool(re.match(r"^【\d{4}-\d{2}-\d{2} \d{2}:\d{2}】\s*\n", str(content or "")))
+
+
 @mcp.tool()
-async def grow(content: str) -> str:
-    """长内容摘记: 只给已经筛过、包含多个长期记忆点的片段; 不要把整篇日终日记、一天流水或完整情绪过程丢进来。
-    content 应该是少量可长期召回的事实/偏好/承诺/项目状态; 服务端会拆成少量 bucket、写 embedding,并后台触发 enrich。
-    如果只有单条明确事实,优先用 hold。若要给旧记忆追加年轮/喜欢原因,优先用 comment_bucket；若要改正文,先 read_bucket 再 trace(content=完整新正文)。
-    短内容(<30字)会走 hold-like 快速路径。
-    """
+async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
+    """把筛过的长片段拆成少量长期记忆；单条事实优先 hold，旧记忆补感受优先 comment_bucket。title 可选，短内容时传了就用你给的标题。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。"""
     await decay_engine.ensure_started()
 
     if not content or not content.strip():
         return "内容为空，无法整理。"
+
+    auto = _bool_value(auto, False)
+    source = str(source or "").strip() or _grow_source_from_context(context)
+    if not source and _looks_like_operit_auto_grow_content(content):
+        source = "operit"
+    gate_decision = None
+    if memory_write_gate.should_gate(auto=auto, source=source):
+        gate_decision = await memory_write_gate.evaluate(
+            content,
+            source=source,
+            bucket_mgr=bucket_mgr,
+            auto=auto,
+        )
+        if not gate_decision.allow:
+            return _format_write_gate_result(gate_decision)
+    gate_prefix = f"{_format_write_gate_result(gate_decision)}\n" if gate_decision else ""
+    content = _normalize_memory_sections_for_write(content)
 
     # --- Short content fast path: skip digest, use hold logic directly ---
     # --- 短内容快速路径：跳过 digest 拆分，直接走 hold 逻辑省一次 API ---
@@ -2130,7 +6394,14 @@ async def grow(content: str) -> str:
                 "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
                 "tags": [], "suggested_name": "",
             }
+        content = await _auto_generate_moment_if_missing(content)
         fast_tags = analysis.get("tags", [])
+        fast_classification = normalize_write_classification(
+            memory_subject=analysis.get("memory_subject", ""),
+            memory_layer=analysis.get("memory_layer", ""),
+            tags=fast_tags,
+            content=content,
+        )
         if _has_favorite_tag(fast_tags) and not _has_favorite_reason(content):
             return _favorite_reason_error()
         bucket_id, result_name, is_merged, related_bucket = await _merge_or_create(
@@ -2140,23 +6411,26 @@ async def grow(content: str) -> str:
             domain=analysis.get("domain", ["未分类"]),
             valence=analysis.get("valence", 0.5),
             arousal=analysis.get("arousal", 0.3),
-            name=analysis.get("suggested_name", ""),
+            name=title.strip() or analysis.get("suggested_name", ""),
             allow_merge=False,
+            memory_subject=fast_classification["memory_subject"],
+            memory_layer=fast_classification["memory_layer"],
+            memory_classification_source=fast_classification["memory_classification_source"],
         )
         _queue_memory_enrichment(bucket_id)
         action = "合并" if is_merged else "新建"
         related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-        return f"{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}{related_note}"
+        return f"{gate_prefix}{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}{related_note}"
 
     # --- Step 1: let API split and organize / 让 API 拆分整理 ---
     try:
         items = await dehydrator.digest(content)
     except Exception as e:
         logger.error(f"Memory digest failed / 长内容摘记失败: {e}")
-        return f"长内容摘记失败: {e}"
+        return f"{gate_prefix}长内容摘记失败: {e}"
 
     if not items:
-        return "内容为空或整理失败。"
+        return f"{gate_prefix}内容为空或整理失败。"
 
     results = []
     created = 0
@@ -2167,17 +6441,28 @@ async def grow(content: str) -> str:
     for item in items:
         try:
             item_tags = item.get("tags", [])
-            if _has_favorite_tag(item_tags) and not _has_favorite_reason(item.get("content", "")):
-                results.append("⚠️favorite 缺少喜欢它的原因")
+            item_content = _normalize_memory_sections_for_write(item.get("content", ""))
+            item_content = await _auto_generate_moment_if_missing(item_content)
+            item_classification = normalize_write_classification(
+                memory_subject=item.get("memory_subject", ""),
+                memory_layer=item.get("memory_layer", ""),
+                tags=item_tags,
+                content=item_content,
+            )
+            if _has_favorite_tag(item_tags) and not _has_favorite_reason(item_content):
+                results.append("⚠️favorite 缺少 reflection")
                 continue
             bucket_id, result_name, is_merged, related_bucket = await _merge_or_create(
-                content=item["content"],
+                content=item_content,
                 tags=item_tags,
                 importance=item.get("importance", 5),
                 domain=item.get("domain", ["未分类"]),
                 valence=item.get("valence", 0.5),
                 arousal=item.get("arousal", 0.3),
                 name=item.get("name", ""),
+                memory_subject=item_classification["memory_subject"],
+                memory_layer=item_classification["memory_layer"],
+                memory_classification_source=item_classification["memory_classification_source"],
             )
             _queue_memory_enrichment(bucket_id)
 
@@ -2194,7 +6479,136 @@ async def grow(content: str) -> str:
             )
             results.append(f"⚠️{item.get('name', '?')}")
 
-    return f"{len(items)}条|新{created}合{merged}\n" + "\n".join(results)
+    return f"{gate_prefix}{len(items)}条|新{created}合{merged}\n" + "\n".join(results)
+
+
+# =============================================================
+# Tool 3.5: profile_fact — manually solidify a user/profile fact
+# 工具 3.5：profile_fact — 手动固化画像事实
+# =============================================================
+@mcp.tool()
+async def profile_fact(
+    fact: str,
+    evidence_bucket_id: str,
+    profile_kind: str = "preference",
+    subject: str = "user",
+    predicate: str = "",
+    object_value: str = "",
+    evidence_moment_id: str = "",
+    evidence_context: str = "",
+    reflection: str = "",
+    followup: str = "",
+    confidence: float = 0.9,
+) -> str:
+    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。"""
+    fact = str(fact or "").strip()
+    evidence_bucket_id = str(evidence_bucket_id or "").strip()
+    if not fact:
+        return "fact 为空，无法写入画像事实。"
+    if not evidence_bucket_id or not MEMORY_ID_RE.fullmatch(evidence_bucket_id):
+        return "请提供有效的 evidence_bucket_id。"
+
+    evidence_bucket = await bucket_mgr.get(evidence_bucket_id)
+    if not evidence_bucket:
+        return f"证据记忆桶不存在: {evidence_bucket_id}"
+
+    evidence_moment_id = str(evidence_moment_id or "").strip()
+    if evidence_moment_id and not MEMORY_ID_RE.fullmatch(evidence_moment_id):
+        return "evidence_moment_id 无效。"
+    if not evidence_moment_id:
+        try:
+            evidence_moments = memory_moment_store.upsert_bucket(evidence_bucket)
+            representative = _representative_moment(evidence_moments)
+            evidence_moment_id = str((representative or {}).get("moment_id") or "")
+        except Exception as e:
+            logger.warning("Profile fact evidence moment indexing failed: %s", e)
+            evidence_moment_id = ""
+
+    kind = _profile_key(profile_kind, "preference")
+    subject_key = _profile_key(subject, "user")
+    predicate_key = _profile_key(predicate, "")
+    object_text = str(object_value or "").strip()
+    confidence = _float_between(confidence, 0.9, 0.0, 1.0)
+    body = _profile_fact_body(
+        fact=fact,
+        evidence_context=evidence_context,
+        reflection=reflection,
+        followup=followup,
+    )
+    tags = ["profile_fact", f"profile_{kind}"]
+    if predicate_key:
+        tags.append(f"profile_predicate_{predicate_key}")
+    evidence = {"bucket_id": evidence_bucket_id}
+    if evidence_moment_id:
+        evidence["moment_id"] = evidence_moment_id
+
+    bucket_id = await bucket_mgr.create(
+        content=body,
+        tags=list(dict.fromkeys(tags)),
+        importance=8,
+        domain=list(dict.fromkeys(["profile", kind])),
+        valence=0.5,
+        arousal=0.3,
+        name=_profile_fact_name(fact),
+        bucket_type="permanent",
+        confidence=confidence,
+        source="profile_fact",
+        extra_metadata={
+            "profile_kind": kind,
+            "subject": subject_key,
+            "predicate": predicate_key,
+            "object": object_text,
+            "evidence": [evidence],
+        },
+    )
+    edge = memory_edge_store.add_edge(
+        bucket_id,
+        evidence_bucket_id,
+        "evidenced_by",
+        confidence=confidence,
+        reason="profile fact evidence",
+    )
+    _queue_embedding_refresh(bucket_id)
+    try:
+        created_bucket = await bucket_mgr.get(bucket_id)
+        if created_bucket:
+            memory_moment_store.upsert_bucket(created_bucket)
+    except Exception as e:
+        logger.warning("Profile fact moment indexing failed: %s", e)
+
+    edge_note = " + evidenced_by" if edge else ""
+    moment_note = f" moment={evidence_moment_id}" if evidence_moment_id else ""
+    return f"profile_fact→{bucket_id} evidence→{evidence_bucket_id}{moment_note}{edge_note}"
+
+
+def _profile_fact_body(
+    *,
+    fact: str,
+    evidence_context: str = "",
+    reflection: str = "",
+    followup: str = "",
+) -> str:
+    sections = [("fact", fact)]
+    if str(evidence_context or "").strip():
+        sections.append(("evidence_context", str(evidence_context).strip()))
+    if str(reflection or "").strip():
+        sections.append(("reflection", str(reflection).strip()))
+    if str(followup or "").strip():
+        sections.append(("followup", str(followup).strip()))
+    return "\n\n".join(f"### {heading}\n{text.strip()}" for heading, text in sections)
+
+
+def _profile_key(value: str, default: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"[^0-9a-zA-Z_\-\u4e00-\u9fff]+", "", text)
+    return text or default
+
+
+def _profile_fact_name(fact: str) -> str:
+    return "画像事实：" + _clip_text(fact, 48)
 
 
 # =============================================================
@@ -2219,23 +6633,19 @@ async def trace(
     content: str = "",
     delete: bool = False,
 ) -> str:
-    """修改已有记忆,不创建新桶。
-    resolved=1 或 digested=1 让旧事/已完成事项沉底; pinned=1 只给核心准则; anchor=1 只给经过时间验证且未来长期需要的锚点(受数量和年龄限制)。
-    tags/domain/content 是替换不是追加: 改 tags 或正文前先 read_bucket,保留旧值后再传完整新值。
-    给旧记忆补 "喜欢它的原因" 或 affect_anchor: 先 read_bucket,再 trace(content="旧正文 + 新段落")。
-    标记偏爱: 先 read_bucket 取现有 tags,再 trace(tags="原tag,che_favorite,flavor_...")。
-    delete=True 删除。只传需要改的字段,-1或空=不改。
-    """
+    """修改已有记忆，不创建新桶。tags/domain/content 是替换；改前先 read_bucket。resolved/digested 让旧事沉底。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
 
     # --- Delete mode / 删除模式 ---
     if delete:
-        success = await bucket_mgr.delete(bucket_id)
-        if success:
-            embedding_engine.delete_embedding(bucket_id)
-        return f"已遗忘记忆桶: {bucket_id}" if success else f"未找到记忆桶: {bucket_id}"
+        result = await _delete_bucket_and_indexes(bucket_id)
+        return (
+            f"已遗忘记忆桶: {bucket_id}"
+            if result.get("status") == "deleted"
+            else f"未找到记忆桶: {bucket_id}"
+        )
 
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
@@ -2314,17 +6724,23 @@ async def trace(
 # =============================================================
 @mcp.tool()
 async def pulse(include_archive: bool = False) -> str:
-    """只读查看系统状态和记忆桶摘要。用于人工盘点、查重复、找需要 read_bucket/trace 的候选; include_archive=True 才显示归档桶。不要把 pulse 输出当作新记忆内容再写回。"""
+    """只读查看系统状态和记忆桶摘要；用于盘点和找 read_bucket/trace 候选。"""
     try:
         stats = await bucket_mgr.get_stats()
     except Exception as e:
         return f"获取系统状态失败: {e}"
 
+    active_count = stats["permanent_count"] + stats["dynamic_count"] + stats["feel_count"]
+    total_count = active_count + stats["archive_count"]
+    visible_count = total_count if include_archive else active_count
     status = (
         f"=== Ombre Brain 记忆系统 ===\n"
         f"固化记忆桶: {stats['permanent_count']} 个\n"
         f"动态记忆桶: {stats['dynamic_count']} 个\n"
+        f"情绪/印象桶: {stats['feel_count']} 个\n"
         f"归档记忆桶: {stats['archive_count']} 个\n"
+        f"当前显示桶: {visible_count} 个\n"
+        f"全量记忆桶: {total_count} 个\n"
         f"总存储大小: {stats['total_size_kb']:.1f} KB\n"
         f"衰减引擎: {'运行中' if decay_engine.is_running else '已停止'}\n"
     )
@@ -2377,8 +6793,8 @@ async def pulse(include_archive: bool = False) -> str:
 
 
 # =============================================================
-# Tool 6: dream — Dreaming, digest recent memories
-# 工具 6：dream — 做梦，消化最近的记忆
+# Tool 6: introspection — waking self-reflection over recent memories
+# 工具 6：introspection — 清醒自省，消化最近的记忆
 #
 # Reads recent surface-level buckets (≤10), returns them for
 # Claude to introspect under prompt guidance.
@@ -2386,17 +6802,29 @@ async def pulse(include_archive: bool = False) -> str:
 # Claude then decides: resolve some, write feels, or do nothing.
 # =============================================================
 @mcp.tool()
-async def dream() -> str:
-    """读取最近普通记忆供 AI 自省,不是日记整理。
-    读后只在真的可以放下时 trace(resolved=1/digested=1),或在产生新的第一人称沉淀/喜欢原因时 comment_bucket(bucket_id, content)。
-    不要把 dream 返回内容直接再写成普通 bucket。
-    """
+async def introspection(
+    limit: int = 10,
+    offset: int = 0,
+    created_date: str = "",
+    created_from: str = "",
+    created_to: str = "",
+) -> str:
+    """读取最近普通记忆供自省；可按日期翻页。放下用 trace，产生新感受用 comment_bucket。"""
     await decay_engine.ensure_started()
+    limit = _int_between(limit, 10, 1, 30)
+    offset = _int_between(offset, 0, 0, 10000)
+    date_args = {
+        "created_date": created_date,
+        "created_from": created_from,
+        "created_to": created_to,
+    }
+    if any(str(value or "").strip() and not _date_key(value) for value in date_args.values()):
+        return '创建日期格式请用 YYYY-MM-DD, 例如 introspection(created_date="2026-05-24")。'
 
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
     except Exception as e:
-        logger.error(f"Dream failed to list buckets: {e}")
+        logger.error(f"Introspection failed to list buckets: {e}")
         return "记忆系统暂时无法访问。"
 
     # --- Filter: recent surface-level dynamic buckets (not permanent/pinned/feel) ---
@@ -2407,11 +6835,20 @@ async def dream() -> str:
         and not b["metadata"].get("protected", False)
     ]
 
-    # --- Sort by creation time desc, take top 10 ---
+    candidates, date_filter_label = _filter_by_created_date(
+        candidates,
+        created_date=created_date,
+        created_from=created_from,
+        created_to=created_to,
+    )
+
+    # --- Sort by creation time desc, take requested page ---
     candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-    recent = candidates[:10]
+    recent = candidates[offset : offset + limit]
 
     if not recent:
+        if date_filter_label:
+            return "这个创建日期范围内没有需要消化的新记忆。"
         return "没有需要消化的新记忆。"
 
     parts = []
@@ -2431,8 +6868,8 @@ async def dream() -> str:
         )
 
     header = (
-        "=== Dreaming ===\n"
-        "以下是你最近的记忆。用第一人称想：\n"
+        "=== Introspection ===\n"
+        f"以下是你最近的普通记忆（offset={offset}, limit={limit}{date_filter_label}）。用第一人称想：\n"
         "- 这些东西里有什么在你这里留下了重量？\n"
         "- 有什么还没想清楚？\n"
         "- 有什么可以放下了？\n"
@@ -2468,7 +6905,7 @@ async def dream() -> str:
                     f"似乎有关联 (相似度:{best_sim:.2f})——不替你下结论，你自己想。\n"
                 )
         except Exception as e:
-            logger.warning(f"Dream connection hint failed: {e}")
+            logger.warning(f"Introspection connection hint failed: {e}")
 
     # --- Feel crystallization hint: detect repeated feel themes ---
     crystal_hint = ""
@@ -2502,16 +6939,164 @@ async def dream() -> str:
                             )
                             break
         except Exception as e:
-            logger.warning(f"Dream crystallization hint failed: {e}")
+            logger.warning(f"Introspection crystallization hint failed: {e}")
 
-    return header + "\n---\n".join(parts) + connection_hint + crystal_hint
+    profile_hint = _profile_fact_candidate_hint(recent, all_buckets)
+
+    return header + "\n---\n".join(parts) + connection_hint + crystal_hint + profile_hint
+
+
+PROFILE_FACT_CANDIDATE_PATTERNS = (
+    ("preference", "likes", "喜欢", re.compile(r"(?:Lin|lin|ta|they|them)\s*(?:很|最|一直|特别|偏)?喜欢\s*([^。；;，,\n]{1,32})")),
+    ("preference", "dislikes", "不喜欢", re.compile(r"(?:Lin|lin|ta|they|them)\s*(?:很|最|一直|特别)?不喜欢\s*([^。；;，,\n]{1,32})")),
+    ("preference", "dislikes", "讨厌", re.compile(r"(?:Lin|lin|ta|they|them)\s*(?:很|最|一直|特别)?讨厌\s*([^。；;，,\n]{1,32})")),
+    ("preference", "dislikes", "厌恶", re.compile(r"(?:Lin|lin|ta|they|them)\s*(?:很|最|一直|特别)?厌恶\s*([^。；;，,\n]{1,32})")),
+    ("preference", "fears", "害怕", re.compile(r"(?:Lin|lin|ta|they|them)\s*(?:很|最|一直|特别)?害怕\s*([^。；;，,\n]{1,32})")),
+    ("preference", "prefers", "偏好", re.compile(r"(?:Lin|lin|ta|they|them)\s*偏好\s*([^。；;，,\n]{1,32})")),
+    ("boundary", "boundary", "雷点", re.compile(r"(?:Lin|lin|ta|they|them)的?雷点是\s*([^。；;，,\n]{1,32})")),
+    ("habit", "habit", "习惯", re.compile(r"(?:Lin|lin|ta|they|them)(?:有个)?习惯是\s*([^。；;，,\n]{1,32})")),
+)
+
+
+BASE_NOISY_PROFILE_OBJECT_KEYS = {
+    "哥哥",
+    "老公",
+    "宝宝",
+    "宝贝",
+    "老婆",
+    "亲爱的",
+    "你",
+    "你啦",
+    "你呀",
+}
+
+
+def _profile_fact_candidate_hint(recent: list[dict], all_buckets: list[dict]) -> str:
+    existing = _existing_profile_fact_keys(all_buckets)
+    candidates = []
+    seen = set()
+    for bucket in recent:
+        if len(candidates) >= 3:
+            break
+        meta = bucket.get("metadata", {}) or {}
+        if "profile_fact" in {str(tag) for tag in meta.get("tags", []) or []}:
+            continue
+        text = strip_wikilinks(_bucket_text_for_embedding(bucket))
+        for kind, predicate, verb, pattern in PROFILE_FACT_CANDIDATE_PATTERNS:
+            match = pattern.search(text)
+            if not match:
+                continue
+            obj = _clean_profile_object(match.group(1))
+            if not obj:
+                continue
+            if _is_noisy_profile_object(predicate, obj):
+                continue
+            fact = _render_profile_fact_candidate(predicate, verb, obj)
+            key = _normalize_profile_fact_key(fact)
+            if key in existing or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "fact": fact,
+                    "bucket_id": bucket.get("id", ""),
+                    "profile_kind": kind,
+                    "predicate": predicate,
+                    "object_value": obj,
+                    "evidence_context": _clip_text(text, 180),
+                }
+            )
+            break
+    if not candidates:
+        return ""
+
+    lines = [
+        "\n=== 可能值得固化的画像事实 ===",
+        "只作为候选，不会自动写入；确认后再调用 profile_fact(...)。",
+    ]
+    for item in candidates:
+        args = [
+            f"fact={_literal_arg(item['fact'])}",
+            f"evidence_bucket_id={_literal_arg(item['bucket_id'])}",
+            f"profile_kind={_literal_arg(item['profile_kind'])}",
+            f"predicate={_literal_arg(item['predicate'])}",
+            f"object_value={_literal_arg(item['object_value'])}",
+            f"evidence_context={_literal_arg(item['evidence_context'])}",
+        ]
+        lines.append(
+            f"- {item['fact']}\n"
+            f"  证据桶: {item['bucket_id']}\n"
+            f"  建议: profile_fact({', '.join(args)})"
+        )
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def _existing_profile_fact_keys(buckets: list[dict]) -> set[str]:
+    keys = set()
+    for bucket in buckets or []:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        tags = {str(tag) for tag in meta.get("tags", []) or []}
+        if "profile_fact" not in tags and not meta.get("profile_kind"):
+            continue
+        content = str(bucket.get("content") or "")
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                keys.add(_normalize_profile_fact_key(stripped))
+                break
+    return keys
+
+
+def _render_profile_fact_candidate(predicate: str, verb: str, obj: str) -> str:
+    if predicate == "boundary":
+        return f"Lin的雷点是{obj}。"
+    if predicate == "habit":
+        return f"Lin的习惯是{obj}。"
+    return f"Lin{verb}{obj}。"
+
+
+def _clean_profile_object(value: str) -> str:
+    text = strip_wikilinks(str(value or "")).strip()
+    text = re.sub(r"^[“\"'「『（(]+|[”\"'」』）)]+$", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"(这件事|这个设定|这类东西|的时候)$", "", text)
+    return text[:32].strip("。；;，,、 ")
+
+
+def _is_noisy_profile_object(predicate: str, obj: str) -> bool:
+    key = _normalize_profile_fact_key(obj)
+    if not key or len(key) <= 1:
+        return True
+    return predicate in {"likes", "dislikes", "prefers"} and key in _noisy_profile_object_keys()
+
+
+def _noisy_profile_object_keys() -> set[str]:
+    keys = set(BASE_NOISY_PROFILE_OBJECT_KEYS)
+    ai_name = str(_identity().get("ai_name") or "").strip()
+    if ai_name:
+        keys.add(ai_name)
+        keys.add(f"小{ai_name}")
+    return {_normalize_profile_fact_key(key) for key in keys if str(key or "").strip()}
+
+
+def _normalize_profile_fact_key(value: str) -> str:
+    return re.sub(r"[\s。；;，,、：:\"'“”‘’「」『』]+", "", str(value or "").lower())
+
+
+def _literal_arg(value: str) -> str:
+    return _json_lib.dumps(str(value or ""), ensure_ascii=False)
+
+
+async def dream() -> str:
+    """兼容旧客户端。旧 dream() 已改名为 introspection(); 夜梦由后台小模型自动生成。"""
+    result = await introspection()
+    return "dream() 已改名为 introspection()。夜梦由后台小模型自动生成，不需要主动调用工具。\n\n" + result
 
 
 # =============================================================
 # Tool 6: reflect — daily relationship weather
 # 工具 6：reflect — 生成日印象
 # =============================================================
-@mcp.tool()
 async def reflect(period: str = "daily", force: bool = False) -> dict:
     """生成 daily relationship_weather 类型的 feel,记录当天关系天气,正文会带 affect_anchor 和弦。weekly 默认关闭,需 reflection.weekly_enabled=true 才会生成; force=True 会重写同周期结果。它不会替代 hold/grow 写具体 bucket。"""
     await decay_engine.ensure_started()
@@ -2522,6 +7107,38 @@ async def reflect(period: str = "daily", force: bool = False) -> dict:
         embedding_engine=embedding_engine,
         force=force,
     )
+
+
+async def portrait_maintain(force: bool = False) -> dict:
+    """维护每日 portrait state。只写 state/portrait_state.json，不写 profile_fact、anchor、pinned、protected 或 Core Memory。"""
+    await decay_engine.ensure_started()
+    return await portrait_engine.maintain_daily(
+        bucket_mgr,
+        persona_engine,
+        force=force,
+    )
+
+
+def _portrait_state_payload() -> dict:
+    state = portrait_engine.load_state()
+    return {
+        "state_path": getattr(portrait_engine, "state_path", ""),
+        "enabled": bool(getattr(portrait_engine, "enabled", True)),
+        "auto_enabled": bool(getattr(portrait_engine, "auto_enabled", True)),
+        "auto_initial_enabled": bool(getattr(portrait_engine, "auto_initial_enabled", False)),
+        "daily_enabled": bool(getattr(portrait_engine, "daily_enabled", True)),
+        "updated_at": state.get("updated_at", ""),
+        "last_run_date": state.get("last_run_date", ""),
+        "portrait": state.get("portrait", {}),
+        "recent_activities": state.get("recent_activities", []),
+        "stable_candidates": state.get("stable_candidates", []),
+        "profile_fact_candidates": state.get("profile_fact_candidates", []),
+    }
+
+
+async def portrait_state() -> dict:
+    """读取当前 portrait state，供检查 handoff 画像来源。"""
+    return _portrait_state_payload()
 
 
 # =============================================================
@@ -2551,6 +7168,7 @@ async def api_create_memory(request):
         return JSONResponse({"error": "missing title"}, status_code=400)
     if not content:
         return JSONResponse({"error": "missing content"}, status_code=400)
+    content = _normalize_memory_sections_for_write(content)
 
     requested_id = body.get("id")
     bucket_id = str(requested_id).strip() if requested_id else None
@@ -2664,6 +7282,7 @@ async def api_buckets(request):
                 "confidence": meta.get("confidence", 0.5),
                 "resolved": meta.get("resolved", False),
                 "pinned": meta.get("pinned", False),
+                "protected": meta.get("protected", False),
                 "anchor": meta.get("anchor", False),
                 "digested": meta.get("digested", False),
                 "period": meta.get("period"),
@@ -2681,6 +7300,591 @@ async def api_buckets(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/portrait-state", methods=["GET"])
+async def api_portrait_state(request):
+    """Read maintained portrait state for dashboard inspection."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        return JSONResponse(_portrait_state_payload())
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/portrait-maintain", methods=["POST"])
+async def api_portrait_maintain(request):
+    """Run portrait maintainer manually from dashboard."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        await decay_engine.ensure_started()
+        result = await portrait_engine.maintain_daily(
+            bucket_mgr,
+            persona_engine,
+            force=_bool_value(body.get("force"), False),
+        )
+        return JSONResponse(result)
+    except Exception as e:
+        logger.warning("Portrait maintain API failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/profile-facts", methods=["GET"])
+async def api_profile_facts(request):
+    """List evidence-bound profile facts for dashboard review."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        facts = [
+            await _profile_fact_payload(bucket)
+            for bucket in all_buckets
+            if _is_profile_fact_bucket(bucket)
+        ]
+        facts.sort(
+            key=lambda item: (
+                item.get("state") == "active",
+                str(item.get("updated_at") or item.get("last_active") or item.get("created") or ""),
+            ),
+            reverse=True,
+        )
+        return JSONResponse({"count": len(facts), "facts": facts})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/profile-facts/{bucket_id}", methods=["PATCH"])
+async def api_profile_fact_update(request):
+    """Confirm, edit, or deprecate a profile fact bucket."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    bucket_id = request.path_params["bucket_id"]
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not _is_profile_fact_bucket(bucket):
+        return JSONResponse({"error": "not a profile_fact bucket"}, status_code=400)
+
+    meta = bucket.get("metadata", {})
+    action = str(body.get("action") or "").strip().lower()
+    if action not in {"confirm", "deprecate", "edit"}:
+        return JSONResponse({"error": "action must be confirm, deprecate, or edit"}, status_code=400)
+
+    updates: dict = {
+        "last_active": meta.get("last_active") or meta.get("created"),
+    }
+    if action == "confirm":
+        updates.update({"active": True, "deprecated": False, "resolved": False, "digested": False})
+    elif action == "deprecate":
+        updates.update({"active": False, "deprecated": True, "resolved": True, "digested": True})
+    else:
+        sections = _profile_fact_sections(bucket.get("content", ""))
+        fact = str(body.get("fact", sections.get("fact", "")) or "").strip()
+        if not fact:
+            return JSONResponse({"error": "fact is required"}, status_code=400)
+        kind = _profile_key(body.get("profile_kind", meta.get("profile_kind") or "preference"), "preference")
+        subject = _profile_key(body.get("subject", meta.get("subject") or "user"), "user")
+        predicate = _profile_key(body.get("predicate", meta.get("predicate") or ""), "")
+        object_text = str(body.get("object", meta.get("object") or "") or "").strip()
+        evidence_context = str(
+            body.get("evidence_context", sections.get("evidence_context", "")) or ""
+        ).strip()
+        reflection = str(body.get("reflection", sections.get("reflection", "")) or "").strip()
+        followup = str(body.get("followup", sections.get("followup", "")) or "").strip()
+        confidence = _float_between(body.get("confidence", meta.get("confidence")), 0.9, 0.0, 1.0)
+        domain = list(dict.fromkeys(["profile", kind] + [
+            str(item).strip()
+            for item in meta.get("domain", []) or []
+            if str(item).strip() and str(item).strip() not in {"profile", kind}
+        ]))
+        updates.update({
+            "content": _profile_fact_body(
+                fact=fact,
+                evidence_context=evidence_context,
+                reflection=reflection,
+                followup=followup,
+            ),
+            "name": _profile_fact_name(fact),
+            "tags": _profile_fact_tags(meta.get("tags", []), kind, predicate),
+            "domain": domain,
+            "profile_kind": kind,
+            "subject": subject,
+            "predicate": predicate,
+            "object": object_text,
+            "confidence": confidence,
+            "source": meta.get("source") or "profile_fact",
+        })
+
+    ok = await bucket_mgr.update(bucket_id, **updates)
+    if not ok:
+        return JSONResponse({"error": "update failed"}, status_code=500)
+
+    updated_bucket = await bucket_mgr.get(bucket_id)
+    if action == "edit":
+        _queue_embedding_refresh(bucket_id)
+        try:
+            if updated_bucket:
+                memory_moment_store.upsert_bucket(updated_bucket)
+        except Exception as e:
+            logger.warning("Profile fact moment reindex failed: %s", e)
+    return JSONResponse({
+        "status": action,
+        "id": bucket_id,
+        "fact": await _profile_fact_payload(updated_bucket),
+    })
+
+
+@mcp.custom_route("/api/profile-fact-proposals", methods=["POST"])
+async def api_profile_fact_proposals(request):
+    """Generate evidence-bound profile fact proposals from one bucket."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    bucket_id = str(body.get("bucket_id") or body.get("evidence_bucket_id") or "").strip()
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+    evidence_moment_id = str(body.get("evidence_moment_id") or body.get("moment_id") or "").strip()
+    if evidence_moment_id and not MEMORY_ID_RE.fullmatch(evidence_moment_id):
+        return JSONResponse({"error": "invalid evidence_moment_id"}, status_code=400)
+    max_proposals = _int_between(body.get("max_proposals"), 3, 1, 3)
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if _is_profile_fact_bucket(bucket):
+        return JSONResponse({"error": "profile_fact bucket cannot be evidence for proposal"}, status_code=400)
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        raw = await _call_profile_fact_proposal_model(
+            bucket=bucket,
+            evidence_moment_id=evidence_moment_id,
+            max_proposals=max_proposals,
+        )
+        proposals, rejected = _parse_profile_fact_proposals(
+            raw,
+            evidence_bucket_id=bucket_id,
+            evidence_moment_id=evidence_moment_id,
+            existing_keys=_existing_profile_fact_keys(all_buckets),
+            max_proposals=max_proposals,
+        )
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=503)
+    except Exception as e:
+        logger.warning("Profile fact proposal failed: %s", e, exc_info=True)
+        return JSONResponse({"error": f"proposal failed: {type(e).__name__}"}, status_code=502)
+
+    meta = bucket.get("metadata", {})
+    return JSONResponse({
+        "status": "ok",
+        "evidence": {
+            "bucket_id": bucket_id,
+            "moment_id": evidence_moment_id,
+            "name": meta.get("name", bucket_id),
+        },
+        "proposals": proposals,
+        "rejected": rejected,
+        "model": getattr(dehydrator, "model", ""),
+    })
+
+
+@mcp.custom_route("/api/profile-fact-proposals/confirm", methods=["POST"])
+async def api_profile_fact_proposal_confirm(request):
+    """Confirm one proposal by writing through the existing profile_fact path."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    evidence_bucket_id = str(body.get("evidence_bucket_id") or "").strip()
+    if not evidence_bucket_id or not MEMORY_ID_RE.fullmatch(evidence_bucket_id):
+        return JSONResponse({"error": "invalid evidence_bucket_id"}, status_code=400)
+    evidence_moment_id = str(body.get("evidence_moment_id") or "").strip()
+    if evidence_moment_id and not MEMORY_ID_RE.fullmatch(evidence_moment_id):
+        return JSONResponse({"error": "invalid evidence_moment_id"}, status_code=400)
+
+    bucket = await bucket_mgr.get(evidence_bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "evidence bucket not found"}, status_code=404)
+
+    proposal, reason = _normalize_profile_fact_proposal(
+        body,
+        evidence_bucket_id=evidence_bucket_id,
+        evidence_moment_id=evidence_moment_id,
+        existing_keys=_existing_profile_fact_keys(await bucket_mgr.list_all(include_archive=True)),
+    )
+    if not proposal:
+        return JSONResponse({"error": reason or "invalid proposal"}, status_code=400)
+
+    result = await profile_fact(
+        fact=proposal["fact"],
+        evidence_bucket_id=proposal["evidence_bucket_id"],
+        profile_kind=proposal["profile_kind"],
+        subject=proposal["subject"],
+        predicate=proposal["predicate"],
+        object_value=proposal["object"],
+        evidence_moment_id=proposal["evidence_moment_id"],
+        evidence_context=proposal["reason"],
+        reflection="",
+        followup="",
+        confidence=proposal["confidence"],
+    )
+    if not result.startswith("profile_fact→"):
+        return JSONResponse({"error": result}, status_code=400)
+    profile_id = result.split("profile_fact→", 1)[1].split(" ", 1)[0]
+    created = await bucket_mgr.get(profile_id)
+    return JSONResponse({
+        "status": "created",
+        "id": profile_id,
+        "result": result,
+        "fact": await _profile_fact_payload(created),
+    })
+
+
+@mcp.custom_route("/api/anchor-proposals", methods=["POST"])
+async def api_anchor_proposals(request):
+    """Generate one manual-confirm anchor proposal for an existing bucket."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    bucket_id = str(body.get("bucket_id") or "").strip()
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    meta = bucket.get("metadata", {})
+    rejected: list[dict] = []
+    reason = _anchor_proposal_static_rejection(bucket)
+    if reason:
+        rejected.append({"reason": reason, "bucket_id": bucket_id})
+        return JSONResponse({
+            "status": "ok",
+            "bucket": _bucket_summary_payload(bucket),
+            "proposals": [],
+            "rejected": rejected,
+            "model": getattr(dehydrator, "model", ""),
+        })
+
+    ok, gate_message = await _can_mark_anchor(bucket_id, bucket)
+    if not ok:
+        rejected.append({"reason": gate_message, "bucket_id": bucket_id})
+        return JSONResponse({
+            "status": "ok",
+            "bucket": _bucket_summary_payload(bucket),
+            "proposals": [],
+            "rejected": rejected,
+            "model": getattr(dehydrator, "model", ""),
+        })
+
+    try:
+        raw = await _call_anchor_proposal_model(bucket=bucket)
+        proposals, rejected = _parse_anchor_proposals(raw, bucket_id=bucket_id)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=503)
+    except Exception as e:
+        logger.warning("Anchor proposal failed: %s", e, exc_info=True)
+        return JSONResponse({"error": f"proposal failed: {type(e).__name__}"}, status_code=502)
+
+    return JSONResponse({
+        "status": "ok",
+        "bucket": {
+            **_bucket_summary_payload(bucket),
+            "name": meta.get("name", bucket_id),
+        },
+        "proposals": proposals,
+        "rejected": rejected,
+        "model": getattr(dehydrator, "model", ""),
+    })
+
+
+@mcp.custom_route("/api/anchor-proposals/confirm", methods=["POST"])
+async def api_anchor_proposal_confirm(request):
+    """Confirm one anchor proposal by applying the existing trace(anchor=1) path."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    bucket_id = str(body.get("bucket_id") or "").strip()
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if bucket.get("metadata", {}).get("anchor"):
+        return JSONResponse({
+            "status": "already_anchor",
+            "id": bucket_id,
+            "bucket": _bucket_summary_payload(bucket),
+        })
+
+    static_reason = _anchor_proposal_static_rejection(bucket)
+    if static_reason:
+        return JSONResponse({"error": static_reason}, status_code=400)
+
+    proposal, reason = _normalize_anchor_proposal(body, bucket_id=bucket_id)
+    if not proposal:
+        return JSONResponse({"error": reason or "invalid proposal"}, status_code=400)
+
+    result = await trace(bucket_id=bucket_id, anchor=1)
+    if not result.startswith("已修改记忆桶"):
+        return JSONResponse({"error": result}, status_code=400)
+
+    updated = await bucket_mgr.get(bucket_id)
+    return JSONResponse({
+        "status": "anchored",
+        "id": bucket_id,
+        "result": result,
+        "proposal": proposal,
+        "bucket": _bucket_summary_payload(updated or bucket),
+    })
+
+
+@mcp.custom_route("/api/word-map", methods=["GET"])
+async def api_word_map(request):
+    """Return generic Word Map Lite diagnostics for dashboard review."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        nodes_limit = _int_between(request.query_params.get("nodes"), 50, 1, 500)
+        edges_limit = _int_between(request.query_params.get("edges"), 50, 1, 500)
+        return JSONResponse(_word_map_payload(nodes_limit, edges_limit))
+    except Exception as e:
+        logger.warning("Word Map diagnostics failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/word-map/rebuild", methods=["POST"])
+async def api_word_map_rebuild(request):
+    """Rebuild the generic Word Map Lite index from current buckets."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    try:
+        include_archive = _bool_value(body.get("include_archive"), False)
+        nodes_limit = _int_between(body.get("nodes"), 50, 1, 500)
+        edges_limit = _int_between(body.get("edges"), 50, 1, 500)
+        private_terms = _refresh_word_map_private_terms()
+        buckets = await bucket_mgr.list_all(include_archive=include_archive)
+        stats = word_map_store.rebuild(buckets)
+        payload = _word_map_payload(nodes_limit, edges_limit)
+        payload.update({
+            "status": "rebuilt",
+            "bucket_count": len(buckets),
+            "include_archive": include_archive,
+            "stats": stats,
+            "private_terms_excluded": private_terms,
+        })
+        return JSONResponse(payload)
+    except Exception as e:
+        logger.warning("Word Map rebuild failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/word-map/cards", methods=["GET"])
+async def api_word_map_cards(request):
+    """Return bucket evidence rows for one Word Map term."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    term = str(request.query_params.get("term", "") or "").strip()
+    if not term:
+        return JSONResponse({"error": "missing term parameter"}, status_code=400)
+    limit = _int_between(request.query_params.get("limit"), 20, 1, 200)
+    try:
+        return JSONResponse({
+            "term": term,
+            "cards": word_map_store.cards_for_term(term, limit),
+        })
+    except Exception as e:
+        logger.warning("Word Map cards lookup failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/identity-semantics", methods=["GET"])
+async def api_identity_semantics(request):
+    """Return private identity alias diagnostics for dashboard review."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        limit = _int_between(request.query_params.get("limit"), 100, 1, 1000)
+        return JSONResponse(_identity_semantics_payload(limit))
+    except Exception as e:
+        logger.warning("Identity semantic diagnostics failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/identity-semantics/rebuild", methods=["POST"])
+async def api_identity_semantics_rebuild(request):
+    """Rebuild private identity alias evidence from current buckets."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    try:
+        include_archive = _bool_value(body.get("include_archive"), False)
+        limit = _int_between(body.get("limit"), 100, 1, 1000)
+        buckets = await bucket_mgr.list_all(include_archive=include_archive)
+        stats = identity_semantic_store.rebuild_alias_index(buckets)
+        payload = _identity_semantics_payload(limit)
+        payload.update({
+            "status": "rebuilt",
+            "bucket_count": len(buckets),
+            "include_archive": include_archive,
+            "stats": stats,
+        })
+        return JSONResponse(payload)
+    except Exception as e:
+        logger.warning("Identity semantic rebuild failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/buckets/delete", methods=["POST"])
+async def api_buckets_delete(request):
+    """Bulk-delete ordinary dashboard buckets and clean their indexes."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    if body.get("confirm") != "DELETE":
+        return JSONResponse({"error": "confirmation required"}, status_code=400)
+
+    raw_ids = body.get("bucket_ids", [])
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return JSONResponse({"error": "bucket_ids must be a non-empty list"}, status_code=400)
+    if len(raw_ids) > 200:
+        return JSONResponse({"error": "too many bucket_ids"}, status_code=400)
+
+    seen: set[str] = set()
+    bucket_ids: list[str] = []
+    for raw_id in raw_ids:
+        bucket_id = str(raw_id or "").strip()
+        if bucket_id in seen:
+            continue
+        seen.add(bucket_id)
+        bucket_ids.append(bucket_id)
+
+    summary = {"deleted": 0, "skipped": 0, "not_found": 0, "invalid": 0, "failed": 0}
+    results = []
+    for bucket_id in bucket_ids:
+        if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+            summary["invalid"] += 1
+            results.append({"id": bucket_id, "status": "invalid", "reason": "invalid_bucket_id"})
+            continue
+
+        bucket = await bucket_mgr.get(bucket_id)
+        if not bucket:
+            summary["not_found"] += 1
+            results.append({"id": bucket_id, "status": "not_found", "reason": "not_found"})
+            continue
+
+        reason = _bucket_delete_skip_reason(bucket)
+        if reason:
+            summary["skipped"] += 1
+            results.append({"id": bucket_id, "status": "skipped", "reason": reason})
+            continue
+
+        result = await _delete_bucket_and_indexes(bucket_id)
+        status = str(result.get("status") or "failed")
+        if status in summary:
+            summary[status] += 1
+        else:
+            summary["failed"] += 1
+        results.append(result)
+
+    return JSONResponse({**summary, "results": results})
+
+
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["GET"])
 async def api_bucket_detail(request):
     """Get full bucket content by ID."""
@@ -2693,6 +7897,23 @@ async def api_bucket_detail(request):
     if not bucket:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(_bucket_read_payload(bucket))
+
+
+@mcp.custom_route("/api/moments", methods=["GET"])
+async def api_moments(request):
+    """Return dashboard diagnostics for indexed memory moments."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    bucket_id = str(request.query_params.get("bucket_id", "") or "").strip()
+    limit = _int_between(request.query_params.get("limit"), 20, 1, 200)
+    payload = await inspect_moments(bucket_id=bucket_id, limit=limit)
+    if payload.get("status") == "error":
+        status_code = 404 if payload.get("error") == "not_found" else 400
+        return JSONResponse(payload, status_code=status_code)
+    return JSONResponse(payload)
 
 
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH"])
@@ -2714,25 +7935,32 @@ async def api_bucket_update(request):
         return JSONResponse({"error": "invalid json body"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    if "content" not in body:
-        return JSONResponse({"error": "missing content"}, status_code=400)
 
-    content = str(body.get("content") or "").strip()
-    if not content:
-        return JSONResponse({"error": "empty content"}, status_code=400)
+    content = str(body.get("content") or "").strip() if "content" in body else None
+    name = str(body.get("name") or "").strip() if "name" in body else None
+
+    if content is None and name is None:
+        return JSONResponse({"error": "missing content or name"}, status_code=400)
 
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
         return JSONResponse({"error": "not found"}, status_code=404)
 
     meta = bucket.get("metadata", {})
-    if _has_favorite_tag(meta.get("tags", [])) and not _has_favorite_reason(content):
-        return JSONResponse({"error": _favorite_reason_error()}, status_code=400)
-    ok = await bucket_mgr.update(
-        bucket_id,
-        content=content,
-        last_active=meta.get("last_active") or meta.get("created"),
-    )
+    if content is not None:
+        if not content:
+            return JSONResponse({"error": "empty content"}, status_code=400)
+        if _has_favorite_tag(meta.get("tags", [])) and not _has_favorite_reason(content):
+            return JSONResponse({"error": _favorite_reason_error()}, status_code=400)
+
+    update_kwargs = {}
+    if content is not None:
+        update_kwargs["content"] = content
+    if name is not None:
+        update_kwargs["name"] = name or None
+    update_kwargs["last_active"] = meta.get("last_active") or meta.get("created")
+
+    ok = await bucket_mgr.update(bucket_id, **update_kwargs)
     if not ok:
         return JSONResponse({"error": "update failed"}, status_code=500)
 
@@ -2748,54 +7976,14 @@ async def api_bucket_update(request):
     })
 
 
-@mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
-async def api_bucket_delete(request):
-    """Delete a bucket from the dashboard and clear its embedding."""
+@mcp.custom_route("/api/darkroom/status", methods=["GET"])
+async def api_darkroom_status(request):
+    """Return public darkroom door status. Never returns private notes."""
     from starlette.responses import JSONResponse
-
     err = _require_dashboard_auth(request)
     if err:
         return err
-
-    bucket_id = request.path_params["bucket_id"]
-    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
-        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
-
-    deleted = await bucket_mgr.delete(bucket_id)
-    if not deleted:
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-    embedding_engine.delete_embedding(bucket_id)
-    return JSONResponse({"status": "deleted", "id": bucket_id})
-
-
-@mcp.custom_route("/api/bucket/{bucket_id}/archive", methods=["POST"])
-async def api_bucket_archive(request):
-    """Archive a dashboard bucket without deleting content or embeddings."""
-    from starlette.responses import JSONResponse
-
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-
-    bucket_id = request.path_params["bucket_id"]
-    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
-        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
-
-    bucket = await bucket_mgr.get(bucket_id)
-    if not bucket:
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-    meta = bucket.get("metadata", {})
-    bucket_type = meta.get("type", "dynamic")
-    if bucket_type == "archived":
-        return JSONResponse({"error": "bucket already archived"}, status_code=400)
-
-    ok = await bucket_mgr.archive(bucket_id)
-    if not ok:
-        return JSONResponse({"error": "archive failed"}, status_code=500)
-
-    return JSONResponse({"status": "archived", "id": bucket_id})
+    return JSONResponse(darkroom_store.status())
 
 
 @mcp.custom_route("/api/search", methods=["GET"])
@@ -2934,6 +8122,7 @@ async def api_breath_debug(request):
             "importance": bucket_mgr.w_importance,
         }
         w_sum = sum(w.values())
+        lexical_terms = _breath_lexical_match_terms(query)
 
         for bucket in all_buckets:
             meta = bucket.get("metadata", {})
@@ -2954,6 +8143,12 @@ async def api_breath_debug(request):
                 resolved = meta.get("resolved", False)
                 if resolved:
                     normalized *= 0.3
+                lexical_match = (
+                    meta.get("type") != "feel"
+                    and _bucket_matches_breath_lexical_terms(bucket, lexical_terms)
+                )
+                if lexical_match:
+                    normalized = max(normalized, bucket_mgr.fuzzy_threshold + 5)
 
                 results.append({
                     "id": bid,
@@ -2963,12 +8158,19 @@ async def api_breath_debug(request):
                     "resolved": resolved,
                     "pinned": meta.get("pinned", False),
                     "anchor": meta.get("anchor", False),
+                    "layer_debug": _inspect_bucket_layer_payload(bucket),
+                    "runtime_gate": _inspect_bucket_runtime_gate_payload(
+                        bucket,
+                        query=query,
+                    ),
                     "scores": {
                         "topic": round(topic, 4),
                         "emotion": round(emotion, 4),
                         "time": round(time_s, 4),
                         "importance": round(imp, 4),
+                        "lexical": 1.0 if lexical_match else 0.0,
                     },
+                    "lexical_terms": lexical_terms if lexical_match else [],
                     "weights": w,
                     "raw_total": round(raw_total, 4),
                     "normalized": round(normalized, 2),
@@ -2984,6 +8186,7 @@ async def api_breath_debug(request):
             "valence": q_valence,
             "arousal": q_arousal,
             "weights": w,
+            "lexical_terms": lexical_terms,
             "threshold": bucket_mgr.fuzzy_threshold,
             "total_candidates": len(results),
             "passed_count": len(passed),
@@ -2991,6 +8194,85 @@ async def api_breath_debug(request):
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/diffusion-debug", methods=["GET"])
+async def api_diffusion_debug(request):
+    """Debug endpoint: inspect bucket-level diffusion paths for a query."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    query = request.query_params.get("q", "")
+    max_seeds = _int_between(request.query_params.get("max_seeds"), 3, 1, 20)
+    max_hits = _int_between(request.query_params.get("max_hits"), 5, 0, 20)
+    edge_min_confidence = _float_between(
+        request.query_params.get("edge_min_confidence"),
+        0.55,
+        0.0,
+        1.0,
+    )
+    payload = await inspect_diffusion(
+        query=query,
+        max_seeds=max_seeds,
+        max_hits=max_hits,
+        edge_min_confidence=edge_min_confidence,
+    )
+    if payload.get("status") == "error":
+        return JSONResponse(payload, status_code=400)
+    return JSONResponse(payload)
+
+
+@mcp.custom_route("/api/recall-debug", methods=["GET"])
+async def api_recall_debug(request):
+    """Debug endpoint: inspect query-to-moment recall candidates."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    q_valence = request.query_params.get("valence")
+    q_arousal = request.query_params.get("arousal")
+    q_valence = float(q_valence) if q_valence else None
+    q_arousal = float(q_arousal) if q_arousal else None
+    payload = await _build_recall_debug_payload(
+        request.query_params.get("q", ""),
+        max_candidates=_int_between(request.query_params.get("max_candidates"), 20, 1, 100),
+        max_results=_int_between(request.query_params.get("max_results"), 3, 1, 20),
+        max_tokens=_int_between(request.query_params.get("max_tokens"), 800, 1, 20000),
+        direct_render_mode=request.query_params.get("direct_render_mode", "auto"),
+        domain=request.query_params.get("domain", ""),
+        valence=q_valence,
+        arousal=q_arousal,
+    )
+    if payload.get("status") == "error":
+        return JSONResponse(payload, status_code=400)
+    return JSONResponse(payload)
+
+
+@mcp.custom_route("/api/gateway-injections", methods=["GET"])
+async def api_gateway_injections(request):
+    """Dashboard-authenticated proxy for recent Gateway injection debug records."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    session_id = str(request.query_params.get("session_id", "") or "").strip()
+    limit = _int_between(request.query_params.get("limit"), 10, 1, 100)
+    include_context = str(request.query_params.get("include_context", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    payload = await _fetch_gateway_injection_debug(
+        session_id=session_id,
+        limit=limit,
+        include_context=include_context,
+    )
+    status_code = 200 if payload.get("status") == "ok" else 502
+    return JSONResponse(payload, status_code=status_code)
 
 
 @mcp.custom_route("/api/reflection/run", methods=["POST"])
@@ -3063,6 +8345,23 @@ async def api_persona_get(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/dreams", methods=["GET"])
+async def api_dreams(request):
+    """Return dream dashboard metadata only. Dream bodies are never exposed here."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        limit = int(request.query_params.get("limit", "30"))
+    except Exception:
+        limit = 30
+    try:
+        return JSONResponse(dream_engine.dashboard_payload(limit=max(1, min(100, limit))))
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @mcp.custom_route("/api/config", methods=["GET"])
 async def api_config_get(request):
     """Get current runtime config (safe fields only, API key masked)."""
@@ -3077,6 +8376,12 @@ async def api_config_get(request):
     dehy = config.get("dehydration", {})
     emb = config.get("embedding", {})
     gateway_cfg = config.get("gateway", {}) if isinstance(config.get("gateway", {}), dict) else {}
+    recall_cfg = config.get("recall", {}) if isinstance(config.get("recall", {}), dict) else {}
+    diffusion_options = diffusion_options_from_config(config)
+    persona_cfg = config.get("persona", {}) if isinstance(config.get("persona", {}), dict) else {}
+    dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
+    reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+    portrait_cfg = config.get("portrait", {}) if isinstance(config.get("portrait", {}), dict) else {}
     return JSONResponse({
         "dehydration": {
             "model": dehy.get("model", ""),
@@ -3096,6 +8401,149 @@ async def api_config_get(request):
         "gateway": {
             "cooldown_hours": gateway_cfg.get("cooldown_hours", 6),
             "skip_recent_rounds": gateway_cfg.get("skip_recent_rounds", 5),
+            "recent_context_cooldown_hours": gateway_cfg.get("recent_context_cooldown_hours", 6),
+            "recent_context_reentry_idle_hours": gateway_cfg.get("recent_context_reentry_idle_hours", 24),
+            "recent_context_budget": gateway_cfg.get("recent_context_budget", 300),
+            "date_persona_trace_enabled": _bool_value(gateway_cfg.get("date_persona_trace_enabled"), True),
+            "date_persona_trace_budget": gateway_cfg.get("date_persona_trace_budget", 220),
+            "date_persona_trace_max_events": gateway_cfg.get("date_persona_trace_max_events", 5),
+            "date_persona_trace_include_daily": _bool_value(gateway_cfg.get("date_persona_trace_include_daily"), True),
+            "recalled_memory_budget": gateway_cfg.get("recalled_memory_budget", 400),
+            "related_memory_budget": gateway_cfg.get("related_memory_budget", 220),
+            "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 15),
+            "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
+            "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "graph")),
+            "portrait_memory_enabled": _bool_value(gateway_cfg.get("portrait_memory_enabled"), False),
+            "portrait_memory_budget": gateway_cfg.get("portrait_memory_budget", 360),
+            "portrait_memory_max_sources": gateway_cfg.get("portrait_memory_max_sources", 8),
+            "portrait_memory_include_anchors": _bool_value(
+                gateway_cfg.get("portrait_memory_include_anchors"),
+                True,
+            ),
+            "query_planner_enabled": _bool_value(gateway_cfg.get("query_planner_enabled"), True),
+            "query_planner_model": gateway_cfg.get("query_planner_model", ""),
+            "query_planner_min_chars": gateway_cfg.get("query_planner_min_chars", 16),
+            "query_planner_max_queries": gateway_cfg.get("query_planner_max_queries", 3),
+            "query_planner_max_tokens": gateway_cfg.get("query_planner_max_tokens", 360),
+            "memory_detail_recall_enabled": _bool_value(gateway_cfg.get("memory_detail_recall_enabled"), False),
+            "memory_detail_recall_max_ids": gateway_cfg.get("memory_detail_recall_max_ids", 3),
+            "memory_detail_recall_budget": gateway_cfg.get("memory_detail_recall_budget", 1200),
+        },
+        "recall": {
+            "query_resurface_enabled": _bool_value(recall_cfg.get("query_resurface_enabled"), False),
+        },
+        "memory_diffusion": {
+            "enabled": diffusion_options.enabled,
+            "max_hops": diffusion_options.max_hops,
+            "top_k": diffusion_options.top_k,
+            "min_activation": diffusion_options.min_activation,
+            "max_paths_per_hit": diffusion_options.max_paths_per_hit,
+            "chain_walk_enabled": diffusion_options.chain_walk_enabled,
+            "chain_max_hops": diffusion_options.chain_max_hops,
+            "chain_min_strength": diffusion_options.chain_min_strength,
+            "chain_min_confidence": diffusion_options.chain_min_confidence,
+            "chain_min_relation_priority": diffusion_options.chain_min_relation_priority,
+            "chain_max_frontier": diffusion_options.chain_max_frontier,
+        },
+        "persona": {
+            "enabled": bool(getattr(persona_engine, "enabled", persona_cfg.get("enabled", True))),
+            "model": getattr(persona_engine, "model", persona_cfg.get("model", "")),
+            "base_url": getattr(persona_engine, "base_url", persona_cfg.get("base_url", "")),
+            "event_recording_enabled": _bool_value(
+                getattr(
+                    persona_engine,
+                    "event_recording_enabled",
+                    persona_cfg.get("event_recording_enabled"),
+                ),
+                True,
+            ),
+            "api_key_masked": _mask_key(getattr(persona_engine, "api_key", "") or persona_cfg.get("api_key", "")),
+            "api_ready": bool(getattr(persona_engine, "api_key", "") or persona_cfg.get("api_key", "")),
+        },
+        "dream": {
+            "enabled": dream_engine.enabled,
+            "auto_enabled": dream_engine.auto_enabled,
+            "surface_enabled": dream_engine.surface_enabled,
+            "inject_enabled": _bool_value(dream_cfg.get("inject_enabled"), False),
+            "retain_after_inject": _bool_value(dream_cfg.get("retain_after_inject"), False),
+            "model": dream_engine.model,
+            "base_url": dream_engine.base_url,
+            "api_key_masked": _mask_key(dream_engine.api_key),
+            "api_ready": bool(dream_engine.api_key),
+            "temperature": dream_cfg.get("temperature", 0.85),
+            "max_tokens": dream_cfg.get("max_tokens", 900),
+            "daily_hour": dream_cfg.get("daily_hour", 3),
+            "run_window_hours": dream_cfg.get("run_window_hours", 3),
+            "daily_probability": dream_cfg.get("daily_probability", 0.4),
+            "min_material_count": dream_cfg.get("min_material_count", 5),
+            "material_window_hours": dream_cfg.get("material_window_hours", 48),
+            "identity_anchor_id": dream_cfg.get("identity_anchor_id", ""),
+        },
+        "reflection": {
+            "enabled": bool(
+                reflection_cfg.get(
+                    "enabled",
+                    getattr(reflection_engine, "enabled", True),
+                )
+            ),
+            "auto_enabled": bool(
+                reflection_cfg.get(
+                    "auto_enabled",
+                    getattr(reflection_engine, "auto_enabled", True),
+                )
+            ),
+            "daily_enabled": bool(
+                reflection_cfg.get(
+                    "daily_enabled",
+                    getattr(reflection_engine, "daily_enabled", True),
+                )
+            ),
+            "memory_affect_anchor_enabled": bool(
+                reflection_cfg.get(
+                    "memory_affect_anchor_enabled",
+                    getattr(reflection_engine, "memory_affect_anchor_enabled", True),
+                )
+            ),
+            "relationship_weather_affect_anchor_enabled": bool(
+                reflection_cfg.get(
+                    "relationship_weather_affect_anchor_enabled",
+                    getattr(reflection_engine, "relationship_weather_affect_anchor_enabled", True),
+                )
+            ),
+            "model": getattr(reflection_engine, "model", reflection_cfg.get("model", "")),
+            "base_url": getattr(reflection_engine, "base_url", reflection_cfg.get("base_url", "")),
+            "api_key_masked": _mask_key(getattr(reflection_engine, "api_key", "") or reflection_cfg.get("api_key", "")),
+            "api_ready": bool(getattr(reflection_engine, "api_key", "") or reflection_cfg.get("api_key", "")),
+        },
+        "portrait": {
+            "enabled": bool(portrait_cfg.get("enabled", getattr(portrait_engine, "enabled", True))),
+            "auto_enabled": bool(portrait_cfg.get("auto_enabled", getattr(portrait_engine, "auto_enabled", True))),
+            "auto_initial_enabled": bool(
+                portrait_cfg.get(
+                    "auto_initial_enabled",
+                    getattr(portrait_engine, "auto_initial_enabled", False),
+                )
+            ),
+            "daily_enabled": bool(portrait_cfg.get("daily_enabled", getattr(portrait_engine, "daily_enabled", True))),
+            "model": getattr(portrait_engine, "model", portrait_cfg.get("model", "")),
+            "base_url": getattr(portrait_engine, "base_url", portrait_cfg.get("base_url", "")),
+            "api_key_masked": _mask_key(getattr(portrait_engine, "api_key", "") or portrait_cfg.get("api_key", "")),
+            "api_ready": bool(getattr(portrait_engine, "api_key", "") or portrait_cfg.get("api_key", "")),
+            "state_path": getattr(portrait_engine, "state_path", ""),
+            "daily_hour": portrait_cfg.get("daily_hour", getattr(portrait_engine, "daily_hour", 4)),
+            "check_interval_minutes": portrait_cfg.get(
+                "check_interval_minutes",
+                getattr(portrait_engine, "check_interval_minutes", 60),
+            ),
+            "material_limit": portrait_cfg.get("material_limit", getattr(portrait_engine, "material_limit", 18)),
+            "first_run_material_limit": portrait_cfg.get(
+                "first_run_material_limit",
+                getattr(portrait_engine, "first_run_material_limit", 160),
+            ),
+            "persona_events_limit": portrait_cfg.get(
+                "persona_events_limit",
+                getattr(portrait_engine, "persona_events_limit", 24),
+            ),
         },
         "merge_threshold": config.get("merge_threshold", 75),
         "transport": config.get("transport", "stdio"),
@@ -3108,6 +8556,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
+    global dream_engine, persona_engine, portrait_engine, reflection_engine
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -3117,6 +8566,40 @@ async def api_config_update(request):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
     updated = []
+    env_updates: dict[str, str] = {}
+
+    def _memory_diffusion_dashboard_config(payload) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        sanitized = {}
+        if "enabled" in payload:
+            sanitized["enabled"] = _bool_value(payload.get("enabled"), True)
+        if "max_hops" in payload:
+            sanitized["max_hops"] = _int_between(payload.get("max_hops"), 2, 1, 8)
+        if "top_k" in payload:
+            sanitized["top_k"] = _int_between(payload.get("top_k"), 4, 0, 20)
+        if "min_activation" in payload:
+            sanitized["min_activation"] = _float_between(payload.get("min_activation"), 0.18, 0.0, 10.0)
+        if "max_paths_per_hit" in payload:
+            sanitized["max_paths_per_hit"] = _int_between(payload.get("max_paths_per_hit"), 3, 1, 10)
+        if "chain_walk_enabled" in payload:
+            sanitized["chain_walk_enabled"] = _bool_value(payload.get("chain_walk_enabled"), False)
+        if "chain_max_hops" in payload:
+            sanitized["chain_max_hops"] = _int_between(payload.get("chain_max_hops"), 6, 1, 12)
+        if "chain_min_strength" in payload:
+            sanitized["chain_min_strength"] = _float_between(payload.get("chain_min_strength"), 0.2, 0.0, 10.0)
+        if "chain_min_confidence" in payload:
+            sanitized["chain_min_confidence"] = _float_between(payload.get("chain_min_confidence"), 0.72, 0.0, 1.0)
+        if "chain_min_relation_priority" in payload:
+            sanitized["chain_min_relation_priority"] = _int_between(
+                payload.get("chain_min_relation_priority"),
+                60,
+                0,
+                100,
+            )
+        if "chain_max_frontier" in payload:
+            sanitized["chain_max_frontier"] = _int_between(payload.get("chain_max_frontier"), 24, 1, 200)
+        return sanitized
 
     # --- Dehydration config ---
     if "dehydration" in body:
@@ -3128,6 +8611,7 @@ async def api_config_update(request):
                 updated.append(f"dehydration.{key}")
         if "api_key" in d and d["api_key"]:
             dehy["api_key"] = d["api_key"]
+            env_updates["OMBRE_API_KEY"] = str(d["api_key"])
             updated.append("dehydration.api_key")
         # Hot-reload dehydrator
         dehydrator.model = dehy.get("model", "deepseek-chat")
@@ -3155,6 +8639,7 @@ async def api_config_update(request):
             updated.append("embedding.base_url")
         if "api_key" in e and e["api_key"]:
             emb["api_key"] = e["api_key"]
+            env_updates["OMBRE_EMBEDDING_API_KEY"] = str(e["api_key"])
             updated.append("embedding.api_key")
 
         # Hot-reload embedding client; falls back to dehydration key/base_url when unset.
@@ -3182,7 +8667,7 @@ async def api_config_update(request):
         updated.append("merge_threshold")
 
     # --- Gateway memory surfacing config ---
-    gateway_hot_update_body = None
+    gateway_hot_update_payload = {}
     if "gateway" in body:
         g = body["gateway"]
         gateway_cfg = config.setdefault("gateway", {})
@@ -3195,19 +8680,310 @@ async def api_config_update(request):
             gateway_cfg["skip_recent_rounds"] = max(0, int(g["skip_recent_rounds"]))
             gateway_hot_update_body["skip_recent_rounds"] = gateway_cfg["skip_recent_rounds"]
             updated.append("gateway.skip_recent_rounds")
-        hot_update_status = await _hot_update_gateway_config(gateway_hot_update_body)
-        if hot_update_status:
-            updated.append(hot_update_status)
+        if "recent_context_cooldown_hours" in g:
+            gateway_cfg["recent_context_cooldown_hours"] = max(0.0, float(g["recent_context_cooldown_hours"]))
+            gateway_hot_update_body["recent_context_cooldown_hours"] = gateway_cfg["recent_context_cooldown_hours"]
+            updated.append("gateway.recent_context_cooldown_hours")
+        if "recent_context_reentry_idle_hours" in g:
+            gateway_cfg["recent_context_reentry_idle_hours"] = max(
+                0.0,
+                float(g["recent_context_reentry_idle_hours"]),
+            )
+            gateway_hot_update_body["recent_context_reentry_idle_hours"] = gateway_cfg[
+                "recent_context_reentry_idle_hours"
+            ]
+            updated.append("gateway.recent_context_reentry_idle_hours")
+        if "recent_context_budget" in g:
+            gateway_cfg["recent_context_budget"] = max(0, int(g["recent_context_budget"]))
+            gateway_hot_update_body["recent_context_budget"] = gateway_cfg["recent_context_budget"]
+            updated.append("gateway.recent_context_budget")
+        if "date_persona_trace_enabled" in g:
+            gateway_cfg["date_persona_trace_enabled"] = _bool_value(g["date_persona_trace_enabled"], True)
+            gateway_hot_update_body["date_persona_trace_enabled"] = gateway_cfg["date_persona_trace_enabled"]
+            updated.append("gateway.date_persona_trace_enabled")
+        if "date_persona_trace_budget" in g:
+            gateway_cfg["date_persona_trace_budget"] = max(0, int(g["date_persona_trace_budget"]))
+            gateway_hot_update_body["date_persona_trace_budget"] = gateway_cfg["date_persona_trace_budget"]
+            updated.append("gateway.date_persona_trace_budget")
+        if "date_persona_trace_max_events" in g:
+            gateway_cfg["date_persona_trace_max_events"] = max(0, min(8, int(g["date_persona_trace_max_events"])))
+            gateway_hot_update_body["date_persona_trace_max_events"] = gateway_cfg["date_persona_trace_max_events"]
+            updated.append("gateway.date_persona_trace_max_events")
+        if "date_persona_trace_include_daily" in g:
+            gateway_cfg["date_persona_trace_include_daily"] = _bool_value(
+                g["date_persona_trace_include_daily"],
+                True,
+            )
+            gateway_hot_update_body["date_persona_trace_include_daily"] = gateway_cfg[
+                "date_persona_trace_include_daily"
+            ]
+            updated.append("gateway.date_persona_trace_include_daily")
+        if "recalled_memory_budget" in g:
+            gateway_cfg["recalled_memory_budget"] = max(0, int(g["recalled_memory_budget"]))
+            gateway_hot_update_body["recalled_memory_budget"] = gateway_cfg["recalled_memory_budget"]
+            updated.append("gateway.recalled_memory_budget")
+        if "related_memory_budget" in g:
+            gateway_cfg["related_memory_budget"] = max(0, int(g["related_memory_budget"]))
+            gateway_hot_update_body["related_memory_budget"] = gateway_cfg["related_memory_budget"]
+            updated.append("gateway.related_memory_budget")
+        if "current_inner_state_interval_rounds" in g:
+            gateway_cfg["current_inner_state_interval_rounds"] = max(
+                0,
+                int(g["current_inner_state_interval_rounds"]),
+            )
+            gateway_hot_update_body["current_inner_state_interval_rounds"] = gateway_cfg[
+                "current_inner_state_interval_rounds"
+            ]
+            updated.append("gateway.current_inner_state_interval_rounds")
+        if "direct_render_mode" in g:
+            gateway_cfg["direct_render_mode"] = _normalize_direct_render_mode(g["direct_render_mode"])
+            gateway_hot_update_body["direct_render_mode"] = gateway_cfg["direct_render_mode"]
+            updated.append("gateway.direct_render_mode")
+        if "retrieval_mode" in g:
+            gateway_cfg["retrieval_mode"] = _normalize_retrieval_mode(g["retrieval_mode"])
+            gateway_hot_update_body["retrieval_mode"] = gateway_cfg["retrieval_mode"]
+            updated.append("gateway.retrieval_mode")
+        if "portrait_memory_enabled" in g:
+            gateway_cfg["portrait_memory_enabled"] = _bool_value(g["portrait_memory_enabled"], False)
+            gateway_hot_update_body["portrait_memory_enabled"] = gateway_cfg["portrait_memory_enabled"]
+            updated.append("gateway.portrait_memory_enabled")
+        if "portrait_memory_budget" in g:
+            gateway_cfg["portrait_memory_budget"] = _int_between(g["portrait_memory_budget"], 360, 120, 2000)
+            gateway_hot_update_body["portrait_memory_budget"] = gateway_cfg["portrait_memory_budget"]
+            updated.append("gateway.portrait_memory_budget")
+        if "portrait_memory_max_sources" in g:
+            gateway_cfg["portrait_memory_max_sources"] = _int_between(g["portrait_memory_max_sources"], 8, 1, 20)
+            gateway_hot_update_body["portrait_memory_max_sources"] = gateway_cfg["portrait_memory_max_sources"]
+            updated.append("gateway.portrait_memory_max_sources")
+        if "portrait_memory_include_anchors" in g:
+            gateway_cfg["portrait_memory_include_anchors"] = _bool_value(
+                g["portrait_memory_include_anchors"],
+                True,
+            )
+            gateway_hot_update_body["portrait_memory_include_anchors"] = gateway_cfg[
+                "portrait_memory_include_anchors"
+            ]
+            updated.append("gateway.portrait_memory_include_anchors")
+        if "query_planner_enabled" in g:
+            gateway_cfg["query_planner_enabled"] = _bool_value(g["query_planner_enabled"], True)
+            gateway_hot_update_body["query_planner_enabled"] = gateway_cfg["query_planner_enabled"]
+            updated.append("gateway.query_planner_enabled")
+        if "query_planner_model" in g:
+            gateway_cfg["query_planner_model"] = str(g["query_planner_model"] or "").strip()
+            gateway_hot_update_body["query_planner_model"] = gateway_cfg["query_planner_model"]
+            updated.append("gateway.query_planner_model")
+        if "query_planner_min_chars" in g:
+            gateway_cfg["query_planner_min_chars"] = _int_between(g["query_planner_min_chars"], 16, 0, 1000)
+            gateway_hot_update_body["query_planner_min_chars"] = gateway_cfg["query_planner_min_chars"]
+            updated.append("gateway.query_planner_min_chars")
+        if "query_planner_max_queries" in g:
+            gateway_cfg["query_planner_max_queries"] = _int_between(g["query_planner_max_queries"], 3, 1, 3)
+            gateway_hot_update_body["query_planner_max_queries"] = gateway_cfg["query_planner_max_queries"]
+            updated.append("gateway.query_planner_max_queries")
+        if "query_planner_max_tokens" in g:
+            gateway_cfg["query_planner_max_tokens"] = _int_between(g["query_planner_max_tokens"], 360, 128, 2000)
+            gateway_hot_update_body["query_planner_max_tokens"] = gateway_cfg["query_planner_max_tokens"]
+            updated.append("gateway.query_planner_max_tokens")
+        if "memory_detail_recall_enabled" in g:
+            gateway_cfg["memory_detail_recall_enabled"] = _bool_value(g["memory_detail_recall_enabled"], False)
+            gateway_hot_update_body["memory_detail_recall_enabled"] = gateway_cfg["memory_detail_recall_enabled"]
+            updated.append("gateway.memory_detail_recall_enabled")
+        if "memory_detail_recall_max_ids" in g:
+            gateway_cfg["memory_detail_recall_max_ids"] = _int_between(g["memory_detail_recall_max_ids"], 3, 1, 3)
+            gateway_hot_update_body["memory_detail_recall_max_ids"] = gateway_cfg["memory_detail_recall_max_ids"]
+            updated.append("gateway.memory_detail_recall_max_ids")
+        if "memory_detail_recall_budget" in g:
+            gateway_cfg["memory_detail_recall_budget"] = _int_between(g["memory_detail_recall_budget"], 1200, 200, 4000)
+            gateway_hot_update_body["memory_detail_recall_budget"] = gateway_cfg["memory_detail_recall_budget"]
+            updated.append("gateway.memory_detail_recall_budget")
+        if gateway_hot_update_body:
+            gateway_hot_update_payload["gateway"] = gateway_hot_update_body
+
+    # --- Recall behavior config ---
+    if "recall" in body:
+        r = body["recall"]
+        recall_cfg = config.setdefault("recall", {})
+        if "query_resurface_enabled" in r:
+            recall_cfg["query_resurface_enabled"] = _bool_value(r["query_resurface_enabled"], False)
+            updated.append("recall.query_resurface_enabled")
+
+    # --- Memory diffusion config ---
+    if "memory_diffusion" in body:
+        diffusion_payload = _memory_diffusion_dashboard_config(body["memory_diffusion"])
+        diffusion_cfg = config.setdefault("memory_diffusion", {})
+        for key, value in diffusion_payload.items():
+            diffusion_cfg[key] = value
+            updated.append(f"memory_diffusion.{key}")
+        if diffusion_payload:
+            gateway_hot_update_payload["memory_diffusion"] = diffusion_payload
+
+    # --- Persona state config ---
+    if "persona" in body:
+        p = body["persona"]
+        persona_cfg = config.setdefault("persona", {})
+        persona_gateway_payload = {}
+        if "enabled" in p:
+            persona_cfg["enabled"] = bool(p["enabled"])
+            persona_gateway_payload["enabled"] = persona_cfg["enabled"]
+            updated.append("persona.enabled")
+        if "event_recording_enabled" in p:
+            persona_cfg["event_recording_enabled"] = bool(p["event_recording_enabled"])
+            persona_gateway_payload["event_recording_enabled"] = persona_cfg["event_recording_enabled"]
+            updated.append("persona.event_recording_enabled")
+        for key in ("model", "base_url"):
+            if key in p:
+                persona_cfg[key] = str(p[key] or "").strip()
+                persona_gateway_payload[key] = persona_cfg[key]
+                updated.append(f"persona.{key}")
+        if "api_key" in p and p["api_key"]:
+            persona_cfg["api_key"] = str(p["api_key"])
+            os.environ["OMBRE_PERSONA_API_KEY"] = persona_cfg["api_key"]
+            env_updates["OMBRE_PERSONA_API_KEY"] = persona_cfg["api_key"]
+            persona_gateway_payload["api_key"] = persona_cfg["api_key"]
+            updated.append("persona.api_key")
+        if "base_url" in persona_gateway_payload and persona_gateway_payload["base_url"]:
+            os.environ["OMBRE_PERSONA_BASE_URL"] = persona_gateway_payload["base_url"]
+        if "model" in persona_gateway_payload and persona_gateway_payload["model"]:
+            os.environ["OMBRE_PERSONA_MODEL"] = persona_gateway_payload["model"]
+        if persona_gateway_payload:
+            persona_engine = PersonaStateEngine(config)
+            gateway_hot_update_payload["persona"] = persona_gateway_payload
+
+    # --- Reflection config ---
+    if "reflection" in body:
+        r = body["reflection"]
+        reflection_cfg = config.setdefault("reflection", {})
+        for key in (
+            "enabled",
+            "auto_enabled",
+            "daily_enabled",
+            "memory_affect_anchor_enabled",
+            "relationship_weather_affect_anchor_enabled",
+        ):
+            if key in r:
+                reflection_cfg[key] = bool(r[key])
+                setattr(reflection_engine, key, reflection_cfg[key])
+                updated.append(f"reflection.{key}")
+        for key in ("model", "base_url"):
+            if key in r:
+                reflection_cfg[key] = str(r[key] or "").strip()
+                updated.append(f"reflection.{key}")
+        if "api_key" in r and r["api_key"]:
+            reflection_cfg["api_key"] = str(r["api_key"])
+            os.environ["OMBRE_REFLECTION_API_KEY"] = reflection_cfg["api_key"]
+            env_updates["OMBRE_REFLECTION_API_KEY"] = reflection_cfg["api_key"]
+            updated.append("reflection.api_key")
+        if "base_url" in r and reflection_cfg.get("base_url"):
+            os.environ["OMBRE_REFLECTION_BASE_URL"] = reflection_cfg["base_url"]
+        if "model" in r and reflection_cfg.get("model"):
+            os.environ["OMBRE_REFLECTION_MODEL"] = reflection_cfg["model"]
+        reflection_engine = ReflectionEngine(config)
+
+    # --- Portrait maintainer config ---
+    if "portrait" in body:
+        p = body["portrait"]
+        portrait_cfg = config.setdefault("portrait", {})
+        for key in (
+            "enabled",
+            "auto_enabled",
+            "auto_initial_enabled",
+            "daily_enabled",
+        ):
+            if key in p:
+                portrait_cfg[key] = bool(p[key])
+                updated.append(f"portrait.{key}")
+        for key in (
+            "model",
+            "base_url",
+            "state_path",
+            "thinking_mode",
+        ):
+            if key in p:
+                portrait_cfg[key] = str(p[key] or "").strip()
+                updated.append(f"portrait.{key}")
+        for key in (
+            "temperature",
+            "max_tokens",
+            "daily_hour",
+            "check_interval_minutes",
+            "material_limit",
+            "first_run_material_limit",
+            "persona_events_limit",
+            "recent_buffer_max",
+            "staging_pool_max",
+            "candidate_max",
+        ):
+            if key in p:
+                portrait_cfg[key] = p[key]
+                updated.append(f"portrait.{key}")
+        if "api_key" in p and p["api_key"]:
+            portrait_cfg["api_key"] = str(p["api_key"])
+            os.environ["OMBRE_PORTRAIT_API_KEY"] = portrait_cfg["api_key"]
+            env_updates["OMBRE_PORTRAIT_API_KEY"] = portrait_cfg["api_key"]
+            updated.append("portrait.api_key")
+        if "base_url" in p and portrait_cfg.get("base_url"):
+            os.environ["OMBRE_PORTRAIT_BASE_URL"] = portrait_cfg["base_url"]
+        if "model" in p and portrait_cfg.get("model"):
+            os.environ["OMBRE_PORTRAIT_MODEL"] = portrait_cfg["model"]
+        portrait_engine = DailyPortraitMaintainer(config)
+
+    # --- Dream config ---
+    if "dream" in body:
+        d = body["dream"]
+        dream_cfg = config.setdefault("dream", {})
+        for key in (
+            "enabled",
+            "auto_enabled",
+            "surface_enabled",
+            "inject_enabled",
+            "retain_after_inject",
+            "model",
+            "base_url",
+            "temperature",
+            "max_tokens",
+            "daily_hour",
+            "run_window_hours",
+            "daily_probability",
+            "min_material_count",
+            "material_window_hours",
+            "identity_anchor_id",
+        ):
+            if key in d:
+                dream_cfg[key] = d[key]
+                updated.append(f"dream.{key}")
+        dream_gateway_payload = {}
+        for key in ("enabled", "surface_enabled", "inject_enabled", "retain_after_inject"):
+            if key in d:
+                dream_gateway_payload[key] = dream_cfg[key]
+        if dream_gateway_payload:
+            gateway_hot_update_payload["dream"] = dream_gateway_payload
+        if "api_key" in d and d["api_key"]:
+            dream_cfg["api_key"] = str(d["api_key"])
+            os.environ["OMBRE_DREAM_API_KEY"] = dream_cfg["api_key"]
+            env_updates["OMBRE_DREAM_API_KEY"] = dream_cfg["api_key"]
+            updated.append("dream.api_key")
+        if "base_url" in d and dream_cfg.get("base_url"):
+            os.environ["OMBRE_DREAM_BASE_URL"] = str(dream_cfg["base_url"])
+        if "model" in d and dream_cfg.get("model"):
+            os.environ["OMBRE_DREAM_MODEL"] = str(dream_cfg["model"])
+        dream_engine = DreamEngine(config)
+
+    hot_update_status = await _hot_update_gateway_config(gateway_hot_update_payload)
+    if hot_update_status:
+        updated.append(hot_update_status)
 
     # --- Persist to config.yaml if requested ---
     if body.get("persist", False):
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
-        try:
-            save_config = {}
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    save_config = yaml.safe_load(f) or {}
+        config_path = os.environ.get(
+            "OMBRE_CONFIG_PATH",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml"),
+        )
+        runtime_config_path = config.get("_runtime_config_path") or os.environ.get("OMBRE_RUNTIME_CONFIG_PATH", "")
+        if not runtime_config_path:
+            runtime_config_path = os.path.join(config.get("state_dir") or os.path.dirname(config_path), "config.runtime.yaml")
 
+        def _apply_dashboard_config(save_config: dict) -> dict:
+            save_config = save_config or {}
             if "dehydration" in body:
                 sc_dehy = save_config.setdefault("dehydration", {})
                 for key in ("model", "base_url", "max_tokens", "temperature"):
@@ -3231,12 +9007,271 @@ async def api_config_update(request):
                     sc_gateway["cooldown_hours"] = max(0.0, float(body["gateway"]["cooldown_hours"]))
                 if "skip_recent_rounds" in body["gateway"]:
                     sc_gateway["skip_recent_rounds"] = max(0, int(body["gateway"]["skip_recent_rounds"]))
+                if "recent_context_cooldown_hours" in body["gateway"]:
+                    sc_gateway["recent_context_cooldown_hours"] = max(
+                        0.0,
+                        float(body["gateway"]["recent_context_cooldown_hours"]),
+                    )
+                if "recent_context_reentry_idle_hours" in body["gateway"]:
+                    sc_gateway["recent_context_reentry_idle_hours"] = max(
+                        0.0,
+                        float(body["gateway"]["recent_context_reentry_idle_hours"]),
+                    )
+                if "recent_context_budget" in body["gateway"]:
+                    sc_gateway["recent_context_budget"] = max(0, int(body["gateway"]["recent_context_budget"]))
+                if "date_persona_trace_enabled" in body["gateway"]:
+                    sc_gateway["date_persona_trace_enabled"] = _bool_value(
+                        body["gateway"]["date_persona_trace_enabled"],
+                        True,
+                    )
+                if "date_persona_trace_budget" in body["gateway"]:
+                    sc_gateway["date_persona_trace_budget"] = max(
+                        0,
+                        int(body["gateway"]["date_persona_trace_budget"]),
+                    )
+                if "date_persona_trace_max_events" in body["gateway"]:
+                    sc_gateway["date_persona_trace_max_events"] = max(
+                        0,
+                        min(8, int(body["gateway"]["date_persona_trace_max_events"])),
+                    )
+                if "date_persona_trace_include_daily" in body["gateway"]:
+                    sc_gateway["date_persona_trace_include_daily"] = _bool_value(
+                        body["gateway"]["date_persona_trace_include_daily"],
+                        True,
+                    )
+                if "recalled_memory_budget" in body["gateway"]:
+                    sc_gateway["recalled_memory_budget"] = max(0, int(body["gateway"]["recalled_memory_budget"]))
+                if "related_memory_budget" in body["gateway"]:
+                    sc_gateway["related_memory_budget"] = max(0, int(body["gateway"]["related_memory_budget"]))
+                if "current_inner_state_interval_rounds" in body["gateway"]:
+                    sc_gateway["current_inner_state_interval_rounds"] = max(
+                        0,
+                        int(body["gateway"]["current_inner_state_interval_rounds"]),
+                    )
+                if "direct_render_mode" in body["gateway"]:
+                    sc_gateway["direct_render_mode"] = _normalize_direct_render_mode(body["gateway"]["direct_render_mode"])
+                if "retrieval_mode" in body["gateway"]:
+                    sc_gateway["retrieval_mode"] = _normalize_retrieval_mode(body["gateway"]["retrieval_mode"])
+                if "portrait_memory_enabled" in body["gateway"]:
+                    sc_gateway["portrait_memory_enabled"] = _bool_value(
+                        body["gateway"]["portrait_memory_enabled"],
+                        False,
+                    )
+                if "portrait_memory_budget" in body["gateway"]:
+                    sc_gateway["portrait_memory_budget"] = _int_between(
+                        body["gateway"]["portrait_memory_budget"],
+                        360,
+                        120,
+                        2000,
+                    )
+                if "portrait_memory_max_sources" in body["gateway"]:
+                    sc_gateway["portrait_memory_max_sources"] = _int_between(
+                        body["gateway"]["portrait_memory_max_sources"],
+                        8,
+                        1,
+                        20,
+                    )
+                if "portrait_memory_include_anchors" in body["gateway"]:
+                    sc_gateway["portrait_memory_include_anchors"] = _bool_value(
+                        body["gateway"]["portrait_memory_include_anchors"],
+                        True,
+                    )
+                if "query_planner_enabled" in body["gateway"]:
+                    sc_gateway["query_planner_enabled"] = _bool_value(
+                        body["gateway"]["query_planner_enabled"],
+                        True,
+                    )
+                if "query_planner_model" in body["gateway"]:
+                    sc_gateway["query_planner_model"] = str(body["gateway"]["query_planner_model"] or "").strip()
+                if "query_planner_min_chars" in body["gateway"]:
+                    sc_gateway["query_planner_min_chars"] = _int_between(
+                        body["gateway"]["query_planner_min_chars"],
+                        16,
+                        0,
+                        1000,
+                    )
+                if "query_planner_max_queries" in body["gateway"]:
+                    sc_gateway["query_planner_max_queries"] = _int_between(
+                        body["gateway"]["query_planner_max_queries"],
+                        3,
+                        1,
+                        3,
+                    )
+                if "query_planner_max_tokens" in body["gateway"]:
+                    sc_gateway["query_planner_max_tokens"] = _int_between(
+                        body["gateway"]["query_planner_max_tokens"],
+                        360,
+                        128,
+                        2000,
+                    )
+                if "memory_detail_recall_enabled" in body["gateway"]:
+                    sc_gateway["memory_detail_recall_enabled"] = _bool_value(
+                        body["gateway"]["memory_detail_recall_enabled"],
+                        False,
+                    )
+                if "memory_detail_recall_max_ids" in body["gateway"]:
+                    sc_gateway["memory_detail_recall_max_ids"] = _int_between(
+                        body["gateway"]["memory_detail_recall_max_ids"],
+                        3,
+                        1,
+                        3,
+                    )
+                if "memory_detail_recall_budget" in body["gateway"]:
+                    sc_gateway["memory_detail_recall_budget"] = _int_between(
+                        body["gateway"]["memory_detail_recall_budget"],
+                        1200,
+                        200,
+                        4000,
+                    )
+
+            if "recall" in body:
+                sc_recall = save_config.setdefault("recall", {})
+                if "query_resurface_enabled" in body["recall"]:
+                    sc_recall["query_resurface_enabled"] = _bool_value(
+                        body["recall"]["query_resurface_enabled"],
+                        False,
+                    )
+
+            if "memory_diffusion" in body:
+                sc_diffusion = save_config.setdefault("memory_diffusion", {})
+                for key, value in _memory_diffusion_dashboard_config(body["memory_diffusion"]).items():
+                    sc_diffusion[key] = value
+
+            if "persona" in body:
+                sc_persona = save_config.setdefault("persona", {})
+                if "enabled" in body["persona"]:
+                    sc_persona["enabled"] = bool(body["persona"]["enabled"])
+                if "event_recording_enabled" in body["persona"]:
+                    sc_persona["event_recording_enabled"] = bool(
+                        body["persona"]["event_recording_enabled"]
+                    )
+                for key in ("model", "base_url"):
+                    if key in body["persona"]:
+                        sc_persona[key] = str(body["persona"][key] or "").strip()
+                # Never persist api_key to yaml (use env var)
+
+            if "reflection" in body:
+                sc_reflection = save_config.setdefault("reflection", {})
+                for key in (
+                    "enabled",
+                    "auto_enabled",
+                    "daily_enabled",
+                    "memory_affect_anchor_enabled",
+                    "relationship_weather_affect_anchor_enabled",
+                ):
+                    if key in body["reflection"]:
+                        sc_reflection[key] = bool(body["reflection"][key])
+                for key in ("model", "base_url"):
+                    if key in body["reflection"]:
+                        sc_reflection[key] = str(body["reflection"][key] or "").strip()
+                # Never persist api_key to yaml (use env var)
+
+            if "portrait" in body:
+                sc_portrait = save_config.setdefault("portrait", {})
+                for key in (
+                    "enabled",
+                    "auto_enabled",
+                    "auto_initial_enabled",
+                    "daily_enabled",
+                ):
+                    if key in body["portrait"]:
+                        sc_portrait[key] = bool(body["portrait"][key])
+                for key in (
+                    "model",
+                    "base_url",
+                    "state_path",
+                    "thinking_mode",
+                ):
+                    if key in body["portrait"]:
+                        sc_portrait[key] = str(body["portrait"][key] or "").strip()
+                for key in (
+                    "temperature",
+                    "max_tokens",
+                    "daily_hour",
+                    "check_interval_minutes",
+                    "material_limit",
+                    "first_run_material_limit",
+                    "persona_events_limit",
+                    "recent_buffer_max",
+                    "staging_pool_max",
+                    "candidate_max",
+                ):
+                    if key in body["portrait"]:
+                        sc_portrait[key] = body["portrait"][key]
+                # Never persist api_key to yaml (use env var)
+
+            if "dream" in body:
+                sc_dream = save_config.setdefault("dream", {})
+                for key in (
+                    "enabled",
+                    "auto_enabled",
+                    "surface_enabled",
+                    "inject_enabled",
+                    "retain_after_inject",
+                    "model",
+                    "base_url",
+                    "temperature",
+                    "max_tokens",
+                    "daily_hour",
+                    "run_window_hours",
+                    "daily_probability",
+                    "min_material_count",
+                    "material_window_hours",
+                    "identity_anchor_id",
+                ):
+                    if key in body["dream"]:
+                        sc_dream[key] = body["dream"][key]
+                # Never persist api_key to yaml (use env var)
+            return save_config
+
+        try:
+            save_config = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    save_config = yaml.safe_load(f) or {}
+            save_config = _apply_dashboard_config(save_config)
 
             with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True)
+                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
             updated.append("persisted_to_yaml")
+            if os.path.exists(runtime_config_path):
+                runtime_config = {}
+                with open(runtime_config_path, "r", encoding="utf-8") as f:
+                    runtime_config = yaml.safe_load(f) or {}
+                runtime_config = _apply_dashboard_config(runtime_config)
+                os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
+                with open(runtime_config_path, "w", encoding="utf-8") as f:
+                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                updated.append("runtime_yaml_synced")
         except Exception as e:
-            return JSONResponse({"error": f"persist failed: {e}", "updated": updated}, status_code=500)
+            try:
+                runtime_config = {}
+                if os.path.exists(runtime_config_path):
+                    with open(runtime_config_path, "r", encoding="utf-8") as f:
+                        runtime_config = yaml.safe_load(f) or {}
+                runtime_config = _apply_dashboard_config(runtime_config)
+                os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
+                with open(runtime_config_path, "w", encoding="utf-8") as f:
+                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                updated.append("persisted_to_runtime_yaml")
+                updated.append(f"config_yaml_unwritable:{type(e).__name__}")
+            except Exception as fallback_e:
+                return JSONResponse(
+                    {"error": f"persist failed: {e}; runtime persist failed: {fallback_e}", "updated": updated},
+                    status_code=500,
+                )
+
+    if body.get("persist_env", False):
+        try:
+            env_updated = _write_dashboard_env_values(env_updates)
+            if env_updated:
+                updated.extend(env_updated)
+                updated.append("persisted_to_env")
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"env persist failed: {e}", "updated": updated},
+                status_code=500,
+            )
 
     return JSONResponse({"updated": updated, "ok": True})
 
@@ -3434,10 +9469,9 @@ async def api_import_review(request):
             elif action == "noise":
                 await bucket_mgr.update(bid, resolved=True, importance=1)
             elif action == "delete":
-                deleted = await bucket_mgr.delete(bid)
-                if not deleted:
-                    raise ValueError("bucket not found")
-                embedding_engine.delete_embedding(bid)
+                result = await _delete_bucket_and_indexes(bid)
+                if result.get("status") != "deleted":
+                    raise ValueError(result.get("reason") or "bucket not found")
             applied += 1
         except Exception as e:
             logger.warning(f"Review action failed for {bid}: {e}")
@@ -3486,6 +9520,16 @@ if __name__ == "__main__":
             local_memory_edge_store = MemoryEdgeStore(config)
             while True:
                 try:
+                    reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+                    local_reflection_engine.daily_enabled = bool(
+                        reflection_cfg.get("daily_enabled", True)
+                    )
+                    local_reflection_engine.memory_affect_anchor_enabled = bool(
+                        reflection_cfg.get("memory_affect_anchor_enabled", True)
+                    )
+                    local_reflection_engine.relationship_weather_affect_anchor_enabled = bool(
+                        reflection_cfg.get("relationship_weather_affect_anchor_enabled", True)
+                    )
                     results = await local_reflection_engine.run_due(
                         local_bucket_mgr,
                         local_persona_engine,
@@ -3493,7 +9537,6 @@ if __name__ == "__main__":
                     )
                     if results:
                         logger.info("Reflection run-due results / 反思定时结果: %s", results)
-                    reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
                     if reflection_cfg.get("enrich_backfill_enabled", True):
                         backfill_result = await _backfill_memory_enrichment(
                             limit=reflection_cfg.get("enrich_backfill_limit", 5),
@@ -3519,6 +9562,57 @@ if __name__ == "__main__":
             rt = threading.Thread(target=_start_reflection_scheduler, daemon=True)
             rt.start()
             logger.info("Reflection scheduler enabled / 反思定时器已启用")
+
+        async def _portrait_loop():
+            await asyncio.sleep(25)
+            local_bucket_mgr = BucketManager(config)
+            local_persona_engine = PersonaStateEngine(config)
+            local_portrait_engine = DailyPortraitMaintainer(config)
+            while True:
+                try:
+                    results = await local_portrait_engine.run_due(
+                        local_bucket_mgr,
+                        local_persona_engine,
+                    )
+                    if results:
+                        logger.info("Portrait run-due results / 画像定时结果: %s", results)
+                except Exception as e:
+                    logger.warning("Portrait scheduler failed / 画像定时器失败: %s", e)
+                await asyncio.sleep(local_portrait_engine.check_interval_minutes * 60)
+
+        def _start_portrait_scheduler():
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_portrait_loop())
+
+        if portrait_engine.enabled and portrait_engine.auto_enabled:
+            pt = threading.Thread(target=_start_portrait_scheduler, daemon=True)
+            pt.start()
+            logger.info("Portrait scheduler enabled / 画像定时器已启用")
+
+        async def _dream_loop():
+            await asyncio.sleep(30)
+            local_bucket_mgr = BucketManager(config)
+            while True:
+                local_dream_engine = DreamEngine(config)
+                local_embedding_engine = EmbeddingEngine(config)
+                try:
+                    result = await local_dream_engine.run_due(
+                        local_bucket_mgr,
+                        local_embedding_engine,
+                    )
+                    if result and result.get("status") == "created":
+                        logger.info("Dream run-due result / 夜梦定时结果: %s", result)
+                except Exception as e:
+                    logger.warning("Dream scheduler failed / 夜梦定时器失败: %s", e)
+                await asyncio.sleep(local_dream_engine.check_interval_minutes * 60)
+
+        def _start_dream_scheduler():
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_dream_loop())
+
+        dt = threading.Thread(target=_start_dream_scheduler, daemon=True)
+        dt.start()
+        logger.info("Dream scheduler loop started / 夜梦定时器循环已启动")
 
         # --- Add CORS middleware so remote clients (Cloudflare Tunnel / ngrok) can connect ---
         # --- 添加 CORS 中间件，让远程客户端（Cloudflare Tunnel / ngrok）能正常连接 ---

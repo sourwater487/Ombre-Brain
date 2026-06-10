@@ -65,6 +65,67 @@
     font-weight: 300;
     letter-spacing: 0.3px;
   }
+  .darkroom-door {
+    margin-left: auto;
+    min-width: 320px;
+    max-width: 430px;
+    height: 40px;
+    padding: 7px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 1px solid rgba(47, 79, 79, 0.18);
+    border-radius: 8px;
+    background: rgba(47, 79, 79, 0.055);
+    color: var(--accent);
+    font-family: inherit;
+    cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18), 3px 3px 8px var(--shadow-dark-subtle);
+  }
+  .darkroom-door[hidden] { display: none; }
+  .darkroom-door:hover {
+    border-color: rgba(47, 79, 79, 0.32);
+    background: rgba(47, 79, 79, 0.08);
+  }
+  .darkroom-door:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--accent-glow), inset 0 0 0 1px rgba(255,255,255,0.18);
+  }
+  .darkroom-door[hidden] + .search-bar { margin-left: auto; }
+  .darkroom-door:not([hidden]) + .search-bar { margin-left: 0; }
+  .darkroom-door-mark {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    background: var(--accent);
+    color: #F8F2E7;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .darkroom-door-copy {
+    min-width: 0;
+    display: grid;
+    gap: 1px;
+    text-align: left;
+  }
+  .darkroom-door-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .darkroom-door-meta {
+    color: var(--text-dim);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .search-bar {
     margin-left: auto;
     display: flex;
@@ -151,6 +212,54 @@
     box-shadow: inset 3px 3px 6px rgba(0,0,0,0.2), inset -2px -2px 4px rgba(255,255,255,0.05);
   }
 
+  .bucket-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: -10px 0 18px;
+    flex-wrap: wrap;
+  }
+  .bucket-tools button {
+    min-height: 34px;
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .bucket-tools button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .bucket-tools button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+  .bucket-tools .danger {
+    color: var(--negative);
+    border-color: rgba(139, 74, 74, 0.36);
+  }
+  .bucket-tools .danger:hover {
+    color: #6F3333;
+    border-color: rgba(139, 74, 74, 0.58);
+  }
+  .bucket-tools .bulk-hidden { display: none; }
+  .bucket-bulk-status {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .bucket-bulk-message {
+    min-height: 20px;
+    margin: -10px 0 14px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .bucket-bulk-message.error { color: var(--negative); }
+  .bucket-bulk-message.ok { color: var(--positive); }
+
   .bucket-list { display: flex; flex-direction: column; gap: 8px; }
   .bucket-row {
     display: grid;
@@ -165,6 +274,27 @@
     background: var(--surface);
     border: 1px solid transparent;
     box-shadow: 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);
+  }
+  .bucket-row.bulk {
+    grid-template-columns: 28px 32px 200px 100px 80px 60px 100px 1fr;
+  }
+  .bucket-row.selected {
+    border-color: rgba(47, 79, 79, 0.45);
+    background: rgba(47, 79, 79, 0.08);
+  }
+  .bucket-select {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+  }
+  .bucket-select input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+  }
+  .bucket-select input:disabled {
+    cursor: not-allowed;
   }
   .bucket-row:hover {
     border-color: var(--border);
@@ -315,9 +445,7 @@
     cursor: pointer;
     transition: all 0.18s ease;
   }
-  .detail-edit-button,
-  .detail-archive-button,
-  .detail-delete-button {
+  .detail-edit-button {
     width: 32px;
     height: 32px;
     padding: 0;
@@ -333,24 +461,12 @@
     justify-content: center;
     transition: color 0.18s ease, background-color 0.18s ease;
   }
-  .detail-archive-button svg {
-    width: 0.82em;
-    height: 0.82em;
-    opacity: 0.72;
-  }
-  .detail-delete-button svg {
-    width: 0.82em;
-    height: 0.82em;
-    opacity: 0.68;
-  }
   .content-edit-actions button:hover,
   .comment-delete-button:hover {
     color: var(--accent-dark);
     box-shadow: 3px 3px 8px var(--shadow-dark-subtle), -3px -3px 8px var(--shadow-light);
   }
-  .detail-edit-button:hover,
-  .detail-archive-button:hover,
-  .detail-delete-button:hover {
+  .detail-edit-button:hover {
     color: var(--accent-dark);
     background: var(--accent-glow);
   }
@@ -361,16 +477,32 @@
   .bucket-content-block .detail-content {
     margin-top: 0;
   }
-  .bucket-content-actions {
+  .bucket-content-block .detail-edit-button {
     position: absolute;
     top: -38px;
     right: 2px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
   }
   .content-edit-form {
     margin-top: 12px;
+  }
+  .title-edit-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+  }
+  .title-edit-form input[type="text"] {
+    flex: 1;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: inherit;
+  }
+  .title-edit-form .content-edit-actions {
+    display: flex;
+    gap: 4px;
   }
   .content-edit-form textarea {
     width: 100%;
@@ -468,6 +600,93 @@
     font-size: 14px;
     line-height: 1;
     padding: 0;
+  }
+  .detail-moments {
+    margin-top: 18px;
+  }
+  .detail-moments h3 {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    margin: 0 0 10px;
+  }
+  .moment-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-bottom: 10px;
+  }
+  .moment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .moment-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 12px 14px;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .moment-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: flex-start;
+    margin-bottom: 7px;
+  }
+  .moment-title {
+    color: var(--accent);
+    font-weight: 500;
+    min-width: 0;
+  }
+  .moment-source {
+    color: var(--text-light);
+    font-size: 10px;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+  }
+  .moment-body {
+    white-space: pre-wrap;
+    color: var(--text);
+    max-height: 170px;
+    overflow-y: auto;
+    padding-top: 7px;
+    border-top: 1px solid var(--border);
+  }
+  .moment-source-window {
+    margin-top: 9px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+  }
+  .moment-source-window-title {
+    color: var(--text-light);
+    font-size: 10px;
+    margin-bottom: 5px;
+  }
+  .moment-source-window pre {
+    margin: 0;
+    white-space: pre-wrap;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 11px;
+    line-height: 1.65;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .moment-edge-list {
+    margin-top: 12px;
+  }
+  .moment-edge-title {
+    color: var(--text-light);
+    font-size: 11px;
+    margin: 0 0 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
   }
 
   .config-section {
@@ -572,19 +791,58 @@
     box-shadow: inset 3px 3px 6px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);
   }
 
+  .network-stage {
+    position: relative;
+  }
   #network-canvas {
+    display: block;
     width: 100%;
     height: calc(100vh - 180px);
     background: var(--bg);
     border-radius: 20px;
     border: 1px solid var(--border);
     box-shadow: inset 4px 4px 10px var(--shadow-dark-subtle), inset -4px -4px 10px var(--shadow-light);
-    display: block;
     cursor: grab;
     touch-action: none;
     user-select: none;
   }
-  #network-view { position: relative; }
+  #network-canvas.dragging {
+    cursor: grabbing;
+  }
+  .network-popover {
+    position: absolute;
+    width: min(320px, calc(100% - 24px));
+    padding: 14px 16px 15px;
+    border: 1px solid rgba(160, 140, 110, 0.28);
+    border-radius: 16px;
+    background: rgba(253, 252, 240, 0.94);
+    color: var(--text);
+    box-shadow: 10px 12px 28px rgba(120, 101, 72, 0.18), -4px -4px 12px rgba(255, 252, 240, 0.62);
+    backdrop-filter: blur(10px);
+    z-index: 3;
+  }
+  .network-popover[hidden] {
+    display: none;
+  }
+  .network-popover-title {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--accent);
+  }
+  .network-popover-meta {
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--text-light);
+  }
+  .network-popover-body {
+    margin-top: 10px;
+    max-height: 126px;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--text-dim);
+  }
   .network-legend {
     display: flex;
     gap: 20px;
@@ -599,48 +857,6 @@
     border-radius: 50%;
     display: inline-block;
     box-shadow: 0 1px 3px var(--shadow-dark-subtle);
-  }
-  .network-popover {
-    position: absolute;
-    z-index: 20;
-    width: min(280px, calc(100vw - 32px));
-    padding: 14px 16px;
-    border-radius: 16px;
-    background: rgba(247, 242, 232, 0.96);
-    border: 1px solid var(--border-strong);
-    box-shadow: 8px 8px 20px var(--shadow-dark-subtle), -6px -6px 16px var(--shadow-light);
-    color: var(--text);
-    font-size: 12px;
-    line-height: 1.55;
-    backdrop-filter: blur(12px);
-  }
-  .network-popover.hidden { display: none; }
-  .network-popover h4 {
-    color: var(--accent);
-    font-size: 14px;
-    margin-bottom: 6px;
-    overflow-wrap: anywhere;
-  }
-  .network-popover .network-popover-meta {
-    color: var(--text-dim);
-    overflow-wrap: anywhere;
-  }
-  .network-popover .network-popover-preview {
-    margin-top: 8px;
-    color: var(--text);
-    max-height: 96px;
-    overflow: hidden;
-  }
-  .network-popover button {
-    margin-top: 12px;
-    padding: 7px 12px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--accent-glow);
-    color: var(--accent);
-    font: inherit;
-    font-size: 12px;
-    cursor: pointer;
   }
 
   .persona-shell {
@@ -753,10 +969,6 @@
   }
   .persona-guidance {
     margin-top: 24px;
-    display: grid;
-    gap: 10px;
-  }
-  .persona-guidance-box {
     padding: 16px 18px;
     border-radius: 18px;
     background: rgba(253, 252, 240, 0.52);
@@ -764,14 +976,6 @@
     color: var(--text);
     font-size: 13px;
     line-height: 1.8;
-  }
-  .persona-guidance-box label {
-    display: block;
-    color: var(--text-dim);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    margin-bottom: 4px;
   }
   .persona-status-line {
     display: flex;
@@ -993,12 +1197,12 @@
   }
   .score-row {
     display: grid;
-    grid-template-columns: 32px 180px 1fr 60px;
+    grid-template-columns: 32px minmax(180px, 260px) minmax(240px, 1fr) 64px;
     gap: 12px;
     padding: 12px 16px;
     border-radius: 12px;
     font-size: 13px;
-    align-items: center;
+    align-items: start;
     transition: all 0.2s ease;
     margin-bottom: 4px;
   }
@@ -1013,6 +1217,27 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .score-main { min-width: 0; }
+  .score-trace {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 5px;
+  }
+  .score-chip {
+    max-width: 100%;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(47,79,79,0.08);
+    color: var(--text-dim);
+    font-size: 10px;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .score-chip.allow { color: var(--positive); background: rgba(74,124,89,0.11); }
+  .score-chip.block { color: var(--negative); background: rgba(139,74,74,0.1); }
   .score-bars { display: flex; gap: 4px; align-items: center; }
   .score-bar-group { display: flex; flex-direction: column; gap: 1px; flex: 1; }
   .score-bar-track {
@@ -1031,6 +1256,157 @@
   .score-final { font-size: 14px; font-weight: 600; text-align: right; }
   .score-pass { color: var(--positive); }
   .score-fail { color: var(--text-light); }
+  .diffusion-panel {
+    margin-top: 18px;
+    padding: 18px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);
+  }
+  .diffusion-panel h3 {
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 500;
+    margin: 0 0 12px;
+  }
+  .diffusion-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .diffusion-section-title {
+    color: var(--text-light);
+    font-size: 11px;
+    margin: 0 0 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .diffusion-row {
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    background: var(--surface-solid);
+  }
+  .diffusion-name {
+    color: var(--text);
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+  .diffusion-path {
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-top: 6px;
+    white-space: pre-wrap;
+  }
+  .diffusion-warning {
+    color: var(--warning);
+    font-size: 11px;
+    margin-top: 8px;
+  }
+  .gateway-injection-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .gateway-injection-controls input[type="text"] {
+    width: min(260px, 100%);
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .gateway-injection-controls input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    accent-color: var(--accent);
+  }
+  .gateway-injection-controls label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .gateway-injection-controls button {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .gateway-injections-content {
+    text-align: left;
+  }
+  .gateway-injection-empty {
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 8px 0 2px;
+  }
+  .gateway-injection-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .gateway-injection-item {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-solid);
+    padding: 12px 14px;
+    font-size: 12px;
+    line-height: 1.55;
+    text-align: left;
+  }
+  .gateway-injection-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .gateway-injection-title {
+    color: var(--accent);
+    font-weight: 600;
+    min-width: 0;
+  }
+  .gateway-injection-time {
+    color: var(--text-light);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .gateway-injection-lines {
+    display: grid;
+    gap: 4px;
+    margin-top: 8px;
+  }
+  .gateway-injection-line {
+    color: var(--text-dim);
+    white-space: pre-wrap;
+  }
+  .gateway-injection-line .label {
+    color: var(--text-light);
+  }
+  .gateway-context-preview {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.7;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+    white-space: pre-wrap;
+  }
 
   .breath-flow {
     display: flex;
@@ -1253,10 +1629,417 @@
     border-radius: 16px;
     background: rgba(255,255,255,0.18);
   }
+  .dream-shell { max-width: 760px; margin: 0 auto; }
+  .dream-toolbar { margin-bottom: 18px; }
+  .dream-toolbar h2 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 30px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .dream-toolbar p {
+    margin-top: 2px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .dream-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .dream-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 4px 4px 12px var(--shadow-dark-subtle), -4px -4px 12px var(--shadow-light);
+  }
+  .dream-row-title { color: var(--text); font-size: 14px; }
+  .dream-row-status { color: var(--text-light); font-size: 12px; white-space: nowrap; }
+
+  .profile-shell { max-width: 1040px; margin: 0 auto; }
+  .profile-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+  .profile-toolbar h2 {
+    font-family: 'Cormorant Garamond', serif;
+    color: var(--accent);
+    font-size: 28px;
+    font-weight: 600;
+  }
+  .profile-toolbar p {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+  .profile-toolbar button,
+  .profile-actions button {
+    min-height: 32px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .profile-toolbar button:hover,
+  .profile-actions button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .profile-actions button.danger { color: var(--negative); }
+  .profile-summary {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  .portrait-state-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 24px;
+  }
+  .portrait-state-summary {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  .portrait-state-meta,
+  .portrait-row-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .portrait-state-grid,
+  .portrait-candidate-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .portrait-candidate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: 12px;
+  }
+  .portrait-scope,
+  .portrait-candidates {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    background: var(--surface-solid);
+    min-width: 0;
+  }
+  .portrait-scope h3,
+  .portrait-candidates h3 {
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .portrait-layer {
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+  .portrait-layer-title {
+    color: var(--text-light);
+    font-size: 10px;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .portrait-row {
+    padding: 7px 0;
+    border-top: 1px solid rgba(168, 147, 132, 0.18);
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .portrait-row:first-of-type { border-top: none; }
+  .portrait-row-text {
+    color: var(--text);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .portrait-row-meta {
+    margin-top: 6px;
+  }
+  .portrait-evidence {
+    margin-top: 5px;
+    color: var(--text-light);
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .portrait-evidence button {
+    margin-left: 5px;
+    min-height: 22px;
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+  }
+  .portrait-evidence button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .portrait-empty {
+    color: var(--text-light);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .profile-proposal-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  .profile-proposal-form {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(140px, 220px) auto;
+    gap: 10px;
+    align-items: center;
+  }
+  .profile-proposal-form input {
+    min-height: 34px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .profile-proposal-form button,
+  .profile-proposal-card button {
+    min-height: 34px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .profile-proposal-form button:hover,
+  .profile-proposal-card button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .profile-proposal-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .profile-proposal-card {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .profile-proposal-card strong {
+    display: block;
+    color: var(--text);
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+  .profile-proposal-message {
+    min-height: 18px;
+    margin-top: 8px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .profile-proposal-message.error { color: var(--negative); }
+  .profile-proposal-message.ok { color: var(--positive); }
+  .profile-list { display: flex; flex-direction: column; gap: 10px; }
+  .profile-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);
+  }
+  .profile-card.deprecated { opacity: 0.68; }
+  .profile-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .profile-fact-text {
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+  }
+  .profile-chip-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 10px 0;
+  }
+  .profile-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.24);
+  }
+  .profile-chip.active { color: var(--positive); border-color: rgba(74, 124, 89, 0.36); }
+  .profile-chip.deprecated { color: var(--negative); border-color: rgba(139, 74, 74, 0.36); }
+  .profile-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 14px;
+    margin-top: 12px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .profile-meta-grid label {
+    display: block;
+    color: var(--text-light);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 2px;
+  }
+  .profile-evidence {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .profile-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    min-width: 260px;
+  }
+  .word-map-shell { max-width: 1120px; margin: 0 auto; }
+  .word-map-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+  .word-map-toolbar h2 {
+    font-family: 'Cormorant Garamond', serif;
+    color: var(--accent);
+    font-size: 28px;
+    font-weight: 600;
+  }
+  .word-map-toolbar p {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+  .word-map-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .word-map-actions button {
+    min-height: 32px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .word-map-actions button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .word-map-summary {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  .word-map-message {
+    min-height: 18px;
+    margin-bottom: 12px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .word-map-message.error { color: var(--negative); }
+  .word-map-message.ok { color: var(--positive); }
+  .word-map-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .word-map-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    min-height: 180px;
+  }
+  .word-map-panel h3 {
+    color: var(--accent);
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+  .word-map-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .word-map-card {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .word-map-card:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+  .word-map-card strong {
+    display: block;
+    color: var(--text);
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
 
   @media (max-width: 768px) {
     .header { padding: 20px; flex-wrap: wrap; }
     .header h1 { font-size: 22px; }
+    .darkroom-door {
+      order: 3;
+      width: 100%;
+      min-width: 0;
+      max-width: none;
+      margin-left: 0;
+    }
     .search-bar { margin-left: 0; width: 100%; }
     .search-bar input { width: 100%; }
     .tabs { padding: 0 16px; overflow-x: auto; }
@@ -1265,6 +2048,12 @@
       grid-template-columns: 28px 1fr 60px;
       gap: 8px;
       padding: 12px 16px;
+    }
+    .bucket-row.bulk {
+      grid-template-columns: 24px 28px 1fr 60px;
+    }
+    .bucket-tools button {
+      flex: 1 1 auto;
     }
     .bucket-row .domain,
     .bucket-row .emotion,
@@ -1281,6 +2070,17 @@
     .persona-meter-row { grid-template-columns: 108px 1fr 38px; }
     .persona-event { grid-template-columns: 1fr; }
     .persona-event-time { white-space: normal; }
+    .diffusion-columns { grid-template-columns: 1fr; }
+    .profile-toolbar { align-items: flex-start; flex-direction: column; }
+    .profile-head { flex-direction: column; }
+    .profile-actions { justify-content: flex-start; min-width: 0; }
+    .profile-meta-grid { grid-template-columns: 1fr; }
+    .profile-proposal-form { grid-template-columns: 1fr; }
+    .portrait-state-grid,
+    .portrait-candidate-grid { grid-template-columns: 1fr; }
+    .word-map-toolbar { align-items: flex-start; flex-direction: column; }
+    .word-map-actions { justify-content: flex-start; }
+    .word-map-grid { grid-template-columns: 1fr; }
     .reflection-toolbar { align-items: flex-start; flex-direction: column; }
     .reflection-board { grid-template-columns: 1fr; }
     .reflection-day-panel { height: auto; max-height: none; }
@@ -1293,6 +2093,13 @@
 <div class="header">
   <h1>◐ Ombre Brain</h1>
   <span class="stats" id="stats">loading...</span>
+  <button type="button" class="darkroom-door" id="darkroom-door" onclick="loadDarkroomDoor()" title="刷新暗房门口状态" hidden>
+    <span class="darkroom-door-mark">◑</span>
+    <span class="darkroom-door-copy">
+      <span class="darkroom-door-title">Darkroom Door</span>
+      <span class="darkroom-door-meta" id="darkroom-door-meta">entries 0</span>
+    </span>
+  </button>
   <div class="search-bar">
     <input type="search" id="search-input" name="ombre-memory-query" placeholder="搜索记忆…" autocomplete="off" spellcheck="false" />
   </div>
@@ -1303,14 +2110,26 @@
   <div class="tab active" data-tab="list">记忆桶</div>
   <div class="tab" data-tab="breath">Breath 模拟</div>
   <div class="tab" data-tab="reflection">日印象</div>
+  <div class="tab" data-tab="dreams">梦境</div>
   <div class="tab" data-tab="persona">Persona</div>
+  <div class="tab" data-tab="profile">画像</div>
+  <div class="tab" data-tab="word-map">词图</div>
   <div class="tab" data-tab="network">记忆网络</div>
   <div class="tab" data-tab="config">配置</div>
+  <div class="tab" data-tab="memory-config">记忆浮现</div>
   <div class="tab" data-tab="import">导入</div>
 </div>
 
 <div class="content" id="list-view">
   <div class="filters" id="filters"></div>
+  <div class="bucket-tools" id="bucket-bulk-toolbar">
+    <button type="button" id="bucket-bulk-toggle" onclick="toggleBucketBulkMode()">批量选择</button>
+    <button type="button" class="bulk-hidden" data-bulk-action="select-current" onclick="selectCurrentBuckets()">全选当前筛选</button>
+    <button type="button" class="bulk-hidden" data-bulk-action="clear" onclick="clearBucketSelection()">清空</button>
+    <button type="button" class="bulk-hidden danger" data-bulk-action="delete" onclick="deleteSelectedBuckets()">删除选中</button>
+    <span class="bucket-bulk-status bulk-hidden" id="bucket-bulk-status">未选择</span>
+  </div>
+  <div class="bucket-bulk-message" id="bucket-bulk-message"></div>
   <div class="bucket-list" id="bucket-list">
     <div class="loading">加载中…</div>
   </div>
@@ -1343,6 +2162,159 @@
   <div id="breath-results">
     <div class="loading">输入 query 后点击「模拟 Breath」查看评分链路</div>
   </div>
+  <div id="recall-results" class="diffusion-panel" style="display:none"></div>
+  <div id="diffusion-results" class="diffusion-panel" style="display:none"></div>
+  <div class="diffusion-panel" id="gateway-injections-panel">
+    <h3>Gateway 最近注入</h3>
+    <div class="gateway-injection-controls">
+      <input type="text" id="gateway-session-filter" placeholder="session_id（可选）" />
+      <label><input type="checkbox" id="gateway-include-context" /> 包含 context</label>
+      <button onclick="loadGatewayInjections()">刷新</button>
+    </div>
+    <div id="gateway-injections-content" class="gateway-injections-content">
+      <div class="gateway-injection-empty">打开 Breath 模拟时读取最近注入记录。</div>
+    </div>
+  </div>
+</div>
+
+<div class="content" id="memory-config-view" style="display:none">
+  <div style="max-width:760px;margin:0 auto;">
+    <div class="config-section">
+      <h3>记忆浮现</h3>
+      <div class="config-row">
+        <label>最近记忆</label>
+        <select id="cfg-recent-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 不自动注入 Recent Context；可靠直命中和扩散不受影响</div>
+      <div class="config-row">
+        <label>Persona提示</label>
+        <select id="cfg-persona-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制 Gateway 每隔若干轮注入一次 Persona State 提示；关闭后仍会后台更新 Persona</div>
+      <div class="config-row">
+        <label>Persona轮数</label>
+        <input type="number" id="cfg-persona-context-rounds" min="0" max="200" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 15；设 0 等同关闭提示注入</div>
+      <div class="config-row">
+        <label>冷却时间</label>
+        <input type="number" id="cfg-gateway-cooldown" min="0" max="168" step="0.5" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，就是同一条记忆浮现后，6 小时内降低再次出现的概率</div>
+      <div class="config-row">
+        <label>冷却轮数</label>
+        <input type="number" id="cfg-gateway-rounds" min="0" max="50" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 5，就是最近 5 轮浮现过的记忆会优先避开</div>
+      <div class="config-row">
+        <label>最近冷却</label>
+        <input type="number" id="cfg-recent-context-cooldown" min="0" max="168" step="0.5" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，Recent Context 注入后多久不再自动重复注入</div>
+      <div class="config-row">
+        <label>再进入</label>
+        <input type="number" id="cfg-recent-context-reentry" min="0" max="168" step="0.5" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 24，小于这个闲置时长不算长时间再进入；设 0 关闭再进入触发</div>
+      <div class="config-row">
+        <label>最近预算</label>
+        <input type="number" id="cfg-recent-context-budget" min="0" max="4000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 300；设 0 可关闭 Recent Context 自动注入</div>
+      <div class="config-row">
+        <label>直命中预算</label>
+        <input type="number" id="cfg-recalled-memory-budget" min="0" max="4000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 400，控制 Recalled Memory 直命中最多带多少内容</div>
+      <div class="config-row">
+        <label>扩散预算</label>
+        <input type="number" id="cfg-related-memory-budget" min="0" max="4000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 220；设 0 可关闭 Gateway 的 Diffused Memory 注入</div>
+      <div class="config-row">
+        <label>细节二次取回</label>
+        <select id="cfg-memory-detail-recall-enabled">
+          <option value="false">关闭</option>
+          <option value="true">开启</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">开启后非流式回复可用已注入 bucket_id 做一次内部细节 retry；Targeted Memory Detail 不依赖这个开关</div>
+      <div class="config-row">
+        <label>细节条数</label>
+        <input type="number" id="cfg-memory-detail-recall-max-ids" min="1" max="3" />
+      </div>
+      <div class="config-row">
+        <label>细节预算</label>
+        <input type="number" id="cfg-memory-detail-recall-budget" min="200" max="4000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认最多 3 条、1200 token；只接受本轮已经注入过的 bucket_id</div>
+      <div class="config-row">
+        <label>直命中形状</label>
+        <select id="cfg-direct-render-mode">
+          <option value="auto">auto</option>
+          <option value="compact">compact</option>
+          <option value="full">full</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">auto：短桶原文，长桶窗口，高价值/细节请求用脱水胶囊</div>
+      <div class="config-row">
+        <label>召回模式</label>
+        <select id="cfg-retrieval-mode">
+          <option value="graph">graph</option>
+          <option value="bucket">bucket</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">graph 是 p0 图召回；bucket 是接近 main 的直命中对照档</div>
+      <div class="config-row">
+        <label>旧记忆随机</label>
+        <select id="cfg-query-resurface-enabled">
+          <option value="false">关闭</option>
+          <option value="true">开启</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认关闭；开启后 query breath 在直命中稀疏时可能追加久未碰过的旧记忆</div>
+      <div class="config-row">
+        <label>图扩散</label>
+        <select id="cfg-diffusion-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后只保留可靠直接命中，不追加 Related/Diffused 背景</div>
+      <div class="config-row">
+        <label>扩散条数</label>
+        <input type="number" id="cfg-diffusion-topk" min="0" max="20" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 4，控制最多返回几条扩散背景</div>
+      <div class="config-row">
+        <label>最小激活</label>
+        <input type="number" id="cfg-diffusion-min" min="0" max="10" step="0.01" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 0.18，越高越保守</div>
+      <div class="config-row">
+        <label>链式扩散</label>
+        <select id="cfg-chain-walk"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">允许沿可靠关系继续走，不只是看一跳邻居</div>
+      <div class="config-row">
+        <label>链路深度</label>
+        <input type="number" id="cfg-chain-hops" min="1" max="12" />
+      </div>
+      <div class="config-row">
+        <label>链路置信</label>
+        <input type="number" id="cfg-chain-confidence" min="0" max="1" step="0.01" />
+      </div>
+      <div class="config-row">
+        <label>链路前沿</label>
+        <input type="number" id="cfg-chain-frontier" min="1" max="200" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">保存后 breath 和 Gateway 都会立即读取新的扩散参数</div>
+    </div>
+
+    <div style="display:flex;gap:12px;margin-top:8px;">
+      <button class="btn-primary" onclick="saveConfig(false)">应用（仅运行时）</button>
+      <button class="btn-secondary" onclick="saveConfig(true)">应用并写入 config.yaml</button>
+      <button class="btn-secondary" onclick="saveConfig(true, true)">应用并保存密钥到 .env</button>
+    </div>
+    <div id="memory-config-status" style="margin-top:16px;font-size:13px;"></div>
+  </div>
 </div>
 
 <div class="content" id="reflection-view" style="display:none">
@@ -1373,6 +2345,18 @@
   </div>
 </div>
 
+<div class="content" id="dreams-view" style="display:none">
+  <div class="dream-shell">
+    <div class="dream-toolbar">
+      <h2>梦境</h2>
+      <p>这里只记录梦曾经发生；梦的正文只会在 breath 共振时给模型读到。</p>
+    </div>
+    <div id="dreams-content">
+      <div class="loading">加载梦境记录…</div>
+    </div>
+  </div>
+</div>
+
 <div class="content" id="persona-view" style="display:none">
   <div class="persona-shell">
     <div class="persona-toolbar">
@@ -1388,6 +2372,93 @@
   </div>
 </div>
 
+<div class="content" id="profile-view" style="display:none">
+  <div class="profile-shell">
+    <div class="profile-toolbar">
+      <div>
+        <h2>Portrait State</h2>
+        <p>新窗口 handoff 当前使用的每日画像状态；只读，不写 profile_fact、anchor 或 Core Memory。</p>
+      </div>
+      <div class="profile-actions">
+        <button type="button" onclick="loadPortraitState()">刷新</button>
+        <button type="button" onclick="runPortraitMaintain()">手动生成</button>
+      </div>
+    </div>
+    <section class="portrait-state-panel" id="portrait-state-panel">
+      <div class="profile-proposal-message" id="portrait-maintain-message"></div>
+      <div class="portrait-state-summary" id="portrait-state-summary">加载中…</div>
+      <div id="portrait-state-content">
+        <div class="loading">加载 Portrait State…</div>
+      </div>
+    </section>
+    <div class="profile-toolbar">
+      <div>
+        <h2>Profile Facts</h2>
+        <p>证据化用户画像事实；Portrait Memory 只读这些事实，不自动写入。</p>
+      </div>
+      <button type="button" onclick="loadProfileFacts()">刷新</button>
+    </div>
+    <div class="profile-proposal-panel">
+      <div class="profile-proposal-form">
+        <input type="text" id="profile-proposal-bucket-id" placeholder="证据 bucket id" />
+        <input type="text" id="profile-proposal-moment-id" placeholder="moment id（可选）" />
+        <button type="button" onclick="generateProfileFactProposals()">生成画像候选</button>
+      </div>
+      <div class="profile-proposal-message" id="profile-proposal-message"></div>
+      <div class="profile-proposal-list" id="profile-proposal-list"></div>
+    </div>
+    <div class="profile-proposal-panel">
+      <div class="profile-proposal-form">
+        <input type="text" id="anchor-proposal-bucket-id" placeholder="候选 anchor bucket id" />
+        <span></span>
+        <button type="button" onclick="generateAnchorProposals()">生成 Anchor 候选</button>
+      </div>
+      <div class="profile-proposal-message" id="anchor-proposal-message"></div>
+      <div class="profile-proposal-list" id="anchor-proposal-list"></div>
+    </div>
+    <div class="profile-summary" id="profile-summary">加载中…</div>
+    <div class="profile-list" id="profile-facts-list">
+      <div class="loading">加载画像事实…</div>
+    </div>
+  </div>
+</div>
+
+<div class="content" id="word-map-view" style="display:none">
+  <div class="word-map-shell">
+    <div class="word-map-toolbar">
+      <div>
+        <h2>Word Map Lite</h2>
+        <p>只读查看派生词图和私有 identity alias；不会自动注入 Gateway。</p>
+      </div>
+      <div class="word-map-actions">
+        <button type="button" onclick="loadWordMap()">刷新</button>
+        <button type="button" onclick="rebuildWordMap()">重建 Word Map</button>
+        <button type="button" onclick="rebuildIdentitySemantics()">重建 Private Alias</button>
+      </div>
+    </div>
+    <div class="word-map-summary" id="word-map-summary">加载中…</div>
+    <div class="word-map-message" id="word-map-message"></div>
+    <div class="word-map-grid">
+      <section class="word-map-panel">
+        <h3>Top Nodes</h3>
+        <div class="word-map-list" id="word-map-nodes"><div class="loading">加载中…</div></div>
+      </section>
+      <section class="word-map-panel">
+        <h3>Co-occurrence Edges</h3>
+        <div class="word-map-list" id="word-map-edges"><div class="loading">加载中…</div></div>
+      </section>
+      <section class="word-map-panel">
+        <h3>Private Alias</h3>
+        <div class="word-map-list" id="identity-aliases"><div class="loading">加载中…</div></div>
+      </section>
+      <section class="word-map-panel">
+        <h3>Boundary</h3>
+        <div class="word-map-list" id="word-map-boundary"><div class="loading">加载中…</div></div>
+      </section>
+    </div>
+  </div>
+</div>
+
 <div class="content" id="network-view" style="display:none">
   <div class="network-legend">
     <div class="legend-item"><span class="legend-dot" style="background:#2F4F4F"></span> dynamic</div>
@@ -1395,8 +2466,10 @@
     <div class="legend-item"><span class="legend-dot" style="background:#8B6A6A"></span> feel</div>
     <div class="legend-item"><span class="legend-dot" style="background:#B0A590"></span> archived</div>
   </div>
-  <canvas id="network-canvas"></canvas>
-  <div id="network-popover" class="network-popover hidden"></div>
+  <div class="network-stage">
+    <canvas id="network-canvas"></canvas>
+    <div id="network-popover" class="network-popover" hidden></div>
+  </div>
 </div>
 
 <div class="content" id="import-view" style="display:none">
@@ -1497,20 +2570,171 @@
     </div>
 
     <div class="config-section">
-        <h3>记忆浮现</h3>
-        <div class="config-row">
-          <label>冷却时间</label>
-          <input type="number" id="cfg-gateway-cooldown" min="0" max="168" step="0.5" />
-        </div>
-        <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，就是同一条记忆浮现后，6 小时内降低再次出现的概率</div>
-        <div class="config-row">
-          <label>冷却轮数</label>
-          <input type="number" id="cfg-gateway-rounds" min="0" max="50" />
-        </div>
-        <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 5，就是最近 5 轮浮现过的记忆会优先避开</div>
+      <h3>Persona State</h3>
+      <div class="config-row">
+        <label>启用</label>
+        <select id="cfg-persona-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 不再注入 Persona 状态，也不再做回复后的 Persona 更新</div>
+      <div class="config-row">
+        <label>记录事件</label>
+        <select id="cfg-persona-event-recording"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后仍评估数值状态，但不新增 Recent Persona Events</div>
+      <div class="config-row">
+        <label>Model</label>
+        <input type="text" id="cfg-persona-model" placeholder="deepseek-chat" />
+      </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-persona-url" placeholder="https://api.deepseek.com/v1" />
+      </div>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-persona-key" placeholder="当前: 加载中…" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改；点击“保存密钥到 .env”后重启仍保留</div>
+    </div>
 
-      <div class="config-section">
+    <div class="config-section">
+      <h3>夜梦 Dream</h3>
+      <div class="config-row">
+        <label>做梦引擎</label>
+        <select id="cfg-dream-engine-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；关闭后不生成新梦，也不做梦境浮现</div>
+      <div class="config-row">
+        <label>后台做梦</label>
+        <select id="cfg-dream-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div class="config-row">
+        <label>自动浮现</label>
+        <select id="cfg-dream-surface"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div class="config-row">
+        <label>Gateway 注入</label>
+        <select id="cfg-dream-inject"><option value="false">关闭</option><option value="true">开启</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">开启后 Gateway 可能把一次共振梦境作为 Dream Context 给模型静默参考</div>
+      <div class="config-row">
+        <label>注入后保留</label>
+        <select id="cfg-dream-retain"><option value="false">关闭</option><option value="true">开启</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">开启后梦境注入仍只发生一次，但原梦文件会保留在梦境记录里</div>
+      <div class="config-row">
+        <label>Model</label>
+        <input type="text" id="cfg-dream-model" placeholder="deepseek-v4-flash" />
+      </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-dream-url" placeholder="https://api.deepseek.com" />
+      </div>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-dream-key" placeholder="当前: 加载中…" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改；点击“保存密钥到 .env”后重启仍保留</div>
+      <div class="config-row">
+        <label>几点做梦</label>
+        <input type="number" id="cfg-dream-hour" min="0" max="23" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">东八区小时。默认 3，就是凌晨 3 点后检查一次</div>
+      <div class="config-row">
+        <label>做梦概率</label>
+        <input type="number" id="cfg-dream-prob" min="0" max="1" step="0.05" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">0 到 1。0.4 表示素材够时有 40% 概率做梦</div>
+      <div class="config-row">
+        <label>至少几条素材</label>
+        <input type="number" id="cfg-dream-min" min="1" max="20" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">最近记忆和 whisper 加起来不够这个数，就先不做梦</div>
+      <div class="config-row">
+        <label>回溯时间</label>
+        <input type="number" id="cfg-dream-window" min="1" max="168" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 48，就是只看最近两天的记忆和 whisper</div>
+      <div class="config-row">
+        <label>人格锚点</label>
+        <input type="text" id="cfg-dream-anchor" placeholder="c0b8ddb7423e" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">只用来固定是谁在做梦，不会直接当作梦的剧情素材</div>
+    </div>
+
+    <div class="config-section">
+      <h3>记忆关系整理</h3>
+      <div class="config-row">
+        <label>整理引擎</label>
+        <select id="cfg-reflection-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；关闭后不再做关系整理、日印象和写入打标</div>
+      <div class="config-row">
+        <label>自动整理</label>
+        <select id="cfg-reflection-auto"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后只保留手动触发</div>
+      <div class="config-row">
+        <label>日印象</label>
+        <select id="cfg-reflection-daily"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后不再自动生成 daily relationship_weather</div>
+      <div class="config-row">
+        <label>普通记忆和弦</label>
+        <select id="cfg-reflection-memory-anchor"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后普通 bucket 不再自动追加 affect_anchor</div>
+      <div class="config-row">
+        <label>日印象和弦</label>
+        <select id="cfg-reflection-weather-anchor"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制日印象/关系天气正文里的 affect_anchor</div>
+      <div class="config-row">
+        <label>Model</label>
+        <input type="text" id="cfg-reflection-model" placeholder="留空复用 Persona/脱水模型" />
+      </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-reflection-url" placeholder="留空复用 Persona/脱水地址" />
+      </div>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-reflection-key" placeholder="当前: 加载中…" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改；点击“保存密钥到 .env”后重启仍保留</div>
+    </div>
+
+    <div class="config-section">
+      <h3>每日画像 Portrait</h3>
+      <div class="config-row">
+        <label>画像引擎</label>
+        <select id="cfg-portrait-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；只维护 state/portrait_state.json，不自动写 profile_fact、anchor 或 Core Memory</div>
+      <div class="config-row">
+        <label>自动维护</label>
+        <select id="cfg-portrait-auto"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div class="config-row">
+        <label>自动首次生成</label>
+        <select id="cfg-portrait-auto-initial"><option value="false">关闭</option><option value="true">开启</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认关闭；新安装或空 state 时，第一次画像需要手动点击生成</div>
+      <div class="config-row">
+        <label>每日维护</label>
+        <select id="cfg-portrait-daily"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div class="config-row">
+        <label>当天材料上限</label>
+        <input type="number" id="cfg-portrait-material-limit" min="1" max="100" />
+      </div>
+      <div class="config-row">
+        <label>首次材料上限</label>
+        <input type="number" id="cfg-portrait-first-limit" min="1" max="500" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">第一次画像初始化可适当调大；之后每天只看当天新增/更新的记忆材料</div>
+    </div>
+
+    <div class="config-section">
       <h3>其他参数</h3>
       <div class="config-row">
         <label>合并阈值</label>
@@ -1522,6 +2746,7 @@
     <div style="display:flex;gap:12px;margin-top:8px;">
       <button class="btn-primary" onclick="saveConfig(false)">应用（仅运行时）</button>
       <button class="btn-secondary" onclick="saveConfig(true)">应用并写入 config.yaml</button>
+      <button class="btn-secondary" onclick="saveConfig(true, true)">应用并保存密钥到 .env</button>
     </div>
     <div id="config-status" style="margin-top:16px;font-size:13px;"></div>
 
@@ -1559,11 +2784,21 @@
 const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
 const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
+let renderedBuckets = [];
+let portraitState = null;
+let profileFacts = [];
+let profileFactProposals = [];
+let anchorProposals = [];
+let wordMapData = null;
+let identitySemanticData = null;
 let currentFilter = 'all';
-let dashboardCommentAuthor = 'Lin';
-let dashboardAiAuthor = 'Che';
+let bucketBulkMode = false;
+let selectedBucketIds = new Set();
+let dashboardCommentAuthor = 'Rain';
+let dashboardAiAuthor = 'Haven';
 let reflectionSelectedDate = formatLocalDate(new Date());
 let reflectionCurrentMonth = monthStart(new Date());
+let configSnapshot = null;
 
 function authUrl(path) {
   return path.startsWith('http') ? path : BASE + path;
@@ -1593,7 +2828,7 @@ function showAuthOverlay(setupNeeded) {
 }
 
 function clearAuthSensitiveFields(password) {
-  ['auth-login-pwd', 'auth-setup-pwd', 'auth-setup-pwd2'].forEach(function(id) {
+  ['auth-login-pwd', 'auth-setup-pwd', 'auth-setup-pwd2', 'cfg-dehy-key', 'cfg-emb-key', 'cfg-persona-key', 'cfg-reflection-key', 'cfg-dream-key'].forEach(function(id) {
     var input = document.getElementById(id);
     if (input) input.value = '';
   });
@@ -1671,17 +2906,25 @@ document.querySelectorAll('.tab').forEach(tab => {
     const target = tab.dataset.tab;
     document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
     document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
+    document.getElementById('memory-config-view').style.display = target === 'memory-config' ? '' : 'none';
     document.getElementById('reflection-view').style.display = target === 'reflection' ? '' : 'none';
+    document.getElementById('dreams-view').style.display = target === 'dreams' ? '' : 'none';
     document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
+    document.getElementById('profile-view').style.display = target === 'profile' ? '' : 'none';
+    document.getElementById('word-map-view').style.display = target === 'word-map' ? '' : 'none';
     document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
-    if (target !== 'network') {
-      hideNetworkPopover();
-      stopNetworkAnimation();
-    }
+    if (target === 'breath') loadGatewayInjections();
+    if (target === 'memory-config') loadConfig();
     if (target === 'reflection') renderReflectionReview();
+    if (target === 'dreams') loadDreams();
     if (target === 'persona') loadPersona();
+    if (target === 'profile') {
+      loadPortraitState();
+      loadProfileFacts();
+    }
+    if (target === 'word-map') loadWordMap();
     if (target === 'network') loadNetwork();
     if (target === 'config') loadConfig();
     if (target === 'import') { pollImportStatus(); loadImportResults(); }
@@ -1694,7 +2937,7 @@ document.getElementById('search-input').addEventListener('input', (e) => {
   const q = e.target.value.trim();
   searchTimer = setTimeout(() => {
     if (q) searchBuckets(q);
-    else renderBuckets(allBuckets);
+    else renderBuckets(filterBuckets(allBuckets));
   }, 300);
 });
 
@@ -1704,9 +2947,21 @@ async function loadBuckets() {
     if (!res) return;
     allBuckets = await res.json();
     updateStats();
+    loadDarkroomDoor();
     buildFilters();
-    renderBuckets(allBuckets);
+    selectedBucketIds.forEach(function(id) {
+      if (!allBuckets.some(function(bucket) { return String(bucket.id || '') === id; })) {
+        selectedBucketIds.delete(id);
+      }
+    });
+    renderBuckets(filterBuckets(allBuckets));
     if (getActiveTab() === 'reflection') renderReflectionReview();
+    if (getActiveTab() === 'dreams') loadDreams();
+    if (getActiveTab() === 'profile') {
+      loadPortraitState();
+      loadProfileFacts();
+    }
+    if (getActiveTab() === 'word-map') loadWordMap();
   } catch (e) {
     document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
@@ -1715,6 +2970,51 @@ async function loadBuckets() {
 function getActiveTab() {
   var tab = document.querySelector('.tab.active');
   return tab ? tab.dataset.tab : 'list';
+}
+
+function formatDarkroomCompleteness(value) {
+  if (value === null || value === undefined || value === '') return '';
+  var number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  return number.toFixed(2);
+}
+
+function renderDarkroomDoor(data) {
+  var door = document.getElementById('darkroom-door');
+  var meta = document.getElementById('darkroom-door-meta');
+  if (!door || !meta || !data || data.status !== 'ok') return;
+  var count = Number(data.count || 0);
+  var parts = ['entries ' + count];
+  var entered = formatTimeAgo(data.last_entered_at);
+  if (count && entered !== '—') parts.push(entered);
+  var previous = formatDarkroomCompleteness(data.previous_completeness);
+  var current = formatDarkroomCompleteness(data.last_completeness);
+  if (previous && current && previous !== current) parts.push(previous + ' -> ' + current);
+  else if (current) parts.push(current);
+  meta.textContent = parts.join(' · ');
+  door.hidden = false;
+}
+
+async function loadDarkroomDoor() {
+  var door = document.getElementById('darkroom-door');
+  if (!door) return;
+  try {
+    var res = await authFetch(BASE + '/api/darkroom/status');
+    if (!res) return;
+    if (res.status === 404) {
+      door.hidden = true;
+      return;
+    }
+    var data = await res.json();
+    if (!res.ok || data.error) {
+      door.hidden = true;
+      return;
+    }
+    renderDarkroomDoor(data);
+  } catch (e) {
+    door.hidden = true;
+    console.warn('Darkroom door load failed:', e);
+  }
 }
 
 function monthStart(date) {
@@ -1877,6 +3177,732 @@ function renderReflectionDayPanel(impressions) {
   if (impressions.length) hydrateReflectionEntryContents(impressions);
 }
 
+function formatDreamDate(record) {
+  var localDate = record && record.local_date ? String(record.local_date) : '';
+  var match = localDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) return match[1] + '年' + match[2] + '月' + match[3] + '日';
+  var parsed = record && record.generated_at ? new Date(record.generated_at) : null;
+  if (!parsed || isNaN(parsed.getTime())) return '未知日期';
+  var y = parsed.getFullYear();
+  var m = String(parsed.getMonth() + 1).padStart(2, '0');
+  var d = String(parsed.getDate()).padStart(2, '0');
+  return y + '年' + m + '月' + d + '日';
+}
+
+function dreamStatusLabel(status) {
+  if (status === 'surfaced') return '已浮现';
+  if (status === 'forgotten') return '已遗忘';
+  return '潜伏中';
+}
+
+async function loadDreams() {
+  var content = document.getElementById('dreams-content');
+  content.innerHTML = '<div class="loading">加载梦境记录…</div>';
+  try {
+    var res = await authFetch(BASE + '/api/dreams?limit=50');
+    if (!res) return;
+    var data = await res.json();
+    var records = data.records || [];
+    if (!records.length) {
+      content.innerHTML = '<div class="reflection-empty">还没有梦。</div>';
+      return;
+    }
+    content.innerHTML = '<div class="dream-list">' + records.map(function(record) {
+      var aiName = record.ai_name || dashboardAiAuthor || 'Haven';
+      return '<div class="dream-row">' +
+        '<div class="dream-row-title">' + formatDreamDate(record) + ' ' + esc(aiName) + ' 做了一个梦</div>' +
+        '<div class="dream-row-status">' + dreamStatusLabel(record.status) + '</div>' +
+      '</div>';
+    }).join('') + '</div>';
+  } catch (e) {
+    content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function portraitRows(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function portraitStatusChip(label, enabled) {
+  return '<span class="profile-chip ' + (enabled ? 'active' : 'deprecated') + '">' +
+    esc(label + ' ' + (enabled ? 'on' : 'off')) +
+  '</span>';
+}
+
+function setPortraitMaintainMessage(message, tone) {
+  var el = document.getElementById('portrait-maintain-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+async function loadPortraitState() {
+  var content = document.getElementById('portrait-state-content');
+  var summary = document.getElementById('portrait-state-summary');
+  if (!content || !summary) return;
+  content.innerHTML = '<div class="loading">加载 Portrait State…</div>';
+  summary.textContent = '读取中…';
+  try {
+    var res = await authFetch(BASE + '/api/portrait-state');
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '加载失败');
+    portraitState = data;
+    renderPortraitState(data);
+  } catch (e) {
+    summary.textContent = '读取失败';
+    content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function runPortraitMaintain() {
+  setPortraitMaintainMessage('生成中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/portrait-maintain', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ force: true })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '生成失败');
+    var materials = data.materials || {};
+    var rejected = Array.isArray(data.rejected) ? data.rejected.length : Number(data.rejected_count || 0);
+    var parts = [
+      data.status || 'ok',
+      data.date || '',
+      'buckets ' + (materials.buckets == null ? '—' : materials.buckets),
+      'persona events ' + (materials.persona_events == null ? '—' : materials.persona_events),
+      'rejected ' + (Number.isFinite(rejected) ? rejected : 0)
+    ].filter(Boolean);
+    setPortraitMaintainMessage('已生成：' + parts.join(' · '), 'ok');
+    await loadPortraitState();
+  } catch (e) {
+    setPortraitMaintainMessage('生成失败: ' + e.message, 'error');
+  }
+}
+
+function renderPortraitState(data) {
+  var content = document.getElementById('portrait-state-content');
+  var summary = document.getElementById('portrait-state-summary');
+  if (!content || !summary) return;
+  var state = data || {};
+  var portrait = state.portrait || {};
+  summary.innerHTML = '<div class="portrait-state-meta">' +
+    '<span class="profile-chip">read only</span>' +
+    portraitStatusChip('engine', state.enabled !== false) +
+    portraitStatusChip('auto', state.auto_enabled !== false) +
+    portraitStatusChip('auto initial', state.auto_initial_enabled === true) +
+    portraitStatusChip('daily', state.daily_enabled !== false) +
+    '<span class="profile-chip">last run ' + esc(state.last_run_date || '—') + '</span>' +
+    '<span class="profile-chip">updated ' + esc(state.updated_at || '—') + '</span>' +
+    '<span class="profile-chip">state ' + esc(state.state_path || '—') + '</span>' +
+  '</div>';
+  content.innerHTML =
+    '<div class="portrait-state-grid">' +
+      renderPortraitScope('user', portrait.user || {}) +
+      renderPortraitScope('persona', portrait.persona || {}) +
+      renderPortraitScope('relationship', portrait.relationship || {}) +
+    '</div>' +
+    '<div class="portrait-candidate-grid">' +
+      renderPortraitCandidates('Stable Candidates', state.stable_candidates) +
+      renderPortraitCandidates('Profile Fact Candidates', state.profile_fact_candidates) +
+    '</div>';
+}
+
+function renderPortraitScope(scope, scopeState) {
+  var labels = {
+    user: 'User Portrait',
+    persona: 'Persona',
+    relationship: 'Relationship'
+  };
+  var stableRows = scopeState.stable ? [{
+    text: scopeState.stable,
+    evidence: scopeState.stable_evidence || [],
+    updated_at: scopeState.stable_updated_at || ''
+  }] : [];
+  var midRows = scopeState.mid_term ? [{
+    text: scopeState.mid_term,
+    evidence: scopeState.mid_term_evidence || [],
+    updated_at: scopeState.mid_term_updated_at || ''
+  }] : [];
+  return '<section class="portrait-scope">' +
+    '<h3>' + esc(labels[scope] || scope) + '</h3>' +
+    renderPortraitLayer('stable', stableRows, '还没有 stable portrait。') +
+    renderPortraitLayer('mid term', midRows, '还没有 mid-term portrait。') +
+    renderPortraitLayer('staging pool', portraitRows(scopeState.staging_pool).slice(0, 6), 'staging pool 为空。') +
+    renderPortraitLayer('recent buffer', portraitRows(scopeState.recent_buffer).slice(0, 6), 'recent buffer 为空。') +
+  '</section>';
+}
+
+function renderPortraitLayer(title, rows, emptyText) {
+  return '<div class="portrait-layer">' +
+    '<div class="portrait-layer-title">' + esc(title) + '</div>' +
+    renderPortraitRows(rows, emptyText) +
+  '</div>';
+}
+
+function renderPortraitRows(rows, emptyText) {
+  rows = portraitRows(rows);
+  if (!rows.length) return '<div class="portrait-empty">' + esc(emptyText || '没有记录。') + '</div>';
+  return rows.map(renderPortraitRow).join('');
+}
+
+function renderPortraitCandidates(title, candidates) {
+  var rows = portraitRows(candidates).slice(-8).reverse();
+  return '<section class="portrait-candidates">' +
+    '<h3>' + esc(title) + '</h3>' +
+    renderPortraitRows(rows, '没有候选。') +
+  '</section>';
+}
+
+function renderPortraitRow(item) {
+  item = item || {};
+  var text = item.text || item.summary || item.fact || item.reason || '';
+  var meta = [];
+  if (item.scope) meta.push(item.scope);
+  if (item.status) meta.push(item.status);
+  if (item.profile_kind) meta.push(item.profile_kind);
+  if (item.predicate) meta.push(item.predicate);
+  if (item.object) meta.push(item.object);
+  if (item.confidence != null) meta.push('confidence ' + Number(item.confidence || 0).toFixed(2));
+  if (item.count) meta.push('seen ' + item.count);
+  if (item.updated_at || item.last_seen_date || item.created_at) {
+    meta.push(item.updated_at || item.last_seen_date || item.created_at);
+  }
+  return '<div class="portrait-row">' +
+    '<div class="portrait-row-text">' + esc(text) + '</div>' +
+    (meta.length ? '<div class="portrait-row-meta">' + meta.map(function(part) {
+      return '<span class="profile-chip">' + esc(part) + '</span>';
+    }).join('') + '</div>' : '') +
+    renderPortraitEvidence(item.evidence) +
+  '</div>';
+}
+
+function renderPortraitEvidence(evidence) {
+  var rows = portraitRows(evidence).filter(function(item) {
+    return item && (item.bucket_id || item.moment_id || item.session_id);
+  });
+  if (!rows.length) return '';
+  var parts = rows.slice(0, 4).map(function(item) {
+    var bucketId = String(item.bucket_id || '');
+    var labels = [];
+    if (bucketId) labels.push('#' + bucketId);
+    if (item.moment_id) labels.push(item.moment_id);
+    if (item.session_id) labels.push('session ' + item.session_id);
+    var openButton = bucketId
+      ? '<button type="button" onclick="showDetail(\'' + jsString(bucketId) + '\')">打开证据</button>'
+      : '';
+    return esc(labels.join(' · ')) + openButton;
+  });
+  return '<div class="portrait-evidence">evidence: ' + parts.join(' / ') + '</div>';
+}
+
+async function loadProfileFacts() {
+  var list = document.getElementById('profile-facts-list');
+  var summary = document.getElementById('profile-summary');
+  if (!list || !summary) return;
+  list.innerHTML = '<div class="loading">加载画像事实…</div>';
+  summary.textContent = '读取中…';
+  try {
+    var res = await authFetch(BASE + '/api/profile-facts');
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '加载失败');
+    profileFacts = Array.isArray(data.facts) ? data.facts : [];
+    renderProfileFacts();
+  } catch (e) {
+    summary.textContent = '读取失败';
+    list.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function setProfileProposalMessage(message, tone) {
+  var el = document.getElementById('profile-proposal-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+async function generateProfileFactProposals() {
+  var bucketInput = document.getElementById('profile-proposal-bucket-id');
+  var momentInput = document.getElementById('profile-proposal-moment-id');
+  var bucketId = (bucketInput && bucketInput.value || '').trim();
+  var momentId = (momentInput && momentInput.value || '').trim();
+  if (!bucketId) {
+    setProfileProposalMessage('先填证据 bucket id。', 'error');
+    return;
+  }
+  setProfileProposalMessage('生成中…', '');
+  var list = document.getElementById('profile-proposal-list');
+  if (list) list.innerHTML = '';
+  try {
+    var res = await authFetch(BASE + '/api/profile-fact-proposals', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        bucket_id: bucketId,
+        evidence_moment_id: momentId,
+        max_proposals: 3
+      })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '生成失败');
+    profileFactProposals = Array.isArray(data.proposals) ? data.proposals : [];
+    renderProfileFactProposals(data);
+  } catch (e) {
+    profileFactProposals = [];
+    setProfileProposalMessage('生成失败: ' + e.message, 'error');
+    if (list) list.innerHTML = '';
+  }
+}
+
+function renderProfileFactProposals(data) {
+  var list = document.getElementById('profile-proposal-list');
+  if (!list) return;
+  var proposals = profileFactProposals || [];
+  var rejected = Array.isArray(data && data.rejected) ? data.rejected : [];
+  if (!proposals.length) {
+    setProfileProposalMessage(
+      rejected.length ? '没有可用候选，已拒绝 ' + rejected.length + ' 条。' : '没有生成候选。',
+      rejected.length ? 'error' : ''
+    );
+    list.innerHTML = '';
+    return;
+  }
+  setProfileProposalMessage('生成 ' + proposals.length + ' 条候选。', 'ok');
+  list.innerHTML = proposals.map(function(item, index) {
+    var meta = [
+      item.profile_kind || 'other',
+      item.subject || 'user',
+      item.predicate || 'related_to',
+      'confidence ' + Number(item.confidence || 0).toFixed(2)
+    ].join(' · ');
+    return '<div class="profile-proposal-card">' +
+      '<strong>' + esc(item.fact || '') + '</strong>' +
+      '<div>' + esc(meta) + '</div>' +
+      '<div>object: ' + esc(item.object || '—') + '</div>' +
+      '<div>evidence: ' + esc(item.evidence_bucket_id || '') + (item.evidence_moment_id ? ' · ' + esc(item.evidence_moment_id) : '') + '</div>' +
+      '<div>reason: ' + esc(item.reason || '—') + '</div>' +
+      '<div style="margin-top:8px;"><button type="button" onclick="confirmProfileFactProposal(' + index + ')">确认写入</button></div>' +
+    '</div>';
+  }).join('');
+}
+
+async function confirmProfileFactProposal(index) {
+  var proposal = profileFactProposals[index];
+  if (!proposal) return;
+  if (!confirm('确认写入画像事实？\n\n' + proposal.fact)) return;
+  setProfileProposalMessage('写入中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/profile-fact-proposals/confirm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(proposal)
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '写入失败');
+    var successMessage = '已写入画像事实 ' + (data.id || '');
+    profileFactProposals.splice(index, 1);
+    renderProfileFactProposals({ proposals: profileFactProposals, rejected: [] });
+    setProfileProposalMessage(successMessage, 'ok');
+    await loadProfileFacts();
+    await loadBuckets();
+  } catch (e) {
+    setProfileProposalMessage('写入失败: ' + e.message, 'error');
+  }
+}
+
+function setAnchorProposalMessage(message, tone) {
+  var el = document.getElementById('anchor-proposal-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+async function generateAnchorProposals() {
+  var bucketInput = document.getElementById('anchor-proposal-bucket-id');
+  var bucketId = (bucketInput && bucketInput.value || '').trim();
+  if (!bucketId) {
+    setAnchorProposalMessage('先填 bucket id。', 'error');
+    return;
+  }
+  setAnchorProposalMessage('生成中…', '');
+  var list = document.getElementById('anchor-proposal-list');
+  if (list) list.innerHTML = '';
+  try {
+    var res = await authFetch(BASE + '/api/anchor-proposals', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ bucket_id: bucketId })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '生成失败');
+    anchorProposals = Array.isArray(data.proposals) ? data.proposals : [];
+    renderAnchorProposals(data);
+  } catch (e) {
+    anchorProposals = [];
+    setAnchorProposalMessage('生成失败: ' + e.message, 'error');
+    if (list) list.innerHTML = '';
+  }
+}
+
+function renderAnchorProposals(data) {
+  var list = document.getElementById('anchor-proposal-list');
+  if (!list) return;
+  var proposals = anchorProposals || [];
+  var rejected = Array.isArray(data && data.rejected) ? data.rejected : [];
+  var bucket = data && data.bucket ? data.bucket : {};
+  if (!proposals.length) {
+    setAnchorProposalMessage(
+      rejected.length ? '没有可用候选：' + (rejected[0].reason || '已拒绝') : '没有生成候选。',
+      rejected.length ? 'error' : ''
+    );
+    list.innerHTML = '';
+    return;
+  }
+  setAnchorProposalMessage('生成 ' + proposals.length + ' 条 Anchor 候选。', 'ok');
+  list.innerHTML = proposals.map(function(item, index) {
+    var meta = [
+      item.anchor_kind || 'other',
+      'confidence ' + Number(item.confidence || 0).toFixed(2),
+      bucket.name || item.bucket_id || ''
+    ].filter(Boolean).join(' · ');
+    return '<div class="profile-proposal-card">' +
+      '<strong>' + esc(bucket.name || item.bucket_id || '') + '</strong>' +
+      '<div>' + esc(meta) + '</div>' +
+      '<div>bucket: ' + esc(item.bucket_id || '') + '</div>' +
+      '<div>reason: ' + esc(item.reason || '—') + '</div>' +
+      '<div>future: ' + esc(item.future_use || '—') + '</div>' +
+      '<div style="margin-top:8px;"><button type="button" onclick="confirmAnchorProposal(' + index + ')">确认标为 Anchor</button></div>' +
+    '</div>';
+  }).join('');
+}
+
+async function confirmAnchorProposal(index) {
+  var proposal = anchorProposals[index];
+  if (!proposal) return;
+  if (!confirm('确认标为 Anchor？\n\n' + proposal.bucket_id)) return;
+  setAnchorProposalMessage('写入中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/anchor-proposals/confirm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(proposal)
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '写入失败');
+    var successMessage = data.status === 'already_anchor' ? '已经是 Anchor。' : '已标为 Anchor ' + (data.id || '');
+    anchorProposals.splice(index, 1);
+    renderAnchorProposals({ proposals: anchorProposals, rejected: [] });
+    setAnchorProposalMessage(successMessage, 'ok');
+    await loadBuckets();
+  } catch (e) {
+    setAnchorProposalMessage('写入失败: ' + e.message, 'error');
+  }
+}
+
+function renderProfileFacts() {
+  var list = document.getElementById('profile-facts-list');
+  var summary = document.getElementById('profile-summary');
+  if (!list || !summary) return;
+  var activeCount = profileFacts.filter(function(fact) { return fact.active; }).length;
+  var deprecatedCount = profileFacts.filter(function(fact) { return fact.deprecated; }).length;
+  summary.textContent = profileFacts.length + ' 条画像事实 · ' + activeCount + ' active · ' + deprecatedCount + ' deprecated';
+  if (!profileFacts.length) {
+    list.innerHTML = '<div class="loading">还没有画像事实。</div>';
+    return;
+  }
+  list.innerHTML = profileFacts.map(renderProfileFactCard).join('');
+}
+
+function profileFactById(id) {
+  id = String(id || '');
+  return profileFacts.find(function(fact) { return String(fact.id || '') === id; });
+}
+
+function profileFactStatus(fact) {
+  if (fact.deprecated || fact.state === 'deprecated') return { text: 'deprecated', cls: 'deprecated' };
+  if (fact.active || fact.state === 'active') return { text: 'active', cls: 'active' };
+  return { text: fact.state || 'inactive', cls: '' };
+}
+
+function renderProfileFactCard(fact) {
+  var id = String(fact.id || '');
+  var status = profileFactStatus(fact);
+  var conf = fact.confidence == null ? '—' : Number(fact.confidence).toFixed(2);
+  var evidence = Array.isArray(fact.evidence) ? fact.evidence : [];
+  var confirmButton = status.cls === 'active'
+    ? ''
+    : '<button type="button" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'confirm\')">确认</button>';
+  var evidenceHtml = evidence.length
+    ? evidence.map(function(item) {
+        var bucketId = String(item.bucket_id || '');
+        var label = (item.name || bucketId) + (item.moment_id ? ' · ' + item.moment_id : '');
+        var openButton = bucketId
+          ? '<button type="button" onclick="showDetail(\'' + jsString(bucketId) + '\')">打开证据</button>'
+          : '';
+        return '<div>' + esc(label) + ' ' + openButton + '</div>';
+      }).join('')
+    : '<div>未记录证据。</div>';
+  return '<article class="profile-card ' + escAttr(status.cls) + '">' +
+    '<div class="profile-head">' +
+      '<div>' +
+        '<div class="profile-fact-text">' + esc(fact.fact || '') + '</div>' +
+        '<div class="profile-chip-row">' +
+          '<span class="profile-chip ' + escAttr(status.cls) + '">' + esc(status.text) + '</span>' +
+          '<span class="profile-chip">' + esc(fact.kind || 'unknown') + '</span>' +
+          '<span class="profile-chip">confidence ' + esc(conf) + '</span>' +
+          '<span class="profile-chip">' + esc(fact.source || 'profile_fact') + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="profile-actions">' +
+        confirmButton +
+        '<button type="button" onclick="editProfileFact(\'' + jsString(id) + '\')">编辑</button>' +
+        '<button type="button" class="danger" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'deprecate\')">废弃</button>' +
+        '<button type="button" onclick="showDetail(\'' + jsString(id) + '\')">打开</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="profile-meta-grid">' +
+      '<div><label>subject</label>' + esc(fact.subject || '—') + '</div>' +
+      '<div><label>predicate</label>' + esc(fact.predicate || '—') + '</div>' +
+      '<div><label>object</label>' + esc(fact.object || '—') + '</div>' +
+      '<div><label>updated</label>' + esc(fact.updated_at || fact.last_active || fact.created || '—') + '</div>' +
+      '<div><label>bucket</label>' + esc(id) + '</div>' +
+      '<div><label>tags</label>' + esc((fact.tags || []).join(', ') || '—') + '</div>' +
+    '</div>' +
+    '<div class="profile-evidence">' + evidenceHtml + '</div>' +
+  '</article>';
+}
+
+async function runProfileFactAction(id, action, payload) {
+  payload = Object.assign({ action: action }, payload || {});
+  try {
+    var res = await authFetch(BASE + '/api/profile-facts/' + encodeURIComponent(id), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '操作失败');
+    await loadProfileFacts();
+    await loadBuckets();
+  } catch (e) {
+    alert('画像事实操作失败: ' + e.message);
+  }
+}
+
+function editProfileFact(id) {
+  var fact = profileFactById(id);
+  if (!fact) return;
+  var nextFact = prompt('编辑画像事实', fact.fact || '');
+  if (nextFact == null) return;
+  nextFact = nextFact.trim();
+  if (!nextFact) return;
+  var nextKind = prompt('kind', fact.kind || 'preference');
+  if (nextKind == null) return;
+  var nextSubject = prompt('subject', fact.subject || 'user');
+  if (nextSubject == null) return;
+  var nextPredicate = prompt('predicate', fact.predicate || '');
+  if (nextPredicate == null) return;
+  var nextObject = prompt('object', fact.object || '');
+  if (nextObject == null) return;
+  var currentConfidence = fact.confidence == null ? '0.9' : String(fact.confidence);
+  var nextConfidence = prompt('confidence 0~1', currentConfidence);
+  if (nextConfidence == null) return;
+  var sections = fact.sections || {};
+  runProfileFactAction(id, 'edit', {
+    fact: nextFact,
+    profile_kind: nextKind,
+    subject: nextSubject,
+    predicate: nextPredicate,
+    object: nextObject,
+    confidence: Number(nextConfidence),
+    evidence_context: sections.evidence_context || '',
+    reflection: sections.reflection || '',
+    followup: sections.followup || ''
+  });
+}
+
+function setWordMapMessage(message, tone) {
+  var el = document.getElementById('word-map-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+async function loadWordMap() {
+  var summary = document.getElementById('word-map-summary');
+  var nodes = document.getElementById('word-map-nodes');
+  var edges = document.getElementById('word-map-edges');
+  var aliases = document.getElementById('identity-aliases');
+  var boundary = document.getElementById('word-map-boundary');
+  if (!summary || !nodes || !edges || !aliases || !boundary) return;
+  summary.textContent = '读取中…';
+  nodes.innerHTML = '<div class="loading">加载中…</div>';
+  edges.innerHTML = '<div class="loading">加载中…</div>';
+  aliases.innerHTML = '<div class="loading">加载中…</div>';
+  boundary.innerHTML = '<div class="loading">加载中…</div>';
+  setWordMapMessage('', '');
+  try {
+    var wordRes = await authFetch(BASE + '/api/word-map?nodes=20&edges=20');
+    if (!wordRes) return;
+    var word = await wordRes.json().catch(function() { return {}; });
+    if (!wordRes.ok) throw new Error(word.error || 'Word Map 读取失败');
+    var identityRes = await authFetch(BASE + '/api/identity-semantics?limit=50');
+    if (!identityRes) return;
+    var identity = await identityRes.json().catch(function() { return {}; });
+    if (!identityRes.ok) throw new Error(identity.error || 'Identity 读取失败');
+    wordMapData = word;
+    identitySemanticData = identity;
+    renderWordMap();
+  } catch (e) {
+    summary.textContent = '读取失败';
+    nodes.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+    edges.innerHTML = '';
+    aliases.innerHTML = '';
+    boundary.innerHTML = '';
+    setWordMapMessage('读取失败: ' + e.message, 'error');
+  }
+}
+
+async function rebuildWordMap() {
+  setWordMapMessage('重建 Word Map 中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/word-map/rebuild', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ include_archive: false, nodes: 20, edges: 20 })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '重建失败');
+    wordMapData = data;
+    setWordMapMessage('Word Map 已重建：' + formatWordMapStats(data.stats), 'ok');
+    await loadWordMap();
+  } catch (e) {
+    setWordMapMessage('重建失败: ' + e.message, 'error');
+  }
+}
+
+async function rebuildIdentitySemantics() {
+  setWordMapMessage('重建 private alias 中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/identity-semantics/rebuild', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ include_archive: false, limit: 50 })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '重建失败');
+    identitySemanticData = data;
+    setWordMapMessage('Private alias 已重建：' + formatIdentityStats(data.stats), 'ok');
+    await loadWordMap();
+  } catch (e) {
+    setWordMapMessage('重建失败: ' + e.message, 'error');
+  }
+}
+
+function formatWordMapStats(stats) {
+  stats = stats || {};
+  return (stats.nodes || 0) + ' nodes · ' + (stats.card_nodes || 0) + ' card links · ' + (stats.edge_evidence || 0) + ' edge evidence';
+}
+
+function formatIdentityStats(stats) {
+  stats = stats || {};
+  return (stats.canonical || 0) + ' canonical · ' + (stats.aliases || 0) + ' aliases · ' + (stats.evidence || 0) + ' evidence';
+}
+
+function renderWordMap() {
+  var word = wordMapData || {};
+  var identity = identitySemanticData || {};
+  var stats = word.stats || {};
+  var identityStats = identity.stats || {};
+  var privateTerms = Array.isArray(word.private_terms_excluded) ? word.private_terms_excluded : [];
+  var summary = document.getElementById('word-map-summary');
+  if (summary) {
+    summary.textContent = [
+      'Word Map ' + formatWordMapStats(stats),
+      'Private Alias ' + formatIdentityStats(identityStats),
+      identity.enabled ? 'private config enabled' : 'private config disabled'
+    ].join(' · ');
+  }
+  renderWordMapNodes(word.nodes || []);
+  renderWordMapEdges(word.edges || []);
+  renderIdentityAliases(identity.aliases || []);
+  renderWordMapBoundary(privateTerms, identity);
+}
+
+function renderWordMapNodes(nodes) {
+  var el = document.getElementById('word-map-nodes');
+  if (!el) return;
+  if (!nodes.length) {
+    el.innerHTML = '<div class="loading">还没有节点；先点重建 Word Map。</div>';
+    return;
+  }
+  el.innerHTML = nodes.map(function(node) {
+    return '<div class="word-map-card">' +
+      '<strong>' + esc(node.term || '') + '</strong>' +
+      '<div>' + esc(node.kind || 'keyword') + ' · buckets ' + esc(node.bucket_count || 0) + ' · weight ' + esc(Number(node.weight || 0).toFixed(2)) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderWordMapEdges(edges) {
+  var el = document.getElementById('word-map-edges');
+  if (!el) return;
+  if (!edges.length) {
+    el.innerHTML = '<div class="loading">还没有共现边。</div>';
+    return;
+  }
+  el.innerHTML = edges.map(function(edge) {
+    return '<div class="word-map-card">' +
+      '<strong>' + esc(edge.term_a || '') + ' ↔ ' + esc(edge.term_b || '') + '</strong>' +
+      '<div>buckets ' + esc(edge.bucket_count || 0) + ' · weight ' + esc(Number(edge.weight || 0).toFixed(2)) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderIdentityAliases(aliases) {
+  var el = document.getElementById('identity-aliases');
+  if (!el) return;
+  if (!aliases.length) {
+    el.innerHTML = '<div class="loading">没有 private alias。未配置私有 canonical 时这里会保持为空。</div>';
+    return;
+  }
+  el.innerHTML = aliases.map(function(item) {
+    var evidence = Array.isArray(item.evidence_bucket_ids) ? item.evidence_bucket_ids.join(', ') : '';
+    return '<div class="word-map-card">' +
+      '<strong>' + esc(item.alias || '') + '</strong>' +
+      '<div>' + esc(item.canonical || '') + '</div>' +
+      '<div>' + esc(item.scope || '') + ' · confidence ' + esc(Number(item.confidence || 0).toFixed(2)) + '</div>' +
+      '<div>evidence: ' + esc(evidence || '—') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderWordMapBoundary(privateTerms, identity) {
+  var el = document.getElementById('word-map-boundary');
+  if (!el) return;
+  var identityEnabled = identity && identity.enabled;
+  var privateText = privateTerms.length ? privateTerms.join(', ') : '无';
+  el.innerHTML =
+    '<div class="word-map-card"><strong>Generic Word Map</strong><div>从 subject / keywords / tags / TF-IDF 派生，只存词与 bucket 的共现证据。</div></div>' +
+    '<div class="word-map-card"><strong>Private Scope</strong><div>私有 alias 不进入通用词图；当前排除词：' + esc(privateText) + '</div></div>' +
+    '<div class="word-map-card"><strong>Gateway</strong><div>当前页面不会改变 Gateway 注入；这里只是诊断和手动索引。</div></div>' +
+    '<div class="word-map-card"><strong>Identity</strong><div>' + esc(identityEnabled ? 'private canonical 已启用。' : '未配置私有 canonical，alias 索引保持关闭。') + '</div></div>';
+}
+
 function updateStats() {
   const total = allBuckets.length;
   const pinned = allBuckets.filter(b => b.pinned).length;
@@ -1932,18 +3958,166 @@ function filterBuckets(buckets) {
   return buckets;
 }
 
+function bucketBulkDeleteBlockReason(bucket) {
+  if (bucket.protected) return 'protected';
+  if (bucket.pinned) return 'pinned';
+  if (bucket.anchor) return 'anchor';
+  if (bucket.type === 'permanent') return 'permanent';
+  return '';
+}
+
+function bucketBulkReasonText(reason) {
+  if (reason === 'protected') return '受保护记忆不能批量删除';
+  if (reason === 'pinned') return '钉选记忆不能批量删除';
+  if (reason === 'anchor') return '长期锚点不能批量删除';
+  if (reason === 'permanent') return '永久记忆不能批量删除';
+  return '';
+}
+
+function bucketById(id) {
+  id = String(id || '');
+  return allBuckets.find(function(bucket) { return String(bucket.id || '') === id; });
+}
+
+function setBucketBulkMessage(message, tone) {
+  var el = document.getElementById('bucket-bulk-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+function updateBucketBulkToolbar() {
+  var toggle = document.getElementById('bucket-bulk-toggle');
+  var status = document.getElementById('bucket-bulk-status');
+  var toolbar = document.getElementById('bucket-bulk-toolbar');
+  if (!toggle || !status || !toolbar) return;
+  toggle.textContent = bucketBulkMode ? '退出批量' : '批量选择';
+  toolbar.querySelectorAll('.bulk-hidden').forEach(function(el) {
+    el.style.display = bucketBulkMode ? (el.tagName === 'SPAN' ? 'inline' : 'inline-flex') : 'none';
+  });
+  var selected = selectedBucketIds.size;
+  var selectable = renderedBuckets.filter(function(bucket) {
+    return !bucketBulkDeleteBlockReason(bucket);
+  }).length;
+  status.textContent = selected ? '已选 ' + selected + ' 个' : '未选择';
+  var selectBtn = toolbar.querySelector('[data-bulk-action="select-current"]');
+  var clearBtn = toolbar.querySelector('[data-bulk-action="clear"]');
+  var deleteBtn = toolbar.querySelector('[data-bulk-action="delete"]');
+  if (selectBtn) selectBtn.disabled = !selectable;
+  if (clearBtn) clearBtn.disabled = !selected;
+  if (deleteBtn) deleteBtn.disabled = !selected;
+}
+
+function toggleBucketBulkMode() {
+  bucketBulkMode = !bucketBulkMode;
+  if (!bucketBulkMode) {
+    selectedBucketIds.clear();
+    setBucketBulkMessage('');
+  }
+  renderBuckets(renderedBuckets.length ? renderedBuckets : filterBuckets(allBuckets));
+}
+
+function toggleBucketSelection(id) {
+  id = String(id || '');
+  var bucket = bucketById(id);
+  if (!bucket) return;
+  var reason = bucketBulkDeleteBlockReason(bucket);
+  if (reason) {
+    setBucketBulkMessage(bucketBulkReasonText(reason), 'error');
+    return;
+  }
+  if (selectedBucketIds.has(id)) selectedBucketIds.delete(id);
+  else selectedBucketIds.add(id);
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+function setBucketSelection(id, checked) {
+  id = String(id || '');
+  var bucket = bucketById(id);
+  if (!bucket || bucketBulkDeleteBlockReason(bucket)) return;
+  if (checked) selectedBucketIds.add(id);
+  else selectedBucketIds.delete(id);
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+function selectCurrentBuckets() {
+  var added = 0;
+  renderedBuckets.forEach(function(bucket) {
+    var id = String(bucket.id || '');
+    if (id && !bucketBulkDeleteBlockReason(bucket) && !selectedBucketIds.has(id)) {
+      selectedBucketIds.add(id);
+      added += 1;
+    }
+  });
+  setBucketBulkMessage(added ? '已选择当前筛选里的普通记忆桶。' : '当前筛选没有可批量删除的记忆桶。', added ? 'ok' : '');
+  renderBuckets(renderedBuckets);
+}
+
+function clearBucketSelection() {
+  selectedBucketIds.clear();
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+async function deleteSelectedBuckets() {
+  var ids = Array.from(selectedBucketIds);
+  if (!ids.length) return;
+  var selectedBuckets = ids.map(bucketById).filter(Boolean);
+  var names = selectedBuckets.slice(0, 5).map(function(bucket) {
+    return '· ' + (bucket.name || bucket.id);
+  }).join('\n');
+  var extra = ids.length > 5 ? '\n...' : '';
+  if (!confirm('准备删除 ' + ids.length + ' 个普通记忆桶：\n' + names + extra + '\n\n会写 tombstone 并清理索引。')) return;
+  var token = prompt('输入 DELETE 确认删除 ' + ids.length + ' 个记忆桶');
+  if (token !== 'DELETE') {
+    setBucketBulkMessage('已取消删除。', '');
+    return;
+  }
+  try {
+    var res = await authFetch(BASE + '/api/buckets/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ bucket_ids: ids, confirm: 'DELETE' })
+    });
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '删除失败');
+    selectedBucketIds.clear();
+    await loadBuckets();
+    setBucketBulkMessage('已删除 ' + data.deleted + ' 个，跳过 ' + data.skipped + ' 个，未找到 ' + data.not_found + ' 个。', data.deleted ? 'ok' : '');
+  } catch (e) {
+    setBucketBulkMessage('删除失败: ' + e.message, 'error');
+  }
+}
+
 function renderBuckets(buckets) {
   var list = document.getElementById('bucket-list');
+  renderedBuckets = (buckets || []).slice();
+  updateBucketBulkToolbar();
   if (!buckets.length) {
     list.innerHTML = '<div class="loading">没有记忆桶</div>';
     return;
   }
   list.innerHTML = buckets.map(function(b) {
+    var id = String(b.id || '');
     var icon = b.anchor ? '⚓' : b.pinned ? '📌' : b.type === 'feel' ? '🫧' : b.digested ? '🌿' : b.resolved ? '💤' : '💭';
     var vPos = Math.round(b.valence * 100);
     var modelV = b.model_valence != null ? ' → V' + b.model_valence.toFixed(1) : '';
     var timeAgo = formatTimeAgo(b.last_active || b.created);
-    return '<div class="bucket-row" onclick="showDetail(\'' + jsString(b.id) + '\')">' +
+    var blockReason = bucketBulkDeleteBlockReason(b);
+    var checked = selectedBucketIds.has(id);
+    var rowClass = 'bucket-row' + (bucketBulkMode ? ' bulk' : '') + (checked ? ' selected' : '');
+    var rowClick = bucketBulkMode ? 'toggleBucketSelection(\'' + jsString(id) + '\')' : 'showDetail(\'' + jsString(id) + '\')';
+    var selectHtml = bucketBulkMode
+      ? '<label class="bucket-select" title="' + escAttr(blockReason ? bucketBulkReasonText(blockReason) : '选择') + '" onclick="event.stopPropagation()">' +
+          '<input type="checkbox" ' + (checked ? 'checked ' : '') + (blockReason ? 'disabled ' : '') + 'onchange="setBucketSelection(\'' + jsString(id) + '\', this.checked)" />' +
+        '</label>'
+      : '';
+    return '<div class="' + rowClass + '" onclick="' + rowClick + '">' +
+      selectHtml +
       '<span class="icon">' + icon + '</span>' +
       '<span class="name" title="' + esc(b.name) + '">' + esc(b.name) + '</span>' +
       '<span class="domain">' + esc((b.domain || []).join(', ')) + '</span>' +
@@ -1978,31 +4152,9 @@ async function showDetail(id) {
     var b = await res.json();
     var meta = b.metadata || {};
     var comments = Array.isArray(meta.comments) ? meta.comments : [];
-    var bucketType = meta.type || b.type || 'dynamic';
-    var isArchived = bucketType === 'archived';
-    var archiveButtonHtml =
-      '<button id="bucket-content-archive-button" type="button" class="detail-archive-button' + (isArchived ? ' hidden' : '') + '"' + (isArchived ? ' data-archived="1"' : '') + ' onclick="archiveBucket(\'' + jsString(id) + '\')" aria-label="归档 bucket" title="归档 bucket">' +
-        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
-          '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.25">' +
-            '<path d="M4.75 4.25h14.5a1 1 0 0 1 1 1v3h-16.5v-3a1 1 0 0 1 1-1Z"/>' +
-            '<path d="M5.5 8.25v10.25A1.5 1.5 0 0 0 7 20h10a1.5 1.5 0 0 0 1.5-1.5V8.25"/>' +
-            '<path d="M9.25 12h5.5"/>' +
-            '<path d="M10 15.25h4"/>' +
-          '</g>' +
-        '</svg>' +
-      '</button>';
-    var deleteButtonHtml =
-      '<button id="bucket-content-delete-button" type="button" class="detail-delete-button" onclick="deleteBucket(\'' + jsString(id) + '\')" aria-label="删除 bucket" title="删除 bucket">' +
-        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
-          '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.25">' +
-            '<path d="M5.47 6.015v12.514a2.72 2.72 0 0 0 2.721 2.721h7.618a2.72 2.72 0 0 0 2.72-2.72V6.014m-15.235.001h17.412"/>' +
-            '<path d="M8.735 6.015V4.382a1.632 1.632 0 0 1 1.633-1.632h3.264a1.632 1.632 0 0 1 1.633 1.632v1.633M9.824 16.992v-5.439m4.353 5.439v-5.439"/>' +
-          '</g>' +
-        '</svg>' +
-      '</button>';
     var commentsHtml = comments.length
       ? '<div class="detail-comments"><h3>年轮</h3>' + comments.map(function(c) {
-          var canDelete = c && c.id;
+          var canDelete = c && c.id && c.author === dashboardCommentAuthor && c.source === 'dashboard';
           var commentTime = c.original_feel_created || c.created || '';
           var safeBucketId = jsString(id);
           var safeCommentId = jsString(c.id);
@@ -2022,7 +4174,15 @@ async function showDetail(id) {
       '</form>';
     content.innerHTML =
       '<div class="detail-title-row">' +
-        '<h2>' + esc(meta.name || id) + '</h2>' +
+        '<h2 id="bucket-title-view">' + esc(meta.name || id) + '</h2>' +
+        '<button id="bucket-title-edit-button" type="button" class="detail-edit-button" onclick="startBucketTitleEdit()" aria-label="编辑标题" title="编辑标题">✎</button>' +
+        '<form id="bucket-title-edit" class="title-edit-form hidden" onsubmit="submitBucketTitleEdit(event, \'' + jsString(id) + '\')">' +
+          '<input name="title" type="text" value="' + escAttr(meta.name || '') + '" maxlength="40" placeholder="标题" />' +
+          '<div class="content-edit-actions">' +
+            '<button type="button" class="secondary" onclick="cancelBucketTitleEdit()">取消</button>' +
+            '<button type="submit">保存</button>' +
+          '</div>' +
+        '</form>' +
       '</div>' +
       '<div class="detail-meta">' +
         '<div class="field"><label>ID</label>' + esc(id) + '</div>' +
@@ -2046,11 +4206,7 @@ async function showDetail(id) {
         '<div class="field"><label>最后活跃</label>' + esc(meta.last_active || '—') + '</div>' +
       '</div>' +
       '<div class="bucket-content-block">' +
-        '<div class="bucket-content-actions">' +
-          deleteButtonHtml +
-          archiveButtonHtml +
-          '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + jsString(id) + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
-        '</div>' +
+        '<button id="bucket-content-edit-button" type="button" class="detail-edit-button" onclick="startBucketContentEdit(\'' + jsString(id) + '\')" aria-label="编辑正文" title="编辑正文">✎</button>' +
         '<div id="bucket-content-view" class="detail-content">' + esc(b.content || '') + '</div>' +
         '<form id="bucket-content-edit" class="content-edit-form hidden" onsubmit="submitBucketContentEdit(event, \'' + jsString(id) + '\')">' +
           '<textarea name="content">' + esc(b.content || '') + '</textarea>' +
@@ -2060,10 +4216,176 @@ async function showDetail(id) {
           '</div>' +
         '</form>' +
       '</div>' +
+      '<div id="bucket-moments-block" class="detail-moments" data-bucket-id="' + escAttr(id) + '">' +
+        '<h3>Moments</h3>' +
+        '<div class="loading">解析 moments…</div>' +
+      '</div>' +
       commentsHtml +
       commentFormHtml;
+    loadBucketMoments(id);
   } catch (e) {
     content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function loadBucketMoments(bucketId) {
+  var block = document.getElementById('bucket-moments-block');
+  if (!block) return;
+  try {
+    var res = await authFetch(BASE + '/api/moments?bucket_id=' + encodeURIComponent(bucketId) + '&limit=40');
+    if (!res) return;
+    var data = await res.json();
+    if (!block || block.getAttribute('data-bucket-id') !== bucketId) return;
+    block.innerHTML = renderBucketMoments(data);
+  } catch (e) {
+    if (block && block.getAttribute('data-bucket-id') === bucketId) {
+      block.innerHTML = '<h3>Moments</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
+    }
+  }
+}
+
+function renderBucketMoments(data) {
+  if (!data || data.status !== 'ok') {
+    return '<h3>Moments</h3><div class="loading">无 moment 诊断数据</div>';
+  }
+  var layer = data.bucket_layer_debug || {};
+  var moments = Array.isArray(data.moments) ? data.moments : [];
+  var edges = Array.isArray(data.edges) ? data.edges : [];
+  var chips = [
+    { text: 'bucket layer ' + (layer.layer || 'unknown') },
+    { text: 'direct ' + (layer.can_direct_seed ? 'yes' : 'no'), state: layer.can_direct_seed ? 'allow' : 'block' },
+    { text: 'diffuse ' + (layer.can_diffuse ? 'yes' : 'no'), state: layer.can_diffuse ? 'allow' : 'block' },
+    { text: 'related ' + (layer.can_related_target ? 'yes' : 'no'), state: layer.can_related_target ? 'allow' : 'block' },
+    { text: moments.length + ' moments' },
+  ];
+  if (data.edge_count != null) chips.push({ text: data.edge_count + ' edges' });
+  var body = moments.length
+    ? '<div class="moment-list">' + moments.map(renderMomentItem).join('') + '</div>'
+    : '<div class="loading">这条 bucket 暂时没有拆出 moment。</div>';
+  return '<h3>Moments</h3>' + renderMomentChips(chips) + body + renderMomentEdges(edges);
+}
+
+function renderMomentItem(moment, index) {
+  var m = moment || {};
+  var layer = m.layer_debug || {};
+  var gate = m.runtime_gate || {};
+  var direct = gate.direct_seed || {};
+  var related = gate.related_target || {};
+  var recall = gate.recall_context || {};
+  var chips = [
+    { text: 'layer ' + (layer.layer || gate.layer || 'unknown') },
+    { text: 'section ' + (m.section || 'moment') },
+    { text: 'direct ' + (direct.allowed ? 'yes' : 'no') + (direct.reason ? ' · ' + direct.reason : ''), state: direct.allowed ? 'allow' : 'block' },
+    { text: 'related ' + (related.allowed ? 'yes' : 'no') + (related.reason ? ' · ' + related.reason : ''), state: related.allowed ? 'allow' : 'block' },
+    { text: 'context ' + (recall.allowed ? 'yes' : 'no'), state: recall.allowed ? 'allow' : 'block' },
+  ];
+  if (layer.context_only) chips.push({ text: 'context-only', state: 'block' });
+  var source = formatMomentSource(m.metadata && m.metadata.source_ref);
+  var text = m.text || m.text_preview || '';
+  var sourceWindow = m.source_window
+    ? '<div class="moment-source-window"><div class="moment-source-window-title">原文窗口</div><pre>' + esc(m.source_window) + '</pre></div>'
+    : '';
+  return '<div class="moment-item">' +
+    '<div class="moment-head">' +
+      '<div class="moment-title">#' + (index + 1) + ' ' + esc(m.moment_id || '') + '</div>' +
+      (source ? '<div class="moment-source">' + esc(source) + '</div>' : '') +
+    '</div>' +
+    renderMomentChips(chips) +
+    '<div class="moment-body">' + esc(text) + '</div>' +
+    sourceWindow +
+  '</div>';
+}
+
+function renderMomentChips(chips) {
+  return '<div class="moment-summary">' + chips.map(function(chip) {
+    return '<span class="score-chip ' + (chip.state || '') + '">' + esc(chip.text) + '</span>';
+  }).join('') + '</div>';
+}
+
+function renderMomentEdges(edges) {
+  if (!edges.length) {
+    return '<div class="moment-edge-list"><div class="moment-edge-title">Moment Edges</div><div class="loading">无 edge</div></div>';
+  }
+  return '<div class="moment-edge-list">' +
+    '<div class="moment-edge-title">Moment Edges</div>' +
+    edges.map(renderMomentEdge).join('') +
+  '</div>';
+}
+
+function renderMomentEdge(edge) {
+  var e = edge || {};
+  var chips = [
+    { text: e.relation_type || 'relates_to' },
+  ];
+  if (e.confidence != null) chips.push({ text: 'confidence ' + Number(e.confidence).toFixed(2) });
+  if (e.reason) chips.push({ text: String(e.reason).slice(0, 80) });
+  var line = (e.source || 'unknown') + ' → ' + (e.target || 'unknown');
+  return '<div class="moment-item">' +
+    '<div class="moment-head">' +
+      '<div class="moment-title">' + esc(line) + '</div>' +
+      '<div class="moment-source">' + esc(e.created_at || '') + '</div>' +
+    '</div>' +
+    renderMomentChips(chips) +
+  '</div>';
+}
+
+function formatMomentSource(ref) {
+  if (!ref || typeof ref !== 'object') return '';
+  var path = ref.path ? String(ref.path).split(/[\\/]/).pop() : '';
+  var source = ref.source || 'bucket_content';
+  var start = ref.start_line || ref.content_start_line || '';
+  var end = ref.end_line || '';
+  var line = start ? ':' + start + (end && end !== start ? '-' + end : '') : '';
+  return (path ? path + ' · ' : '') + source + line;
+}
+
+function startBucketTitleEdit() {
+  var view = document.getElementById('bucket-title-view');
+  var form = document.getElementById('bucket-title-edit');
+  var editButton = document.getElementById('bucket-title-edit-button');
+  if (!view || !form) return;
+  view.classList.add('hidden');
+  form.classList.remove('hidden');
+  if (editButton) editButton.classList.add('hidden');
+  var input = form.querySelector('input[name="title"]');
+  if (input) { input.focus(); input.select(); }
+}
+
+function cancelBucketTitleEdit() {
+  var view = document.getElementById('bucket-title-view');
+  var form = document.getElementById('bucket-title-edit');
+  var editButton = document.getElementById('bucket-title-edit-button');
+  if (!view || !form) return;
+  form.classList.add('hidden');
+  view.classList.remove('hidden');
+  if (editButton) editButton.classList.remove('hidden');
+}
+
+async function submitBucketTitleEdit(event, bucketId) {
+  event.preventDefault();
+  var form = event.target;
+  var input = form.querySelector('input[name="title"]');
+  var newName = (input.value || '').trim();
+  var button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  button.textContent = '保存中…';
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: newName})
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '保存失败');
+    }
+    await showDetail(bucketId);
+    await loadBuckets();
+  } catch (e) {
+    alert('保存标题失败: ' + e.message);
+    button.disabled = false;
+    button.textContent = '保存';
   }
 }
 
@@ -2071,14 +4393,10 @@ function startBucketContentEdit(bucketId) {
   var view = document.getElementById('bucket-content-view');
   var form = document.getElementById('bucket-content-edit');
   var editButton = document.getElementById('bucket-content-edit-button');
-  var archiveButton = document.getElementById('bucket-content-archive-button');
-  var deleteButton = document.getElementById('bucket-content-delete-button');
   if (!view || !form) return;
   view.classList.add('hidden');
   form.classList.remove('hidden');
   if (editButton) editButton.classList.add('hidden');
-  if (archiveButton) archiveButton.classList.add('hidden');
-  if (deleteButton) deleteButton.classList.add('hidden');
   var textarea = form.querySelector('textarea[name="content"]');
   if (textarea) {
     textarea.focus();
@@ -2091,57 +4409,10 @@ function cancelBucketContentEdit() {
   var view = document.getElementById('bucket-content-view');
   var form = document.getElementById('bucket-content-edit');
   var editButton = document.getElementById('bucket-content-edit-button');
-  var archiveButton = document.getElementById('bucket-content-archive-button');
-  var deleteButton = document.getElementById('bucket-content-delete-button');
   if (!view || !form) return;
   form.classList.add('hidden');
   view.classList.remove('hidden');
   if (editButton) editButton.classList.remove('hidden');
-  if (archiveButton && !archiveButton.dataset.archived) archiveButton.classList.remove('hidden');
-  if (deleteButton) deleteButton.classList.remove('hidden');
-}
-
-async function archiveBucket(bucketId) {
-  if (!confirm('确定归档这个 bucket 吗？它不会被删除，只会移入 archived。')) return;
-  var button = document.getElementById('bucket-content-archive-button');
-  if (button) button.disabled = true;
-  try {
-    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId) + '/archive', {
-      method: 'POST'
-    });
-    if (!res) return;
-    if (!res.ok) {
-      var data = await res.json().catch(() => ({}));
-      throw new Error(data.error || '归档失败');
-    }
-    await loadBuckets();
-    await showDetail(bucketId);
-  } catch (e) {
-    alert('归档失败: ' + e.message);
-    if (button) button.disabled = false;
-  }
-}
-
-async function deleteBucket(bucketId) {
-  if (!confirm('确定要删除这个 bucket 吗？这会真正删除这条记忆。')) return;
-  if (!confirm('二次确认：删除后不能从 dashboard 恢复。继续删除？')) return;
-  var button = document.getElementById('bucket-content-delete-button');
-  if (button) button.disabled = true;
-  try {
-    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId), {
-      method: 'DELETE'
-    });
-    if (!res) return;
-    if (!res.ok) {
-      var data = await res.json().catch(() => ({}));
-      throw new Error(data.error || '删除失败');
-    }
-    await loadBuckets();
-    closeDetail();
-  } catch (e) {
-    alert('删除失败: ' + e.message);
-    if (button) button.disabled = false;
-  }
 }
 
 async function submitBucketContentEdit(event, bucketId) {
@@ -2216,7 +4487,6 @@ async function submitBucketComment(event, bucketId) {
 }
 
 async function deleteBucketComment(bucketId, commentId) {
-  if (!confirm('确定删除这条年轮吗？此操作不会删除 bucket 正文。')) return;
   try {
     var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId) + '/comments/' + encodeURIComponent(commentId), {
       method: 'DELETE'
@@ -2238,530 +4508,455 @@ function closeDetail() {
 }
 
 var networkData = null;
+var NETWORK_NODE_RADIUS = 6;
 var networkState = {
   canvas: null,
   ctx: null,
   width: 0,
   height: 0,
-  data: { nodes: [], edges: [] },
+  data: null,
   positions: {},
   edgeMap: {},
-  nodeMap: {},
   view: { x: 0, y: 0 },
-  scale: 1,
   drag: null,
-  hoverId: null,
-  selectedId: null,
-  animationFrame: null,
-  popover: null
+  linkedMotion: {},
+  selectedId: '',
+  animationFrame: 0,
+  popoverToken: 0,
 };
 
 async function loadNetwork() {
   var canvas = document.getElementById('network-canvas');
   var ctx = canvas.getContext('2d');
-  networkState.canvas = canvas;
-  networkState.ctx = ctx;
-  networkState.popover = document.getElementById('network-popover');
-  bindNetworkCanvas(canvas);
+  var dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(canvas.offsetWidth * dpr));
+  canvas.height = Math.max(1, Math.floor(canvas.offsetHeight * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  var W = canvas.offsetWidth, H = canvas.offsetHeight;
+
   stopNetworkAnimation();
   hideNetworkPopover();
-  resizeNetworkCanvas();
-  drawNetworkMessage('加载记忆网络…');
+  ctx.fillStyle = '#FDFCF0';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#8A8070';
+  ctx.font = '14px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('加载记忆网络…', W/2, H/2);
 
   try {
     var res = await authFetch(BASE + '/api/network');
     if (!res) return;
     networkData = await res.json();
-    initNetworkState(networkData);
-    scheduleNetworkDraw();
+    initNetworkCanvas(canvas, ctx, W, H, networkData);
   } catch(e) {
-    drawNetworkMessage('加载失败: ' + e.message);
+    ctx.fillText('加载失败: ' + e.message, W/2, H/2 + 24);
   }
 }
 
-function bindNetworkCanvas(canvas) {
-  if (canvas.dataset.networkBound === '1') return;
-  canvas.dataset.networkBound = '1';
-  canvas.addEventListener('pointerdown', onNetworkPointerDown);
-  canvas.addEventListener('pointermove', onNetworkPointerMove);
-  canvas.addEventListener('pointerup', onNetworkPointerUp);
-  canvas.addEventListener('pointercancel', onNetworkPointerCancel);
-  canvas.addEventListener('pointerleave', function(event) {
-    if (!networkState.drag) {
-      networkState.hoverId = null;
-      updateNetworkCursor();
-    }
-  });
-  window.addEventListener('resize', function() {
-    if (!networkState.canvas || getActiveTab() !== 'network') return;
-    resizeNetworkCanvas();
-    clampNetworkView();
-    hideNetworkPopover();
-    scheduleNetworkDraw();
-  });
-}
-
-function resizeNetworkCanvas() {
-  var canvas = networkState.canvas;
-  if (!canvas) return;
-  var ratio = window.devicePixelRatio || 1;
-  networkState.width = canvas.offsetWidth;
-  networkState.height = canvas.offsetHeight;
-  canvas.width = Math.max(1, Math.floor(networkState.width * ratio));
-  canvas.height = Math.max(1, Math.floor(networkState.height * ratio));
-  networkState.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-}
-
-function drawNetworkMessage(message) {
-  var ctx = networkState.ctx;
-  if (!ctx) return;
-  ctx.fillStyle = '#FDFCF0';
-  ctx.fillRect(0, 0, networkState.width, networkState.height);
-  ctx.fillStyle = '#8A8070';
-  ctx.font = '14px Inter, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(message, networkState.width / 2, networkState.height / 2);
-}
-
-function initNetworkState(data) {
-  var nodes = Array.isArray(data.nodes) ? data.nodes : [];
-  var edges = Array.isArray(data.edges) ? data.edges : [];
-  networkState.data = { nodes: nodes, edges: edges };
-  networkState.positions = initialNetworkLayout(nodes, edges);
-  networkState.edgeMap = buildNetworkEdgeMap(edges);
-  networkState.nodeMap = {};
-  nodes.forEach(function(node) {
-    networkState.nodeMap[node.id] = node;
-  });
-  networkState.view = { x: networkState.width / 2, y: networkState.height / 2 };
-  networkState.scale = 1;
+function initNetworkCanvas(canvas, ctx, W, H, data) {
+  networkState.canvas = canvas;
+  networkState.ctx = ctx;
+  networkState.width = W;
+  networkState.height = H;
+  networkState.data = data || { nodes: [], edges: [] };
+  networkState.positions = buildNetworkPositions(W, H, networkState.data);
+  networkState.edgeMap = buildNetworkEdgeMap(networkState.data.edges || []);
+  networkState.view = { x: 0, y: 0 };
   networkState.drag = null;
-  networkState.hoverId = null;
-  networkState.selectedId = null;
-  clampNetworkView();
-  updateNetworkCursor();
+  networkState.linkedMotion = {};
+  networkState.selectedId = '';
+  bindNetworkCanvas(canvas);
+  startNetworkAnimation();
+}
+
+function buildNetworkPositions(W, H, data) {
+  var nodes = data.nodes || [];
+  var edges = data.edges || [];
+  var positions = {};
+  if (!nodes.length) return positions;
+
+  var cx = W / 2, cy = H / 2;
+  var marginX = Math.max(42, W * 0.045);
+  var marginY = Math.max(34, H * 0.065);
+  var rx = Math.max(140, (W - marginX * 2) * 0.49);
+  var ry = Math.max(120, (H - marginY * 2) * 0.47);
+  nodes.forEach(function(n, i) {
+    var angle = (i / nodes.length) * Math.PI * 2;
+    var jitter = ((i * 37) % 23) - 11;
+    positions[n.id] = {
+      x: cx + Math.cos(angle) * rx + jitter * 2.5,
+      y: cy + Math.sin(angle) * ry + jitter * 1.8,
+    };
+  });
+
+  for (var iter = 0; iter < 80; iter++) {
+    for (var i = 0; i < nodes.length; i++) {
+      for (var j = i + 1; j < nodes.length; j++) {
+        var a = positions[nodes[i].id], b = positions[nodes[j].id];
+        var dx = b.x - a.x, dy = b.y - a.y;
+        var dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+        var force = 2400 / (dist * dist);
+        dx = (dx / dist) * force;
+        dy = (dy / dist) * force;
+        a.x -= dx; a.y -= dy;
+        b.x += dx; b.y += dy;
+      }
+    }
+    edges.forEach(function(e) {
+      var a = positions[e.source], b = positions[e.target];
+      if (!a || !b) return;
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var dist = Math.sqrt(dx*dx + dy*dy);
+      var ideal = e.kind === 'memory_edge' ? 230 : 200;
+      var force = (dist - ideal) * 0.006 * (e.similarity || 0.5);
+      dx = (dx / Math.max(1,dist)) * force;
+      dy = (dy / Math.max(1,dist)) * force;
+      a.x += dx; a.y += dy;
+      b.x -= dx; b.y -= dy;
+    });
+    nodes.forEach(function(n) {
+      var p = positions[n.id];
+      p.x += (cx - p.x) * 0.0016;
+      p.y += (cy - p.y) * 0.0016;
+      p.x = Math.max(marginX, Math.min(W - marginX, p.x));
+      p.y = Math.max(marginY, Math.min(H - marginY, p.y));
+    });
+  }
+  return positions;
 }
 
 function buildNetworkEdgeMap(edges) {
   var edgeMap = {};
-  edges.forEach(function(edge) {
-    if (!edgeMap[edge.source]) edgeMap[edge.source] = [];
-    if (!edgeMap[edge.target]) edgeMap[edge.target] = [];
-    edgeMap[edge.source].push(edge);
-    edgeMap[edge.target].push(edge);
+  edges.forEach(function(e) {
+    if (!edgeMap[e.source]) edgeMap[e.source] = [];
+    if (!edgeMap[e.target]) edgeMap[e.target] = [];
+    edgeMap[e.source].push(e.target);
+    edgeMap[e.target].push(e.source);
   });
   return edgeMap;
 }
 
-function initialNetworkLayout(nodes, edges) {
-  var positions = {};
-  if (!nodes.length) return positions;
-  var count = nodes.length;
-  var baseRadius = Math.max(180, Math.min(760, 120 + Math.sqrt(count) * 82 + count * 3));
-  var golden = Math.PI * (3 - Math.sqrt(5));
-  nodes.forEach(function(node, index) {
-    var ring = Math.sqrt((index + 0.5) / count);
-    var angle = index * golden;
-    var jitter = 10 * Math.sin(index * 12.9898);
-    positions[node.id] = {
-      x: Math.cos(angle) * baseRadius * ring + jitter,
-      y: Math.sin(angle) * baseRadius * ring + 10 * Math.cos(index * 78.233)
-    };
-  });
-  relaxNetworkLayout(nodes, edges, positions, baseRadius);
-  return positions;
-}
-
-function relaxNetworkLayout(nodes, edges, positions, baseRadius) {
-  var iterations = Math.min(120, 55 + nodes.length);
-  var preferred = Math.max(130, Math.min(260, 150 + nodes.length * 1.6));
-  for (var iter = 0; iter < iterations; iter++) {
-    for (var i = 0; i < nodes.length; i++) {
-      for (var j = i + 1; j < nodes.length; j++) {
-        var a = positions[nodes[i].id];
-        var b = positions[nodes[j].id];
-        var dx = b.x - a.x;
-        var dy = b.y - a.y;
-        var dist = Math.max(8, Math.sqrt(dx * dx + dy * dy));
-        var force = Math.min(4.5, 3600 / (dist * dist));
-        var fx = (dx / dist) * force;
-        var fy = (dy / dist) * force;
-        a.x -= fx;
-        a.y -= fy;
-        b.x += fx;
-        b.y += fy;
-      }
-    }
-    edges.forEach(function(edge) {
-      var a = positions[edge.source];
-      var b = positions[edge.target];
-      if (!a || !b) return;
-      var dx = b.x - a.x;
-      var dy = b.y - a.y;
-      var dist = Math.max(8, Math.sqrt(dx * dx + dy * dy));
-      var similarity = Number(edge.similarity || 0.45);
-      var target = edge.kind === 'memory_edge' ? preferred * 0.95 : preferred;
-      var force = Math.max(-2.2, Math.min(2.2, (dist - target) * 0.012 * similarity));
-      var fx = (dx / dist) * force;
-      var fy = (dy / dist) * force;
-      a.x += fx;
-      a.y += fy;
-      b.x -= fx;
-      b.y -= fy;
-    });
-    nodes.forEach(function(node) {
-      var p = positions[node.id];
-      var dist = Math.max(1, Math.sqrt(p.x * p.x + p.y * p.y));
-      var softLimit = baseRadius * 1.08;
-      if (dist > softLimit) {
-        var pull = (dist - softLimit) * 0.018;
-        p.x -= (p.x / dist) * pull;
-        p.y -= (p.y / dist) * pull;
-      }
-    });
+function startNetworkAnimation() {
+  stopNetworkAnimation();
+  function tick(time) {
+    drawNetworkFrame(time || performance.now());
+    networkState.animationFrame = requestAnimationFrame(tick);
   }
+  networkState.animationFrame = requestAnimationFrame(tick);
 }
 
 function stopNetworkAnimation() {
-  if (networkState.animationFrame) {
-    cancelAnimationFrame(networkState.animationFrame);
-    networkState.animationFrame = null;
-  }
+  if (!networkState.animationFrame) return;
+  cancelAnimationFrame(networkState.animationFrame);
+  networkState.animationFrame = 0;
 }
 
-function scheduleNetworkDraw() {
-  if (networkState.animationFrame) return;
-  networkState.animationFrame = requestAnimationFrame(function() {
-    networkState.animationFrame = null;
-    drawNetwork(networkState.ctx, networkState.width, networkState.height, networkState.data);
-  });
-}
-
-function drawNetwork(ctx, W, H, data) {
+function drawNetworkFrame(time) {
+  var ctx = networkState.ctx;
+  var data = networkState.data || { nodes: [], edges: [] };
   var nodes = data.nodes || [];
   var edges = data.edges || [];
+  var positions = networkState.positions;
+  var view = networkState.view;
+  var W = networkState.width, H = networkState.height;
+  if (!ctx) return;
+  updateNetworkLinkedMotion();
+
   ctx.fillStyle = '#FDFCF0';
   ctx.fillRect(0, 0, W, H);
   if (!nodes.length) {
-    drawNetworkMessage('没有记忆桶');
+    ctx.fillStyle = '#8A8070';
+    ctx.font = '14px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('没有记忆桶', W/2, H/2);
     return;
   }
 
-  edges.forEach(function(edge) {
-    drawNetworkEdge(ctx, edge);
+  ctx.save();
+  ctx.translate(view.x, view.y);
+  edges.forEach(function(e) {
+    var a = positions[e.source], b = positions[e.target];
+    if (!a || !b) return;
+    var isMemoryEdge = e.kind === 'memory_edge';
+    var activeNodeId = networkActiveNodeId();
+    var selectedEdge = activeNodeId && (e.source === activeNodeId || e.target === activeNodeId);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = isMemoryEdge
+      ? 'rgba(154, 123, 79, ' + (selectedEdge ? '0.30' : '0.14') + ')'
+      : 'rgba(47, 79, 79, ' + ((e.similarity || 0.5) * (selectedEdge ? 0.08 : 0.035)) + ')';
+    ctx.lineWidth = isMemoryEdge ? (selectedEdge ? 1.2 : 0.85) : Math.max(0.28, (e.similarity || 0.5) * 0.45);
+    ctx.stroke();
+    if (selectedEdge && isMemoryEdge && e.relation_type) {
+      ctx.fillStyle = 'rgba(154, 123, 79, 0.38)';
+      ctx.font = '9px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(e.relation_type, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    }
   });
-  nodes.forEach(function(node) {
-    drawNetworkNode(ctx, node);
-  });
-}
 
-function drawNetworkEdge(ctx, edge) {
-  var a = networkState.positions[edge.source];
-  var b = networkState.positions[edge.target];
-  if (!a || !b) return;
-  var sa = networkWorldToScreen(a);
-  var sb = networkWorldToScreen(b);
-  var selectedId = networkState.selectedId;
-  var related = selectedId && (edge.source === selectedId || edge.target === selectedId);
-  var isMemoryEdge = edge.kind === 'memory_edge';
-  var similarity = Number(edge.similarity || 0.45);
-
-  ctx.beginPath();
-  ctx.moveTo(sa.x, sa.y);
-  ctx.lineTo(sb.x, sb.y);
-  ctx.strokeStyle = related
-    ? (isMemoryEdge ? 'rgba(154, 123, 79, 0.72)' : 'rgba(47, 79, 79, 0.46)')
-    : (isMemoryEdge ? 'rgba(154, 123, 79, 0.24)' : 'rgba(47, 79, 79, ' + Math.max(0.05, similarity * 0.12) + ')');
-  ctx.lineWidth = related ? 1.45 : (isMemoryEdge ? 0.95 : Math.max(0.35, similarity * 0.72));
-  ctx.stroke();
-
-  if (isMemoryEdge && edge.relation_type && related) {
-    ctx.fillStyle = '#9A7B4F';
-    ctx.font = '10px Inter, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(edge.relation_type, (sa.x + sb.x) / 2, (sa.y + sb.y) / 2);
-  }
-}
-
-function drawNetworkNode(ctx, node) {
-  var p = networkState.positions[node.id];
-  if (!p) return;
-  var s = networkWorldToScreen(p);
-  var selected = networkState.selectedId === node.id;
-  var dragging = networkState.drag && networkState.drag.mode === 'node' && networkState.drag.id === node.id;
-  var hovered = networkState.hoverId === node.id;
   var colors = { dynamic: '#2F4F4F', permanent: '#9A7B4F', feel: '#8B6A6A', archived: '#B0A590' };
-  var color = colors[node.type] || '#2F4F4F';
-  var r = networkNodeRadius(node);
-  var degree = (networkState.edgeMap[node.id] || []).length;
-
-  ctx.beginPath();
-  ctx.arc(s.x, s.y, r + (selected || dragging ? 8 : hovered ? 6 : 4), 0, Math.PI * 2);
-  ctx.fillStyle = selected || dragging ? 'rgba(154, 123, 79, 0.18)' : color + '14';
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
-  ctx.fillStyle = node.resolved ? color + '70' : color;
-  ctx.fill();
-
-  if (node.pinned || selected || dragging) {
-    ctx.strokeStyle = selected || dragging ? '#9A7B4F' : '#9A7B4F';
-    ctx.lineWidth = selected || dragging ? 2.2 : 1.8;
-    ctx.stroke();
-  }
-  if (node.anchor) {
-    ctx.strokeStyle = '#2F4F4F';
-    ctx.lineWidth = 2.6;
-    ctx.stroke();
-  }
-
-  if (selected || hovered || nodesShouldShowLabel(node, degree)) {
-    var name = String(node.name || node.id || '');
-    if (name.length > 12) name = name.slice(0, 12) + '…';
-    ctx.fillStyle = selected ? '#2F4F4F' : '#3A3530';
-    ctx.font = selected ? '600 11px Inter, sans-serif' : '11px Inter, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText(name, s.x, s.y + r + 8);
-  }
-}
-
-function nodesShouldShowLabel(node, degree) {
-  var total = (networkState.data.nodes || []).length;
-  return total <= 36 || node.pinned || node.anchor || node.type === 'feel' || degree >= 3;
-}
-
-function networkNodeRadius(node) {
-  var score = Number(node.score || 0);
-  if (!Number.isFinite(score)) score = 0;
-  return Math.max(5, Math.min(15, 5 + score * 0.55));
-}
-
-function networkWorldToScreen(point) {
-  return {
-    x: point.x * networkState.scale + networkState.view.x,
-    y: point.y * networkState.scale + networkState.view.y
-  };
-}
-
-function networkScreenToWorld(point) {
-  return {
-    x: (point.x - networkState.view.x) / networkState.scale,
-    y: (point.y - networkState.view.y) / networkState.scale
-  };
-}
-
-function getNetworkPointerPoint(event) {
-  var rect = networkState.canvas.getBoundingClientRect();
-  var screen = {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top
-  };
-  return {
-    screen: screen,
-    world: networkScreenToWorld(screen)
-  };
-}
-
-function hitNetworkNode(worldPoint) {
-  var nodes = networkState.data.nodes || [];
-  for (var i = nodes.length - 1; i >= 0; i--) {
-    var node = nodes[i];
-    var p = networkState.positions[node.id];
-    if (!p) continue;
-    var dx = worldPoint.x - p.x;
-    var dy = worldPoint.y - p.y;
-    var radius = (networkNodeRadius(node) + 7) / networkState.scale;
-    if (dx * dx + dy * dy <= radius * radius) return node;
-  }
-  return null;
-}
-
-function onNetworkPointerDown(event) {
-  if (!networkState.data.nodes.length) return;
-  var point = getNetworkPointerPoint(event);
-  var hit = hitNetworkNode(point.world);
-  var isTouch = event.pointerType === 'touch';
-  try {
-    networkState.canvas.setPointerCapture(event.pointerId);
-  } catch (e) {}
-  hideNetworkPopover();
-  if (hit) {
-    networkState.selectedId = hit.id;
-    networkState.drag = {
-      mode: 'node',
-      id: hit.id,
-      pointerId: event.pointerId,
-      startScreen: point.screen,
-      lastWorld: point.world,
-      moved: false,
-      threshold: isTouch ? 8 : 4
-    };
-  } else {
-    networkState.selectedId = null;
-    networkState.drag = {
-      mode: 'pan',
-      pointerId: event.pointerId,
-      startScreen: point.screen,
-      startView: { x: networkState.view.x, y: networkState.view.y },
-      moved: false,
-      threshold: isTouch ? 8 : 4
-    };
-  }
-  updateNetworkCursor();
-  scheduleNetworkDraw();
-}
-
-function onNetworkPointerMove(event) {
-  var point = getNetworkPointerPoint(event);
-  if (!networkState.drag) {
-    var hit = hitNetworkNode(point.world);
-    networkState.hoverId = hit ? hit.id : null;
-    updateNetworkCursor();
-    scheduleNetworkDraw();
-    return;
-  }
-  if (event.pointerId !== networkState.drag.pointerId) return;
-  var drag = networkState.drag;
-  var dxScreen = point.screen.x - drag.startScreen.x;
-  var dyScreen = point.screen.y - drag.startScreen.y;
-  if (Math.sqrt(dxScreen * dxScreen + dyScreen * dyScreen) > drag.threshold) drag.moved = true;
-
-  if (drag.mode === 'node') {
-    var p = networkState.positions[drag.id];
+  nodes.forEach(function(n, i) {
+    var p = positions[n.id];
     if (!p) return;
-    var dx = point.world.x - drag.lastWorld.x;
-    var dy = point.world.y - drag.lastWorld.y;
-    p.x += dx;
-    p.y += dy;
-    elasticFollowNetworkNeighbors(drag.id, dx, dy);
-    drag.lastWorld = point.world;
-  } else {
-    networkState.view.x = drag.startView.x + dxScreen;
-    networkState.view.y = drag.startView.y + dyScreen;
-  }
-  updateNetworkCursor();
-  scheduleNetworkDraw();
+    var r = NETWORK_NODE_RADIUS;
+    var color = colors[n.type] || '#2F4F4F';
+    var isSelected = networkState.selectedId === n.id;
+    var isDragging = networkState.drag && networkState.drag.type === 'node' && networkState.drag.node.id === n.id;
+    var breath = isDragging ? 0.8 : 2.1 + Math.sin(time / 900 + i * 0.72) * 1.35;
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r + 5 + breath, 0, Math.PI * 2);
+    ctx.fillStyle = color + (isSelected ? '18' : '0E');
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r + 2, 0, Math.PI * 2);
+    ctx.fillStyle = color + (isSelected ? '1C' : '0A');
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = n.resolved ? color + '52' : color + (isSelected || isDragging ? 'D0' : 'A8');
+    ctx.fill();
+
+    if (n.pinned) {
+      ctx.strokeStyle = '#9A7B4F';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    if (n.anchor) {
+      ctx.strokeStyle = '#2F4F4F';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+    if (isSelected) {
+      ctx.strokeStyle = 'rgba(253, 252, 240, 0.86)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    var degree = (networkState.edgeMap[n.id] || []).length;
+    if (nodes.length <= 45 || n.pinned || n.anchor || n.type === 'feel' || degree >= 2 || isSelected) {
+      var name = n.name.length > 10 ? n.name.slice(0, 10) + '…' : n.name;
+      ctx.fillStyle = isSelected ? '#2F4F4F' : '#3A3530';
+      ctx.font = isSelected ? '12px Inter, sans-serif' : '11px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(name, p.x, p.y + r + 14);
+    }
+  });
+  ctx.restore();
 }
 
-function onNetworkPointerUp(event) {
-  var drag = networkState.drag;
-  if (!drag || event.pointerId !== drag.pointerId) return;
-  try {
-    networkState.canvas.releasePointerCapture(event.pointerId);
-  } catch (e) {}
-  networkState.drag = null;
-  updateNetworkCursor();
-  if (drag.mode === 'node' && !drag.moved) {
-    networkState.selectedId = drag.id;
-    showNetworkPopover(drag.id);
-  } else if (drag.mode === 'pan' && !drag.moved) {
-    networkState.selectedId = null;
-    hideNetworkPopover();
+function networkActiveNodeId() {
+  if (networkState.drag && networkState.drag.type === 'node' && networkState.drag.node) {
+    return networkState.drag.node.id;
   }
-  scheduleNetworkDraw();
+  return networkState.selectedId;
 }
 
-function onNetworkPointerCancel(event) {
-  var drag = networkState.drag;
-  if (drag && event.pointerId === drag.pointerId) {
-    networkState.drag = null;
-    hideNetworkPopover();
-    updateNetworkCursor();
-    scheduleNetworkDraw();
-  }
-}
-
-function elasticFollowNetworkNeighbors(nodeId, dx, dy) {
-  var edges = networkState.edgeMap[nodeId] || [];
-  edges.forEach(function(edge) {
-    var neighborId = edge.source === nodeId ? edge.target : edge.source;
-    var p = networkState.positions[neighborId];
-    if (!p) return;
-    var similarity = Number(edge.similarity || 0.45);
-    var follow = Math.min(0.12, 0.045 + similarity * 0.045);
-    p.x += dx * follow;
-    p.y += dy * follow;
+function updateNetworkLinkedMotion() {
+  var motion = networkState.linkedMotion || {};
+  Object.keys(motion).forEach(function(id) {
+    var item = motion[id];
+    var p = networkState.positions[id];
+    if (!item || !p) {
+      delete motion[id];
+      return;
+    }
+    p.x += (item.targetX - p.x) * 0.16;
+    p.y += (item.targetY - p.y) * 0.16;
+    if (Math.abs(item.targetX - p.x) < 0.2 && Math.abs(item.targetY - p.y) < 0.2) {
+      p.x = item.targetX;
+      p.y = item.targetY;
+      delete motion[id];
+    }
   });
 }
 
-function updateNetworkCursor() {
-  var canvas = networkState.canvas;
-  if (!canvas) return;
-  if (networkState.drag) {
-    canvas.style.cursor = 'grabbing';
-  } else if (networkState.hoverId) {
-    canvas.style.cursor = 'pointer';
+function bindNetworkCanvas(canvas) {
+  if (canvas.__ombreNetworkBound) return;
+  canvas.__ombreNetworkBound = true;
+  canvas.addEventListener('pointerdown', handleNetworkPointerDown);
+  canvas.addEventListener('pointermove', handleNetworkPointerMove);
+  canvas.addEventListener('pointerup', handleNetworkPointerUp);
+  canvas.addEventListener('pointercancel', handleNetworkPointerUp);
+  canvas.addEventListener('mouseleave', function() {
+    if (!networkState.drag) canvas.style.cursor = 'grab';
+  });
+}
+
+function networkPointer(event) {
+  var rect = networkState.canvas.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function findNetworkNodeAt(point) {
+  var nodes = (networkState.data && networkState.data.nodes) || [];
+  var positions = networkState.positions;
+  var view = networkState.view;
+  var best = null;
+  var bestDist = Infinity;
+  nodes.forEach(function(n) {
+    var p = positions[n.id];
+    if (!p) return;
+    var dx = point.x - (p.x + view.x);
+    var dy = point.y - (p.y + view.y);
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= NETWORK_NODE_RADIUS + 11 && dist < bestDist) {
+      best = n;
+      bestDist = dist;
+    }
+  });
+  return best;
+}
+
+function networkLinkedDragNodes(node) {
+  var linkedIds = networkState.edgeMap[node.id] || [];
+  var seen = {};
+  var linked = [];
+  linkedIds.forEach(function(id) {
+    if (!id || id === node.id || seen[id]) return;
+    var p = networkState.positions[id];
+    if (!p) return;
+    seen[id] = true;
+    linked.push({ id: id, x: p.x, y: p.y });
+  });
+  return linked;
+}
+
+function handleNetworkPointerDown(event) {
+  if (event.button !== 0 && event.pointerType !== 'touch') return;
+  var point = networkPointer(event);
+  var node = findNetworkNodeAt(point);
+  var position = node ? networkState.positions[node.id] : null;
+  networkState.drag = {
+    type: node ? 'node' : 'pan',
+    node: node,
+    pointerId: event.pointerId,
+    startX: point.x,
+    startY: point.y,
+    viewX: networkState.view.x,
+    viewY: networkState.view.y,
+    nodeX: position ? position.x : 0,
+    nodeY: position ? position.y : 0,
+    linkedNodes: node ? networkLinkedDragNodes(node) : [],
+    moved: false,
+  };
+  hideNetworkPopover();
+  networkState.canvas.classList.add('dragging');
+  try { networkState.canvas.setPointerCapture(event.pointerId); } catch (e) {}
+  event.preventDefault();
+}
+
+function handleNetworkPointerMove(event) {
+  var point = networkPointer(event);
+  var drag = networkState.drag;
+  if (!drag) {
+    networkState.canvas.style.cursor = findNetworkNodeAt(point) ? 'pointer' : 'grab';
+    return;
+  }
+  var dx = point.x - drag.startX;
+  var dy = point.y - drag.startY;
+  if (Math.sqrt(dx * dx + dy * dy) > 3) drag.moved = true;
+  if (drag.type === 'node' && drag.node) {
+    var p = networkState.positions[drag.node.id];
+    if (p) {
+      p.x = drag.nodeX + dx;
+      p.y = drag.nodeY + dy;
+    }
+    drag.linkedNodes.forEach(function(item) {
+      networkState.linkedMotion[item.id] = {
+        targetX: item.x + dx * 0.55,
+        targetY: item.y + dy * 0.55,
+      };
+    });
   } else {
-    canvas.style.cursor = 'grab';
+    networkState.view.x = drag.viewX + dx;
+    networkState.view.y = drag.viewY + dy;
   }
+  event.preventDefault();
 }
 
-function showNetworkPopover(nodeId) {
-  var popover = networkState.popover;
-  var node = networkState.nodeMap[nodeId];
-  var p = networkState.positions[nodeId];
-  if (!popover || !node || !p) return;
-  var tags = Array.isArray(node.tags) ? node.tags : [];
-  var domain = Array.isArray(node.domain) ? node.domain : [];
-  var preview = node.preview || node.content_preview || '';
-  var metaBits = [];
-  if (node.type) metaBits.push('type ' + node.type);
-  if (node.score !== undefined && node.score !== null) {
-    var score = Number(node.score);
-    metaBits.push('score ' + (Number.isFinite(score) ? score.toFixed(2) : String(node.score)));
+function handleNetworkPointerUp(event) {
+  var drag = networkState.drag;
+  if (!drag) return;
+  var point = networkPointer(event);
+  networkState.drag = null;
+  networkState.canvas.classList.remove('dragging');
+  networkState.canvas.style.cursor = findNetworkNodeAt(point) ? 'pointer' : 'grab';
+  try { networkState.canvas.releasePointerCapture(drag.pointerId); } catch (e) {}
+  if (drag.type === 'node' && drag.node && !drag.moved) {
+    showNetworkPopover(drag.node, point.x, point.y);
   }
-  if (domain.length) metaBits.push('domain ' + domain.slice(0, 3).join(', '));
-  if (tags.length) metaBits.push('tags ' + tags.slice(0, 4).join(', '));
+  event.preventDefault();
+}
+
+async function showNetworkPopover(node, x, y) {
+  networkState.selectedId = node.id;
+  var popover = document.getElementById('network-popover');
+  if (!popover) return;
+  var token = ++networkState.popoverToken;
+  popover.hidden = false;
+  positionNetworkPopover(popover, x, y);
   popover.innerHTML =
-    '<h4>' + esc(node.name || node.id || '') + '</h4>' +
-    '<div class="network-popover-meta">id ' + esc(node.id || '') + '</div>' +
-    '<div class="network-popover-meta">' + esc(metaBits.join(' · ') || 'metadata unset') + '</div>' +
-    (preview ? '<div class="network-popover-preview">' + esc(preview) + '</div>' : '') +
-    (typeof showDetail === 'function' ? '<button type="button" onclick="showDetail(\'' + jsString(node.id || '') + '\')">打开详情</button>' : '');
-  popover.classList.remove('hidden');
-  positionNetworkPopover(popover, networkWorldToScreen(p));
+    '<div class="network-popover-title">' + esc(node.name || node.id) + '</div>' +
+    '<div class="network-popover-meta">' + esc(networkNodeMeta(node)) + '</div>' +
+    '<div class="network-popover-body">加载记忆片段…</div>';
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(node.id));
+    if (!res || token !== networkState.popoverToken) return;
+    var detail = await res.json();
+    if (token !== networkState.popoverToken) return;
+    var preview = compactNetworkText(detail.content || '').slice(0, 220);
+    popover.innerHTML =
+      '<div class="network-popover-title">' + esc((detail.metadata && detail.metadata.name) || node.name || node.id) + '</div>' +
+      '<div class="network-popover-meta">' + esc(networkNodeMeta(node)) + '</div>' +
+      '<div class="network-popover-body">' + esc(preview || '没有正文预览。') + '</div>';
+    positionNetworkPopover(popover, x, y);
+  } catch (e) {
+    if (token !== networkState.popoverToken) return;
+    popover.innerHTML =
+      '<div class="network-popover-title">' + esc(node.name || node.id) + '</div>' +
+      '<div class="network-popover-meta">' + esc(networkNodeMeta(node)) + '</div>' +
+      '<div class="network-popover-body">加载失败: ' + esc(e.message) + '</div>';
+  }
 }
 
-function positionNetworkPopover(popover, screenPoint) {
-  var container = document.getElementById('network-view');
-  var canvasRect = networkState.canvas.getBoundingClientRect();
-  var containerRect = container.getBoundingClientRect();
-  var left = canvasRect.left - containerRect.left + screenPoint.x + 14;
-  var top = canvasRect.top - containerRect.top + screenPoint.y + 14;
-  var maxLeft = container.clientWidth - popover.offsetWidth - 12;
-  var maxTop = container.clientHeight - popover.offsetHeight - 12;
-  popover.style.left = Math.max(12, Math.min(left, maxLeft)) + 'px';
-  popover.style.top = Math.max(12, Math.min(top, maxTop)) + 'px';
+function networkNodeMeta(node) {
+  var parts = [node.type || 'dynamic'];
+  if (node.domain && node.domain.length) parts.push(node.domain.slice(0, 2).join(', '));
+  if (node.pinned) parts.push('pinned');
+  if (node.anchor) parts.push('anchor');
+  return parts.join(' · ');
+}
+
+function compactNetworkText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function positionNetworkPopover(popover, x, y) {
+  var left = Math.min(Math.max(12, x + 16), Math.max(12, networkState.width - 332));
+  var top = Math.min(Math.max(12, y + 16), Math.max(12, networkState.height - 172));
+  popover.style.left = left + 'px';
+  popover.style.top = top + 'px';
+  requestAnimationFrame(function() {
+    var maxLeft = Math.max(12, networkState.width - popover.offsetWidth - 12);
+    var maxTop = Math.max(12, networkState.height - popover.offsetHeight - 12);
+    popover.style.left = Math.min(left, maxLeft) + 'px';
+    popover.style.top = Math.min(top, maxTop) + 'px';
+  });
 }
 
 function hideNetworkPopover() {
-  var popover = networkState.popover || document.getElementById('network-popover');
-  if (popover) popover.classList.add('hidden');
-}
-
-function clampNetworkView() {
-  if (!networkState.data.nodes.length) return;
-  var xs = [];
-  var ys = [];
-  networkState.data.nodes.forEach(function(node) {
-    var p = networkState.positions[node.id];
-    if (!p) return;
-    xs.push(p.x);
-    ys.push(p.y);
-  });
-  if (!xs.length) return;
-  var minX = Math.min.apply(null, xs);
-  var maxX = Math.max.apply(null, xs);
-  var minY = Math.min.apply(null, ys);
-  var maxY = Math.max.apply(null, ys);
-  var centerX = (minX + maxX) / 2;
-  var centerY = (minY + maxY) / 2;
-  networkState.view.x = networkState.width / 2 - centerX * networkState.scale;
-  networkState.view.y = networkState.height / 2 - centerY * networkState.scale;
+  var popover = document.getElementById('network-popover');
+  networkState.popoverToken++;
+  networkState.selectedId = '';
+  if (popover) {
+    popover.hidden = true;
+    popover.innerHTML = '';
+  }
 }
 
 function esc(s) {
@@ -2769,6 +4964,12 @@ function esc(s) {
   var d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
+}
+
+function clipUiText(value, maxChars) {
+  var text = String(value || '').trim();
+  var limit = Math.max(20, Number(maxChars || 240));
+  return text.length > limit ? text.slice(0, limit) + '…' : text;
 }
 
 function formatTimeAgo(iso) {
@@ -2834,12 +5035,11 @@ function renderPersona(data) {
           '</div>' +
         '</div>' +
         '<div>' +
-          '<div class="persona-guidance">' +
-            '<div class="persona-guidance-box"><label>回应提示</label><div>' + esc((affect && affect.reply_guidance) || '当前没有特别提示。') + '</div></div>' +
-            '<div class="persona-guidance-box"><label>余味</label><div>' + esc((affect && affect.residue) || '当前没有明显余味。') + '</div></div>' +
-          '</div>' +
+          '<div class="persona-guidance">我现在的心情是....</div>' +
+          '<div class="persona-guidance">' + esc((affect && (affect.inner_thought || affect.residue)) || '当前没有明显余味。') + '</div>' +
           '<div class="persona-status-line">' +
             '<span class="persona-pill">' + (cfg.enabled ? 'engine on' : 'engine paused') + '</span>' +
+            '<span class="persona-pill">' + (cfg.event_recording_enabled === false ? 'events paused' : 'events on') + '</span>' +
             '<span class="persona-pill">' + (cfg.api_ready ? 'LLM ready' : 'fallback state') + '</span>' +
             '<span class="persona-pill">' + esc(cfg.model || 'model unset') + '</span>' +
           '</div>' +
@@ -2903,12 +5103,14 @@ function renderPersonaEvents(events) {
     return '<div class="persona-empty">还没有 Persona 事件。通过 gateway 聊一轮后，这里会出现评估结果和状态增量。</div>';
   }
   return '<div class="persona-event-list">' + events.map(function(ev) {
-    var intent = ev.perceived_intent || ev.error || 'no intent recorded';
-    var residue = ev.residue ? '<div class="persona-event-residue">' + esc(ev.residue) + '</div>' : '';
+    var thought = ev.inner_thought || ev.residue || ev.perceived_intent || ev.error || 'no thought recorded';
+    var trigger = ev.surface_trigger || ev.perceived_intent || '';
+    var residue = ev.residue && ev.residue !== thought ? '<div class="persona-event-residue">' + esc(ev.residue) + '</div>' : '';
     return '<div class="persona-event">' +
       '<div class="persona-event-type">' + esc(ev.event_type || 'unknown') + '</div>' +
       '<div class="persona-event-main">' +
-        esc(intent) +
+        esc(thought) +
+        (trigger ? '<small>' + esc(trigger) + '</small>' : '') +
         residue +
         '<small>' + esc(ev.mood_label || 'mood unset') + ' · confidence ' + personaNumber(ev.confidence) + ' · #' + esc(ev.message_hash || '') + '</small>' +
         renderPersonaDeltas(ev) +
@@ -2987,8 +5189,22 @@ async function runBreathDebug() {
   var arousal = document.getElementById('breath-arousal').value;
   var results = document.getElementById('breath-results');
   var info = document.getElementById('breath-info');
+  var recall = document.getElementById('recall-results');
+  var diffusion = document.getElementById('diffusion-results');
 
   results.innerHTML = '<div class="loading">计算中…</div>';
+  if (recall) {
+    recall.style.display = '';
+    recall.innerHTML = query
+      ? '<h3>Moment 命中</h3><div class="loading">读取 recall debug…</div>'
+      : '<h3>Moment 命中</h3><div class="loading">输入 query 后查看 moment candidates。</div>';
+  }
+  if (diffusion) {
+    diffusion.style.display = '';
+    diffusion.innerHTML = query
+      ? '<h3>扩散路径</h3><div class="loading">读取 diffusion debug…</div>'
+      : '<h3>扩散路径</h3><div class="loading">输入 query 后查看 seeds / hits / paths。</div>';
+  }
 
   var url = BASE + '/api/breath-debug?q=' + encodeURIComponent(query);
   if (valence) url += '&valence=' + valence;
@@ -3017,6 +5233,11 @@ async function runBreathDebug() {
       ' &nbsp;|&nbsp; 候选=<code>' + data.total_candidates + '</code> 桶' +
       ' → 通过=<code>' + data.passed_count + '</code> 桶' +
       (query ? '' : ' &nbsp;|&nbsp; <em>未输入 query，topic 分数全为 0</em>');
+
+    if (query) {
+      loadRecallDebug(query);
+      loadDiffusionDebug(query);
+    }
 
     if (!data.results.length) {
       results.innerHTML = '<div class="loading">无结果</div>';
@@ -3048,7 +5269,10 @@ async function runBreathDebug() {
 
       return '<div class="score-row" title="' + esc(r.name) + '">' +
         '<span class="rank">' + (i < 9 ? '0' : '') + (i + 1) + '</span>' +
-        '<span class="name">' + icon + ' ' + esc(r.name) + '</span>' +
+        '<div class="score-main">' +
+          '<div class="name">' + icon + ' ' + esc(r.name) + '</div>' +
+          breathGateTrace(r) +
+        '</div>' +
         '<div class="score-bars">' + bars + '</div>' +
         '<span class="score-final ' + (passed ? 'score-pass' : 'score-fail') + '">' + r.normalized.toFixed(1) + (r.resolved ? '<small>×0.3</small>' : '') + '</span>' +
       '</div>';
@@ -3056,6 +5280,304 @@ async function runBreathDebug() {
   } catch (e) {
     results.innerHTML = '<div class="loading">请求失败: ' + esc(e.message) + '</div>';
   }
+}
+
+async function loadRecallDebug(query) {
+  var target = document.getElementById('recall-results');
+  if (!target) return;
+  try {
+    var url = BASE + '/api/recall-debug?q=' + encodeURIComponent(query) + '&max_candidates=12&max_results=3';
+    var res = await authFetch(url);
+    if (!res) return;
+    var data = await res.json();
+    target.innerHTML = renderRecallDebug(data);
+  } catch (e) {
+    target.innerHTML = '<h3>Moment 命中</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderRecallDebug(data) {
+  if (!data || data.status !== 'ok') {
+    return '<h3>Moment 命中</h3><div class="loading">无 recall 诊断数据</div>';
+  }
+  var candidates = Array.isArray(data.candidates) ? data.candidates : [];
+  var thresholds = data.recall_thresholds || {};
+  var chips = [
+    { text: (data.seed_buckets || []).length + ' seed buckets' },
+    { text: candidates.length + ' candidates' },
+    { text: (data.admitted_count || 0) + ' admitted', state: data.admitted_count ? 'allow' : '' },
+    { text: (data.suppressed_count || 0) + ' suppressed', state: data.suppressed_count ? 'block' : '' },
+    { text: 'profile ' + (thresholds.profile || 'default') },
+    { text: 'direct ' + (thresholds.direct_render_mode || 'auto') },
+  ];
+  var body = candidates.length
+    ? '<div class="moment-list">' + candidates.map(renderRecallCandidate).join('') + '</div>'
+    : '<div class="loading">没有 moment candidates。</div>';
+  return '<h3>Moment 命中</h3>' + renderMomentChips(chips) + body;
+}
+
+function renderRecallCandidate(candidate) {
+  var c = candidate || {};
+  var admitted = c.admission === 'admitted';
+  var direct = !!c.selected_direct;
+  var secondary = !!c.selected_secondary;
+  var selected = direct || secondary || !!c.selected_returned;
+  var roleText = direct ? 'direct' : secondary ? 'secondary' : selected ? 'returned' : admitted ? 'admitted' : 'suppressed';
+  var chips = [
+    { text: roleText, state: selected || admitted ? 'allow' : 'block' },
+    { text: 'pre #' + rankText(c.pre_rank) },
+    { text: 'gate ' + (c.gate_rank == null ? 'filtered' : '#' + rankText(c.gate_rank)), state: c.gate === 'filtered' ? 'block' : 'allow' },
+    { text: 'final ' + (c.final_rank == null ? '—' : '#' + rankText(c.final_rank)) },
+    { text: 'section ' + (c.section || 'moment') },
+  ];
+  if (c.admission_reason) chips.push({ text: c.admission_reason, state: admitted ? 'allow' : 'block' });
+  if (c.rerank_score != null) chips.push({ text: 'rerank ' + Number(c.rerank_score).toFixed(2) });
+  if (c.embedding_score != null) chips.push({ text: 'semantic ' + Number(c.embedding_score).toFixed(2) });
+  if (c.direct_render && c.direct_render.shape) {
+    chips.push({
+      text: 'render ' + c.direct_render.shape + ' · ' + (c.direct_render.reason || ''),
+      state: c.direct_render.shape === 'bucket_capsule' ? 'allow' : '',
+    });
+  }
+  if (c.gate_reasons && c.gate_reasons.length) {
+    chips.push({ text: c.gate_reasons.join(' · '), state: c.gate === 'filtered' ? 'block' : '' });
+  }
+  return '<div class="moment-item">' +
+    '<div class="moment-head">' +
+      '<div class="moment-title">' + esc(c.bucket_name || c.bucket_id || 'unknown') + '</div>' +
+      '<div class="moment-source">' + esc(c.moment_id || '') + '</div>' +
+    '</div>' +
+    renderMomentChips(chips) +
+    (c.annotation_summary ? '<div class="diffusion-path">summary: ' + esc(c.annotation_summary) + '</div>' : '') +
+    '<div class="moment-body">' + esc(c.text_preview || '') + '</div>' +
+  '</div>';
+}
+
+function rankText(value) {
+  if (value == null) return '—';
+  return String(Number(value) + 1);
+}
+
+async function loadDiffusionDebug(query) {
+  var target = document.getElementById('diffusion-results');
+  if (!target) return;
+  try {
+    var url = BASE + '/api/diffusion-debug?q=' + encodeURIComponent(query);
+    var res = await authFetch(url);
+    if (!res) return;
+    var data = await res.json();
+    target.innerHTML = renderDiffusionDebug(data);
+  } catch (e) {
+    target.innerHTML = '<h3>扩散路径</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderDiffusionDebug(data) {
+  if (!data || data.status !== 'ok') {
+    return '<h3>扩散路径</h3><div class="loading">无扩散诊断数据</div>';
+  }
+  var seeds = Array.isArray(data.seeds) ? data.seeds : [];
+  var hits = Array.isArray(data.hits) ? data.hits : [];
+  var options = data.options || {};
+  var warnings = Array.isArray(data.warnings) ? data.warnings : [];
+  var summary = renderMomentChips([
+    { text: seeds.length + ' seeds' },
+    { text: hits.length + ' hits' },
+    { text: 'edge ≥ ' + (options.edge_min_confidence != null ? options.edge_min_confidence : '—') },
+    { text: 'max hops ' + (options.max_hops != null ? options.max_hops : '—') },
+  ]);
+  var body = '<div class="diffusion-columns">' +
+    renderDiffusionSection('Seeds', seeds, 'seed') +
+    renderDiffusionSection('Hits', hits, 'hit') +
+  '</div>';
+  var warningHtml = warnings.length
+    ? '<div class="diffusion-warning">' + esc(warnings.join(' · ')) + '</div>'
+    : '';
+  return '<h3>扩散路径</h3>' + summary + body + warningHtml;
+}
+
+function renderDiffusionSection(title, items, kind) {
+  if (!items.length) {
+    return '<div><div class="diffusion-section-title">' + esc(title) + '</div><div class="loading">无</div></div>';
+  }
+  return '<div><div class="diffusion-section-title">' + esc(title) + '</div>' +
+    items.map(function(item, index) { return renderDiffusionRow(item, index, kind); }).join('') +
+  '</div>';
+}
+
+function renderDiffusionRow(item, index, kind) {
+  var row = item || {};
+  var runtime = row.runtime_gate || {};
+  var related = runtime.related_injection || runtime.related_target || {};
+  var chips = [
+    { text: (kind === 'seed' ? 'seed ' : 'hit ') + '#' + (index + 1) },
+    { text: 'layer ' + ((row.layer_debug && row.layer_debug.layer) || runtime.layer || 'unknown') },
+  ];
+  if (row.seed_score != null) chips.push({ text: 'seed score ' + Number(row.seed_score).toFixed(2) });
+  if (row.score != null) chips.push({ text: 'activation ' + Number(row.score).toFixed(2) });
+  if (related.reason) {
+    chips.push({
+      text: 'related ' + (related.allowed ? 'yes' : 'no') + ' · ' + related.reason,
+      state: related.allowed ? 'allow' : 'block',
+    });
+  }
+  var path = row.path ? '<div class="diffusion-path">path: ' + esc(row.path) + '</div>' : '';
+  if (!path && row.path_ids && row.path_ids.length) {
+    path = '<div class="diffusion-path">path ids: ' + esc(row.path_ids.join(' → ')) + '</div>';
+  }
+  if (row.caution) {
+    chips.push({ text: 'caution', state: 'block' });
+  }
+  return '<div class="diffusion-row">' +
+    '<div class="diffusion-name">' + esc(row.name || row.bucket_id || 'unknown') + '</div>' +
+    renderMomentChips(chips) +
+    path +
+  '</div>';
+}
+
+async function loadGatewayInjections() {
+  var target = document.getElementById('gateway-injections-content');
+  if (!target) return;
+  var sessionInput = document.getElementById('gateway-session-filter');
+  var includeInput = document.getElementById('gateway-include-context');
+  var sessionId = sessionInput ? sessionInput.value.trim() : '';
+  var includeContext = includeInput && includeInput.checked;
+  target.innerHTML = '<div class="gateway-injection-empty">读取 Gateway 注入记录…</div>';
+  var url = BASE + '/api/gateway-injections?limit=10&include_context=' + (includeContext ? '1' : '0');
+  if (sessionId) url += '&session_id=' + encodeURIComponent(sessionId);
+  try {
+    var res = await authFetch(url);
+    if (!res) return;
+    var data = await res.json();
+    target.innerHTML = renderGatewayInjections(data);
+  } catch (e) {
+    target.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderGatewayInjections(data) {
+  if (!data || data.status !== 'ok') {
+    var error = data && data.error ? data.error : '无 Gateway 注入记录';
+    return '<div class="gateway-injection-empty">' + esc(error) + '</div>';
+  }
+  var items = Array.isArray(data.items) ? data.items : [];
+  if (!items.length) return '<div class="gateway-injection-empty">暂无 Gateway 注入记录。</div>';
+  return '<div class="gateway-injection-list">' + items.map(renderGatewayInjectionItem).join('') + '</div>';
+}
+
+function renderGatewayInjectionItem(item) {
+  var row = item || {};
+  var payload = row.payload || {};
+  var recalled = payload.recalled_bucket_ids || [];
+  var diffused = payload.diffused_bucket_ids || [];
+  var injected = payload.injected_bucket_ids || [];
+  var recalledMoments = payload.recalled_moment_ids || [];
+  var diffusedMoments = payload.diffused_moment_ids || [];
+  var directRender = gatewayDirectRenderSummaries(payload);
+  var chainDebug = gatewayChainDebugSummaries(payload);
+  var dreamStatus = payload.dream_context_status || {};
+  var chips = [
+    { text: 'round ' + (row.round_id || '—') },
+    { text: 'recalled ' + recalled.length, state: recalled.length ? 'allow' : '' },
+    { text: 'diffused ' + diffused.length, state: diffused.length ? 'allow' : '' },
+    { text: 'injected ' + injected.length, state: injected.length ? 'allow' : '' },
+    { text: payload.recent_context_injected ? 'recent yes' : 'recent no', state: payload.recent_context_injected ? 'allow' : '' },
+    { text: payload.date_persona_trace_injected ? 'date trace yes' : 'date trace no', state: payload.date_persona_trace_injected ? 'allow' : '' },
+  ];
+  if (dreamStatus.status) {
+    chips.push({
+      text: payload.dream_context_injected
+        ? 'dream injected' + (dreamStatus.retained ? ' · retained' : '')
+        : 'dream skipped' + (dreamStatus.reason ? ' · ' + dreamStatus.reason : ''),
+      state: payload.dream_context_injected ? 'allow' : '',
+    });
+  }
+  if (payload.context_mode) chips.push({ text: 'mode ' + payload.context_mode });
+  var contextPreview = gatewayContextPreview(payload);
+  return '<div class="gateway-injection-item">' +
+    '<div class="gateway-injection-head">' +
+      '<div class="gateway-injection-title">' + esc(row.session_id || 'session') + '</div>' +
+      '<div class="gateway-injection-time">' + esc(row.created_at || '') + '</div>' +
+    '</div>' +
+    renderMomentChips(chips) +
+    '<div class="gateway-injection-lines">' +
+      '<div class="gateway-injection-line"><span class="label">query:</span> ' + esc(payload.query_preview || '') + '</div>' +
+      '<div class="gateway-injection-line"><span class="label">buckets:</span> ' + esc(injected.slice(0, 8).join(', ') || '—') + '</div>' +
+      '<div class="gateway-injection-line"><span class="label">moments:</span> ' + esc(recalledMoments.concat(diffusedMoments).slice(0, 8).join(', ') || '—') + '</div>' +
+      (directRender ? '<div class="gateway-injection-line"><span class="label">direct render:</span> ' + esc(directRender) + '</div>' : '') +
+      (chainDebug ? '<div class="gateway-injection-line"><span class="label">diffused chain:</span> ' + esc(chainDebug) + '</div>' : '') +
+    '</div>' +
+    (contextPreview ? '<div class="gateway-context-preview">' + esc(contextPreview) + '</div>' : '') +
+  '</div>';
+}
+
+function gatewayDirectRenderSummaries(payload) {
+  var rows = Array.isArray(payload.recalled_moment_debug) ? payload.recalled_moment_debug : [];
+  return rows.map(function(row) {
+    var r = row.direct_render || {};
+    if (!r.shape) return '';
+    var label = row.bucket_name || row.bucket_id || row.moment_id || 'moment';
+    return label + ' -> ' + r.shape + (r.reason ? ' · ' + r.reason : '');
+  }).filter(Boolean).slice(0, 5).join(' / ');
+}
+
+function gatewayChainDebugSummaries(payload) {
+  var rows = Array.isArray(payload.diffused_moment_debug) ? payload.diffused_moment_debug : [];
+  return rows.map(function(row) {
+    var label = row.bucket_name || row.bucket_id || row.moment_id || 'moment';
+    var bits = [];
+    if (row.chain_bundle) bits.push('chain_bundle');
+    if (row.note) bits.push(row.note);
+    if (row.path && row.path.trace) bits.push(row.path.trace);
+    var temps = Array.isArray(row.temperature_context) ? row.temperature_context.map(function(item) {
+      return item.label || item.section || '';
+    }).filter(Boolean).join('+') : '';
+    if (temps) bits.push('temp ' + temps);
+    return bits.length ? label + ' -> ' + bits.join(' · ') : '';
+  }).filter(Boolean).slice(0, 5).join(' / ');
+}
+
+function gatewayContextPreview(payload) {
+  var parts = [];
+  if (payload.recalled_memory) parts.push('Recalled Memory:\\n' + clipUiText(payload.recalled_memory, 360));
+  if (payload.diffused_memory) parts.push('Diffused Memory:\\n' + clipUiText(payload.diffused_memory, 360));
+  if (payload.dream_context) parts.push('Dream Context:\\n' + clipUiText(payload.dream_context, 360));
+  if (payload.dynamic_context) parts.push('Dynamic Context:\\n' + clipUiText(payload.dynamic_context, 520));
+  return parts.join('\\n\\n');
+}
+
+function breathGateTrace(row) {
+  var layer = (row.layer_debug && row.layer_debug.layer) || (row.runtime_gate && row.runtime_gate.layer) || '';
+  var runtime = row.runtime_gate || {};
+  var related = runtime.related_injection || runtime.related_target || {};
+  var recent = runtime.recent_context || {};
+  var topic = runtime.topic_evidence || {};
+  var chips = [];
+
+  if (layer) chips.push({ text: 'layer ' + layer });
+  if (related.reason) {
+    chips.push({
+      text: 'related ' + (related.allowed ? 'yes' : 'no') + ' · ' + related.reason,
+      state: related.allowed ? 'allow' : 'block',
+    });
+  }
+  if (recent.reason) {
+    chips.push({
+      text: 'recent ' + (recent.allowed ? 'yes' : 'no') + ' · ' + recent.reason,
+      state: recent.allowed ? 'allow' : 'block',
+    });
+  }
+  if (topic.required) {
+    chips.push({
+      text: 'topic evidence ' + (topic.present ? 'yes' : 'missing'),
+      state: topic.present ? 'allow' : 'block',
+    });
+  }
+
+  if (!chips.length) return '';
+  return '<div class="score-trace">' + chips.map(function(chip) {
+    return '<span class="score-chip ' + (chip.state || '') + '">' + esc(chip.text) + '</span>';
+  }).join('') + '</div>';
 }
 
 document.getElementById('breath-query').addEventListener('keydown', function(e) {
@@ -3067,56 +5589,291 @@ async function loadConfig() {
     var res = await authFetch(BASE + '/api/config');
     if (!res) return;
     var cfg = await res.json();
+    configSnapshot = JSON.parse(JSON.stringify(cfg || {}));
     document.getElementById('cfg-dehy-model').value = cfg.dehydration.model || '';
     document.getElementById('cfg-dehy-url').value = cfg.dehydration.base_url || '';
     document.getElementById('cfg-dehy-key').placeholder = '当前: ' + (cfg.dehydration.api_key_masked || '未设置');
     document.getElementById('cfg-dehy-key').value = '';
     document.getElementById('cfg-dehy-maxtokens').value = cfg.dehydration.max_tokens || 1024;
-    document.getElementById('cfg-dehy-temp').value = cfg.dehydration.temperature || 0.1;
+    document.getElementById('cfg-dehy-temp').value = cfg.dehydration.temperature ?? 0.1;
     document.getElementById('cfg-emb-enabled').value = cfg.embedding.enabled ? 'true' : 'false';
     document.getElementById('cfg-emb-model').value = cfg.embedding.model || '';
     document.getElementById('cfg-emb-url').value = cfg.embedding.base_url || '';
     document.getElementById('cfg-emb-key').placeholder = '当前: ' + (cfg.embedding.api_key_masked || (cfg.embedding.has_own_api_key ? '***' : '复用脱水 API'));
     document.getElementById('cfg-emb-key').value = '';
+    document.getElementById('cfg-persona-enabled').value =
+      (cfg.persona && cfg.persona.enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-persona-event-recording').value =
+      (cfg.persona && cfg.persona.event_recording_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-persona-model').value = (cfg.persona && cfg.persona.model) || '';
+    document.getElementById('cfg-persona-url').value = (cfg.persona && cfg.persona.base_url) || '';
+    document.getElementById('cfg-persona-key').placeholder =
+      '当前: ' + ((cfg.persona && cfg.persona.api_key_masked) || ((cfg.persona && cfg.persona.api_ready) ? '***' : '未设置'));
+    document.getElementById('cfg-persona-key').value = '';
+    document.getElementById('cfg-dream-engine-enabled').value = cfg.dream.enabled ? 'true' : 'false';
+    document.getElementById('cfg-dream-enabled').value = cfg.dream.auto_enabled ? 'true' : 'false';
+    document.getElementById('cfg-dream-surface').value = cfg.dream.surface_enabled ? 'true' : 'false';
+    document.getElementById('cfg-dream-inject').value = cfg.dream.inject_enabled ? 'true' : 'false';
+    document.getElementById('cfg-dream-retain').value = cfg.dream.retain_after_inject ? 'true' : 'false';
+    document.getElementById('cfg-dream-model').value = cfg.dream.model || '';
+    document.getElementById('cfg-dream-url').value = cfg.dream.base_url || '';
+    document.getElementById('cfg-dream-key').placeholder = '当前: ' + (cfg.dream.api_key_masked || (cfg.dream.api_ready ? '***' : '未设置'));
+    document.getElementById('cfg-dream-key').value = '';
+    document.getElementById('cfg-dream-hour').value = cfg.dream.daily_hour ?? 3;
+    document.getElementById('cfg-dream-prob').value = cfg.dream.daily_probability ?? 0.4;
+    document.getElementById('cfg-dream-min').value = cfg.dream.min_material_count || 5;
+    document.getElementById('cfg-dream-window').value = cfg.dream.material_window_hours || 48;
+    document.getElementById('cfg-dream-anchor').value = cfg.dream.identity_anchor_id || '';
     document.getElementById('cfg-gateway-cooldown').value = (cfg.gateway && cfg.gateway.cooldown_hours) ?? 6;
     document.getElementById('cfg-gateway-rounds').value = (cfg.gateway && cfg.gateway.skip_recent_rounds) ?? 5;
-    document.getElementById('cfg-merge').value = cfg.merge_threshold || 75;
+    document.getElementById('cfg-recent-context-cooldown').value =
+      (cfg.gateway && cfg.gateway.recent_context_cooldown_hours) ?? 6;
+    document.getElementById('cfg-recent-context-reentry').value =
+      (cfg.gateway && cfg.gateway.recent_context_reentry_idle_hours) ?? 24;
+    document.getElementById('cfg-recent-context-budget').value =
+      (cfg.gateway && cfg.gateway.recent_context_budget) ?? 300;
+    document.getElementById('cfg-recent-context-enabled').value =
+      ((cfg.gateway && cfg.gateway.recent_context_budget) ?? 300) > 0 ? 'true' : 'false';
+    document.getElementById('cfg-recalled-memory-budget').value =
+      (cfg.gateway && cfg.gateway.recalled_memory_budget) ?? 400;
+    document.getElementById('cfg-related-memory-budget').value =
+      (cfg.gateway && cfg.gateway.related_memory_budget) ?? 220;
+    document.getElementById('cfg-memory-detail-recall-enabled').value =
+      (cfg.gateway && cfg.gateway.memory_detail_recall_enabled) ? 'true' : 'false';
+    document.getElementById('cfg-memory-detail-recall-max-ids').value =
+      (cfg.gateway && cfg.gateway.memory_detail_recall_max_ids) ?? 3;
+    document.getElementById('cfg-memory-detail-recall-budget').value =
+      (cfg.gateway && cfg.gateway.memory_detail_recall_budget) ?? 1200;
+    var personaRounds = (cfg.gateway && cfg.gateway.current_inner_state_interval_rounds) ?? 15;
+    document.getElementById('cfg-persona-context-enabled').value = personaRounds > 0 ? 'true' : 'false';
+    document.getElementById('cfg-persona-context-rounds').value = personaRounds;
+    document.getElementById('cfg-direct-render-mode').value = (cfg.gateway && cfg.gateway.direct_render_mode) || 'auto';
+    document.getElementById('cfg-retrieval-mode').value = (cfg.gateway && cfg.gateway.retrieval_mode) || 'graph';
+    document.getElementById('cfg-query-resurface-enabled').value =
+      (cfg.recall && cfg.recall.query_resurface_enabled) ? 'true' : 'false';
+    var diffusion = cfg.memory_diffusion || {};
+    document.getElementById('cfg-diffusion-enabled').value = diffusion.enabled === false ? 'false' : 'true';
+    document.getElementById('cfg-diffusion-topk').value = diffusion.top_k ?? 4;
+    document.getElementById('cfg-diffusion-min').value = diffusion.min_activation ?? 0.18;
+    document.getElementById('cfg-chain-walk').value = diffusion.chain_walk_enabled ? 'true' : 'false';
+    document.getElementById('cfg-chain-hops').value = diffusion.chain_max_hops ?? 6;
+    document.getElementById('cfg-chain-confidence').value = diffusion.chain_min_confidence ?? 0.72;
+    document.getElementById('cfg-chain-frontier').value = diffusion.chain_max_frontier ?? 24;
+    document.getElementById('cfg-reflection-enabled').value =
+      (cfg.reflection && cfg.reflection.enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-reflection-auto').value =
+      (cfg.reflection && cfg.reflection.auto_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-reflection-daily').value =
+      (cfg.reflection && cfg.reflection.daily_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-reflection-memory-anchor').value =
+      (cfg.reflection && cfg.reflection.memory_affect_anchor_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-reflection-weather-anchor').value =
+      (cfg.reflection && cfg.reflection.relationship_weather_affect_anchor_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-reflection-model').value = (cfg.reflection && cfg.reflection.model) || '';
+    document.getElementById('cfg-reflection-url').value = (cfg.reflection && cfg.reflection.base_url) || '';
+    document.getElementById('cfg-reflection-key').placeholder =
+      '当前: ' + ((cfg.reflection && cfg.reflection.api_key_masked) || ((cfg.reflection && cfg.reflection.api_ready) ? '***' : '未设置'));
+    document.getElementById('cfg-reflection-key').value = '';
+    document.getElementById('cfg-portrait-enabled').value =
+      (cfg.portrait && cfg.portrait.enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-portrait-auto').value =
+      (cfg.portrait && cfg.portrait.auto_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-portrait-auto-initial').value =
+      (cfg.portrait && cfg.portrait.auto_initial_enabled) === true ? 'true' : 'false';
+    document.getElementById('cfg-portrait-daily').value =
+      (cfg.portrait && cfg.portrait.daily_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-portrait-material-limit').value =
+      (cfg.portrait && cfg.portrait.material_limit) ?? 18;
+    document.getElementById('cfg-portrait-first-limit').value =
+      (cfg.portrait && cfg.portrait.first_run_material_limit) ?? 160;
+    document.getElementById('cfg-merge').value = cfg.merge_threshold ?? 75;
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + esc(cfg.transport) + '</strong><br>' +
       'Buckets dir: <strong>' + esc(cfg.buckets_dir) + '</strong><br>' +
+      'Persona API: <strong>' + ((cfg.persona && cfg.persona.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
+      '日印象 API: <strong>' + ((cfg.reflection && cfg.reflection.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
+      'Portrait API: <strong>' + ((cfg.portrait && cfg.portrait.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
+      'Portrait state: <strong>' + esc((cfg.portrait && cfg.portrait.state_path) || '默认') + '</strong><br>' +
+      'Dream API: <strong>' + (cfg.dream.api_ready ? '已设置' : '未设置') + '</strong><br>' +
       'Embedding effective URL: <strong>' + esc(cfg.embedding.effective_base_url || '未设置') + '</strong>';
   } catch (e) {
-    document.getElementById('config-status').innerHTML =
-      '<span style="color:var(--negative)">加载失败: ' + esc(e.message) + '</span>';
+    setConfigStatus('<span style="color:var(--negative)">加载失败: ' + esc(e.message) + '</span>');
   }
 }
 
-async function saveConfig(persist) {
-  var body = {
-    dehydration: {
+function setConfigStatus(html) {
+  ['config-status', 'memory-config-status'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.innerHTML = html;
+  });
+}
+
+async function saveConfig(persist, persistEnv) {
+  if (!configSnapshot) {
+    setConfigStatus('<span style="color:var(--negative)">配置还没加载完成，请先刷新配置页</span>');
+    return;
+  }
+  function numberValue(id, fallback) {
+    var n = parseInt(document.getElementById(id).value, 10);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  function floatValue(id, fallback) {
+    var n = parseFloat(document.getElementById(id).value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  function sameConfigValue(left, right) {
+    if (left === right) return true;
+    if (left === '' && (right === undefined || right === null)) return true;
+    if (typeof left === 'number' && typeof right === 'number') return Math.abs(left - right) < 0.000001;
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+  function addChangedSection(target, sectionName, candidate) {
+    var original = (configSnapshot && configSnapshot[sectionName]) || {};
+    var changed = {};
+    Object.keys(candidate).forEach(function(key) {
+      if (!sameConfigValue(candidate[key], original[key])) changed[key] = candidate[key];
+    });
+    if (Object.keys(changed).length) target[sectionName] = changed;
+  }
+
+  var recentContextEnabled = document.getElementById('cfg-recent-context-enabled').value === 'true';
+  var recentContextBudget = recentContextEnabled ? numberValue('cfg-recent-context-budget', 300) : 0;
+  if (recentContextEnabled && recentContextBudget <= 0) recentContextBudget = 300;
+  var personaContextEnabled = document.getElementById('cfg-persona-context-enabled').value === 'true';
+  var personaContextRounds = personaContextEnabled ? numberValue('cfg-persona-context-rounds', 15) : 0;
+  if (personaContextEnabled && personaContextRounds <= 0) personaContextRounds = 15;
+
+  var activeTab = document.querySelector('.tab.active');
+  var activeTarget = activeTab ? activeTab.dataset.tab : '';
+  var candidate = {};
+  if (activeTarget === 'config') {
+    candidate.dehydration = {
       model: document.getElementById('cfg-dehy-model').value,
       base_url: document.getElementById('cfg-dehy-url').value,
-      max_tokens: parseInt(document.getElementById('cfg-dehy-maxtokens').value) || 1024,
-      temperature: parseFloat(document.getElementById('cfg-dehy-temp').value) || 0.1,
-    },
-    embedding: {
+      max_tokens: numberValue('cfg-dehy-maxtokens', 4096),
+      temperature: floatValue('cfg-dehy-temp', 0.3),
+    };
+    candidate.embedding = {
       enabled: document.getElementById('cfg-emb-enabled').value === 'true',
       model: document.getElementById('cfg-emb-model').value,
       base_url: document.getElementById('cfg-emb-url').value,
-    },
-    gateway: {
+    };
+    candidate.persona = {
+      enabled: document.getElementById('cfg-persona-enabled').value === 'true',
+      event_recording_enabled: document.getElementById('cfg-persona-event-recording').value === 'true',
+      model: document.getElementById('cfg-persona-model').value,
+      base_url: document.getElementById('cfg-persona-url').value,
+    };
+    candidate.dream = {
+      enabled: document.getElementById('cfg-dream-engine-enabled').value === 'true',
+      auto_enabled: document.getElementById('cfg-dream-enabled').value === 'true',
+      surface_enabled: document.getElementById('cfg-dream-surface').value === 'true',
+      inject_enabled: document.getElementById('cfg-dream-inject').value === 'true',
+      retain_after_inject: document.getElementById('cfg-dream-retain').value === 'true',
+      model: document.getElementById('cfg-dream-model').value,
+      base_url: document.getElementById('cfg-dream-url').value,
+      daily_hour: numberValue('cfg-dream-hour', 3),
+      daily_probability: floatValue('cfg-dream-prob', 0.4),
+      min_material_count: numberValue('cfg-dream-min', 5),
+      material_window_hours: numberValue('cfg-dream-window', 48),
+      identity_anchor_id: document.getElementById('cfg-dream-anchor').value,
+    };
+    candidate.reflection = {
+      enabled: document.getElementById('cfg-reflection-enabled').value === 'true',
+      auto_enabled: document.getElementById('cfg-reflection-auto').value === 'true',
+      daily_enabled: document.getElementById('cfg-reflection-daily').value === 'true',
+      memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true',
+      relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true',
+      model: document.getElementById('cfg-reflection-model').value,
+      base_url: document.getElementById('cfg-reflection-url').value,
+    };
+    candidate.portrait = {
+      enabled: document.getElementById('cfg-portrait-enabled').value === 'true',
+      auto_enabled: document.getElementById('cfg-portrait-auto').value === 'true',
+      auto_initial_enabled: document.getElementById('cfg-portrait-auto-initial').value === 'true',
+      daily_enabled: document.getElementById('cfg-portrait-daily').value === 'true',
+      material_limit: numberValue('cfg-portrait-material-limit', 18),
+      first_run_material_limit: numberValue('cfg-portrait-first-limit', 160),
+    };
+  }
+  if (activeTarget === 'memory-config') {
+    candidate.gateway = {
       cooldown_hours: floatValue('cfg-gateway-cooldown', 6),
       skip_recent_rounds: numberValue('cfg-gateway-rounds', 5),
-    },
-    merge_threshold: parseInt(document.getElementById('cfg-merge').value) || 75,
-    persist: persist,
-  };
-  var keyVal = document.getElementById('cfg-dehy-key').value;
-  if (keyVal) body.dehydration.api_key = keyVal;
-  var embKeyVal = document.getElementById('cfg-emb-key').value;
-  if (embKeyVal) body.embedding.api_key = embKeyVal;
+      recent_context_cooldown_hours: floatValue('cfg-recent-context-cooldown', 6),
+      recent_context_reentry_idle_hours: floatValue('cfg-recent-context-reentry', 24),
+      recent_context_budget: recentContextBudget,
+      recalled_memory_budget: numberValue('cfg-recalled-memory-budget', 400),
+      related_memory_budget: numberValue('cfg-related-memory-budget', 220),
+      memory_detail_recall_enabled: document.getElementById('cfg-memory-detail-recall-enabled').value === 'true',
+      memory_detail_recall_max_ids: numberValue('cfg-memory-detail-recall-max-ids', 3),
+      memory_detail_recall_budget: numberValue('cfg-memory-detail-recall-budget', 1200),
+      current_inner_state_interval_rounds: personaContextRounds,
+      direct_render_mode: document.getElementById('cfg-direct-render-mode').value,
+      retrieval_mode: document.getElementById('cfg-retrieval-mode').value,
+    };
+    candidate.recall = {
+      query_resurface_enabled: document.getElementById('cfg-query-resurface-enabled').value === 'true',
+    };
+    candidate.memory_diffusion = {
+      enabled: document.getElementById('cfg-diffusion-enabled').value === 'true',
+      top_k: numberValue('cfg-diffusion-topk', 4),
+      min_activation: floatValue('cfg-diffusion-min', 0.18),
+      chain_walk_enabled: document.getElementById('cfg-chain-walk').value === 'true',
+      chain_max_hops: numberValue('cfg-chain-hops', 6),
+      chain_min_confidence: floatValue('cfg-chain-confidence', 0.72),
+      chain_max_frontier: numberValue('cfg-chain-frontier', 24),
+    };
+  }
 
-  var status = document.getElementById('config-status');
+  var body = {
+    persist: persist,
+    persist_env: !!persistEnv,
+  };
+  [
+    'dehydration',
+    'embedding',
+    'persona',
+    'dream',
+    'gateway',
+    'recall',
+    'memory_diffusion',
+    'reflection',
+    'portrait',
+  ].forEach(function(sectionName) {
+    if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);
+  });
+
+  var mergeVal = numberValue('cfg-merge', 75);
+  if (configSnapshot && mergeVal !== (configSnapshot.merge_threshold ?? 75)) {
+    body.merge_threshold = mergeVal;
+  }
+
+  var keyVal = document.getElementById('cfg-dehy-key').value;
+  if (keyVal) {
+    if (!body.dehydration) body.dehydration = {};
+    body.dehydration.api_key = keyVal;
+  }
+  var embKeyVal = document.getElementById('cfg-emb-key').value;
+  if (embKeyVal) {
+    if (!body.embedding) body.embedding = {};
+    body.embedding.api_key = embKeyVal;
+  }
+  var personaKeyVal = document.getElementById('cfg-persona-key').value;
+  if (personaKeyVal) {
+    if (!body.persona) body.persona = {};
+    body.persona.api_key = personaKeyVal;
+  }
+  var reflectionKeyVal = document.getElementById('cfg-reflection-key').value;
+  if (reflectionKeyVal) {
+    if (!body.reflection) body.reflection = {};
+    body.reflection.api_key = reflectionKeyVal;
+  }
+  var dreamKeyVal = document.getElementById('cfg-dream-key').value;
+  if (dreamKeyVal) {
+    if (!body.dream) body.dream = {};
+    body.dream.api_key = dreamKeyVal;
+  }
   try {
     var res = await authFetch(BASE + '/api/config', {
       method: 'POST',
@@ -3126,13 +5883,13 @@ async function saveConfig(persist) {
     if (!res) return;
     var result = await res.json();
     if (result.ok) {
-      status.innerHTML = '<span style="color:var(--positive)">✓ 已更新: ' + esc((result.updated || []).join(', ')) + '</span>';
+      setConfigStatus('<span style="color:var(--positive)">✓ 已更新: ' + esc((result.updated || []).join(', ')) + '</span>');
       loadConfig();
     } else {
-      status.innerHTML = '<span style="color:var(--negative)">✗ ' + esc(result.error || '未知错误') + '</span>';
+      setConfigStatus('<span style="color:var(--negative)">✗ ' + esc(result.error || '未知错误') + '</span>');
     }
   } catch (e) {
-    status.innerHTML = '<span style="color:var(--negative)">✗ 请求失败: ' + esc(e.message) + '</span>';
+    setConfigStatus('<span style="color:var(--negative)">✗ 请求失败: ' + esc(e.message) + '</span>');
   }
 }
 
@@ -3152,7 +5909,12 @@ uploadZone.addEventListener('drop', e => {
   uploadZone.style.borderColor = 'var(--border)';
   if (e.dataTransfer.files.length) startImport(e.dataTransfer.files[0]);
 });
-fileInput.addEventListener('change', () => { if (fileInput.files.length) startImport(fileInput.files[0]); });
+fileInput.addEventListener('change', () => {
+  if (!fileInput.files.length) return;
+  const selectedFile = fileInput.files[0];
+  fileInput.value = '';
+  startImport(selectedFile);
+});
 
 async function startImport(file) {
   const preserveRaw = document.getElementById('import-preserve-raw').checked;

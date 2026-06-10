@@ -7,13 +7,20 @@ from typing import Any
 RELATION_TYPES = {
     "triggers",
     "causes",
+    "precedes",
+    "context_of",
+    "same_event",
     "updates",
+    "next_context",
+    "previous_context",
+    "reflects_on",
     "contradicts",
     "supports",
     "promises",
     "blocks",
     "belongs_to",
     "emotional_echo",
+    "evidenced_by",
     "relates_to",
 }
 
@@ -129,6 +136,20 @@ class MemoryEdgeStore:
             selected.extend(edges[: max(1, limit_per_source)])
         selected.sort(key=lambda item: item.get("confidence", 0), reverse=True)
         return selected
+
+    def delete_for_bucket(self, bucket_id: str) -> int:
+        bucket_id = str(bucket_id or "").strip()
+        if not bucket_id:
+            return 0
+        edges = self.list_edges()
+        kept = [
+            edge for edge in edges
+            if edge.get("source") != bucket_id and edge.get("target") != bucket_id
+        ]
+        deleted = len(edges) - len(kept)
+        if deleted:
+            self._write_all(kept)
+        return deleted
 
     def _write_all(self, edges: list[dict]) -> None:
         tmp_path = f"{self.path}.tmp"

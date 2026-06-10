@@ -42,6 +42,12 @@ class EmbeddingEngine:
         )
         self.model = embed_cfg.get("model", "gemini-embedding-001")
         self.enabled = bool(self.api_key) and embed_cfg.get("enabled", True)
+        self.max_chars = self._int_between(embed_cfg.get("max_chars", 6000), 6000, 500, 32000)
+        self.query_instruction = str(
+            embed_cfg.get("query_instruction")
+            or "Given a memory search query, retrieve relevant long-term memory passages."
+        ).strip()
+        self.document_instruction = str(embed_cfg.get("document_instruction") or "").strip()
 
         # --- SQLite path: buckets_dir/embeddings.db ---
         db_path = os.path.join(config["buckets_dir"], "embeddings.db")
@@ -68,9 +74,13 @@ class EmbeddingEngine:
             CREATE TABLE IF NOT EXISTS embeddings (
                 bucket_id TEXT PRIMARY KEY,
                 embedding TEXT NOT NULL,
+                model TEXT,
+                dimension INTEGER,
                 updated_at TEXT NOT NULL
             )
         """)
+        self._ensure_column(conn, "embeddings", "model", "TEXT")
+        self._ensure_column(conn, "embeddings", "dimension", "INTEGER")
         conn.commit()
         conn.close()
 
@@ -84,7 +94,7 @@ class EmbeddingEngine:
             return False
 
         try:
-            embedding = await self._generate_embedding(content)
+            embedding = await self._generate_embedding(content, kind="document")
             if not embedding:
                 return False
             self._store_embedding(bucket_id, embedding)
@@ -93,10 +103,11 @@ class EmbeddingEngine:
             logger.warning(f"Embedding generation failed for {bucket_id}: {e}")
             return False
 
-    async def _generate_embedding(self, text: str) -> list[float]:
+    async def _generate_embedding(self, text: str, *, kind: str = "document") -> list[float]:
         """Call API to generate embedding vector."""
         # Truncate to avoid token limits
-        truncated = text[:2000]
+        prepared = self._prepare_embedding_input(text, kind=kind)
+        truncated = prepared[: self.max_chars]
         try:
             response = await self.client.embeddings.create(
                 model=self.model,
@@ -114,8 +125,11 @@ class EmbeddingEngine:
         from utils import now_iso
         conn = sqlite3.connect(self.db_path)
         conn.execute(
-            "INSERT OR REPLACE INTO embeddings (bucket_id, embedding, updated_at) VALUES (?, ?, ?)",
-            (bucket_id, json.dumps(embedding), now_iso()),
+            """
+            INSERT OR REPLACE INTO embeddings (bucket_id, embedding, model, dimension, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (bucket_id, json.dumps(embedding), self.model, len(embedding), now_iso()),
         )
         conn.commit()
         conn.close()
@@ -131,12 +145,15 @@ class EmbeddingEngine:
         """Retrieve stored embedding for a bucket. Returns None if not found."""
         conn = sqlite3.connect(self.db_path)
         row = conn.execute(
-            "SELECT embedding FROM embeddings WHERE bucket_id = ?", (bucket_id,)
+            "SELECT embedding, model, dimension FROM embeddings WHERE bucket_id = ?", (bucket_id,)
         ).fetchone()
         conn.close()
         if row:
             try:
-                return json.loads(row[0])
+                embedding = json.loads(row[0])
+                if not self._row_matches_current_model(row[1], row[2], embedding):
+                    return None
+                return embedding
             except json.JSONDecodeError:
                 return None
         return None
@@ -151,7 +168,7 @@ class EmbeddingEngine:
             return []
 
         try:
-            query_embedding = await self._generate_embedding(query)
+            query_embedding = await self._generate_embedding(query, kind="query")
             if not query_embedding:
                 return []
         except Exception as e:
@@ -160,7 +177,7 @@ class EmbeddingEngine:
 
         # Load all embeddings from SQLite
         conn = sqlite3.connect(self.db_path)
-        rows = conn.execute("SELECT bucket_id, embedding FROM embeddings").fetchall()
+        rows = conn.execute("SELECT bucket_id, embedding, model, dimension FROM embeddings").fetchall()
         conn.close()
 
         if not rows:
@@ -168,9 +185,11 @@ class EmbeddingEngine:
 
         # Calculate cosine similarity
         results = []
-        for bucket_id, emb_json in rows:
+        for bucket_id, emb_json, model, dimension in rows:
             try:
                 stored_embedding = json.loads(emb_json)
+                if not self._row_matches_current_model(model, dimension, stored_embedding):
+                    continue
                 sim = self._cosine_similarity(query_embedding, stored_embedding)
                 results.append((bucket_id, sim))
             except (json.JSONDecodeError, Exception):
@@ -178,6 +197,40 @@ class EmbeddingEngine:
 
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:top_k]
+
+    def _prepare_embedding_input(self, text: str, *, kind: str) -> str:
+        raw = str(text or "")
+        if kind == "query" and self.query_instruction:
+            return f"Instruct: {self.query_instruction}\nQuery: {raw}"
+        if kind == "document" and self.document_instruction:
+            return f"Instruct: {self.document_instruction}\nDocument: {raw}"
+        return raw
+
+    def _row_matches_current_model(self, model: str | None, dimension: int | None, embedding: list[float]) -> bool:
+        if not embedding:
+            return False
+        if model != self.model:
+            return False
+        try:
+            stored_dimension = int(dimension)
+        except (TypeError, ValueError):
+            return False
+        return stored_dimension == len(embedding)
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_type: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if any(row[1] == column for row in rows):
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+    @staticmethod
+    def _int_between(value, default: int, min_value: int, max_value: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = default
+        return max(min_value, min(max_value, number))
 
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:

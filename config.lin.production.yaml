@@ -197,6 +197,34 @@ gateway:
 # --- Persona State Engine / 人格状态引擎 ---
 # Tracks slow personality drift, relationship state, and per-session affect.
 # 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
+  # --- Mainline recall additions merged into Lin production config ---
+  just_now_context_enabled: false
+  just_now_context_hours: 6
+  just_now_context_max_turns: 5
+  just_now_context_budget: 420
+  conversation_turns_max_entries: 500
+  date_persona_trace_enabled: false
+  date_persona_trace_budget: 220
+  date_persona_trace_max_events: 5
+  date_persona_trace_include_daily: false
+  retrieval_mode: graph
+  portrait_memory_enabled: false
+  portrait_memory_budget: 360
+  portrait_memory_max_sources: 8
+  portrait_memory_include_anchors: false
+  query_planner_enabled: true
+  query_planner_model: ""
+  query_planner_min_chars: 16
+  query_planner_max_queries: 3
+  query_planner_max_tokens: 360
+  memory_detail_recall_enabled: false
+  memory_detail_recall_max_ids: 3
+  memory_detail_recall_budget: 1200
+  word_map_hint_enabled: false
+  word_map_hint_weight: 0.08
+  word_map_hint_moment_boost: 0.25
+  word_map_hint_neighbor_limit: 6
+  word_map_hint_bucket_limit: 12
 persona:
   enabled: true
   profile_id: "lin_che"
@@ -302,3 +330,234 @@ wikilink:
   auto_top_k: 4
   min_keyword_len: 3
   exclude_keywords: []
+
+# --- Mainline memory/recall sections merged for Lin production ---
+reranker:
+  enabled: true
+  model: Qwen/Qwen3-Reranker-4B
+  base_url: ''
+  candidate_limit: 20
+  score_weight: 0.65
+  timeout_seconds: 12
+
+recall_diagnostics:
+  enabled: false
+  path: ''
+  max_candidates: 20
+  max_text_chars: 220
+
+recall_thresholds:
+  vector_min_score: 0.5
+  facet_vector_min_score: 0.45
+  vague_vector_min_score: 0.4
+  explicit_vector_min_score: 0.55
+  explicit_admission_semantic_score: 0.72
+  explicit_admission_rerank_score: 0.65
+  vague_top_k: 50
+
+recall:
+  query_resurface_enabled: false
+
+word_map:
+  enabled: false
+  max_terms_per_bucket: 16
+  edge_top_k: 10
+  min_term_len: 2
+  stopwords: []
+  private_terms: []
+  stopword_prefixes: []
+  overview_stopwords: []
+  overview_stopword_prefixes: []
+  overview_aliases: {}
+  overview_priority_terms: []
+  overview_hub_terms: []
+  weak_hint_terms: []
+  weak_hint_weight: 0.25
+
+identity_semantics:
+  enabled: false
+  private_config_path: ''
+  min_confidence: 0.78
+  evidence_tags:
+  - profile_fact
+  - ai_favorite
+  - favorite_memory
+
+moment_annotations:
+  enabled: true
+  max_summary_chars: 160
+  max_evidence_spans: 3
+  max_evidence_chars: 120
+
+node_facets:
+  enabled: true
+  store: sqlite
+  salience_min: 0.2
+  salience_max: 1.3
+
+memory_relevance:
+  aliases:
+    relationship_identity:
+    - human-ai relationship
+    - ai relationship
+    - 人机恋
+    - 人机关系
+    - AI伴侣
+    intimacy:
+    - intimacy
+    - sexual
+    - nsfw
+    - 亲密
+    - 情欲
+    - 欲望
+    embodiment:
+    - embodiment
+    - physical body
+    - 具身
+    - 身体
+    - 形体
+    hardware_protocol:
+    - hardware
+    - protocol
+    - ble
+    - esp32
+    - mpr121
+    - 硬件
+    - 协议
+    communication_action:
+    - email
+    - mail
+    - message
+    - 发邮件
+    - 邮件
+    - 发消息
+    old_or_resolved:
+    - legacy
+    - deprecated
+    - resolved
+    - 旧版
+    - 废弃
+    - 已解决
+  blocked_facets: []
+  section_hints: {}
+
+memory_write_gate:
+  enabled: true
+  auto_sources:
+  - operit
+  - workflow
+  - worker
+  - auto
+  pending_threshold: 0.42
+  grow_threshold: 0.72
+  duplicate_similarity: 0.88
+  repeat_similarity: 0.82
+  repeat_promote_count: 2
+  candidate_log: memory_write_candidates.jsonl
+  max_recent_candidates: 120
+
+memory_diffusion:
+  enabled: true
+  max_hops: 2
+  top_k: 4
+  min_activation: 0.18
+  hop_decays:
+  - 0.8
+  - 0.6
+  - 0.4
+  - 0.25
+  decay: 0.55
+  include_incoming: true
+  max_paths_per_hit: 3
+  chain_walk_enabled: false
+  chain_max_hops: 6
+  chain_min_strength: 0.2
+  chain_min_confidence: 0.72
+  chain_min_relation_priority: 60
+  chain_max_frontier: 24
+  chain_continue_relation_types:
+  - same_event
+  - context_of
+  - precedes
+  - previous_context
+  - next_context
+  - updates
+  - evidenced_by
+  - reflects_on
+  relation_type_weights:
+    same_event: 1.15
+    context_of: 1.1
+    embodiment_chain: 1.05
+    same_topic: 0.9
+    precedes: 1.0
+    triggers: 1.0
+    cause: 0.95
+    causes: 0.95
+    followup: 0.9
+    updates: 0.9
+    supports: 0.85
+    promises: 0.9
+    belongs_to: 0.8
+    emotional_echo: 0.95
+    next_context: 0.85
+    previous_context: 0.75
+    reflects_on: 0.8
+    evidenced_by: 1.0
+    relates_to: 0.7
+    old_version: 0.35
+    conflict: 0.4
+    contradicts: 0.45
+    blocks: 0.45
+
+portrait:
+  enabled: false
+  auto_enabled: false
+  auto_initial_enabled: false
+  daily_enabled: false
+  timezone: Asia/Shanghai
+  daily_hour: 4
+  check_interval_minutes: 60
+  state_path: ''
+  base_url: ''
+  model: ''
+  thinking_mode: ''
+  temperature: 0.1
+  max_tokens: 1800
+  material_limit: 18
+  first_run_material_limit: 160
+  source_excerpt_chars: 900
+  recent_continuity_days: 3
+  persona_events_limit: 24
+  recent_buffer_max: 24
+  staging_pool_max: 24
+  candidate_max: 40
+
+dream:
+  enabled: false
+  auto_enabled: false
+  surface_enabled: false
+  inject_enabled: false
+  retain_after_inject: false
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+  thinking_mode: disabled
+  temperature: 0.85
+  max_tokens: 900
+  timezone: Asia/Shanghai
+  daily_hour: 3
+  run_window_hours: 3
+  daily_probability: 0.4
+  check_interval_minutes: 60
+  min_material_count: 5
+  material_window_hours: 48
+  material_limit: 5
+  old_echo_enabled: false
+  old_echo_min_age_hours: 72
+  identity_anchor_id: c0b8ddb7423e
+  min_surface_age_hours: 3
+  surface_threshold: 0.62
+  attempt_threshold: 0.45
+  alpha_subordinate: 0.25
+  spontaneous_surface_prob: 0.02
+  max_surface_attempts: 4
+  claim_ttl_minutes: 15
