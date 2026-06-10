@@ -8911,6 +8911,10 @@ async def api_config_update(request):
             gateway_cfg["recent_context_budget"] = max(0, int(g["recent_context_budget"]))
             gateway_hot_update_body["recent_context_budget"] = gateway_cfg["recent_context_budget"]
             updated.append("gateway.recent_context_budget")
+        if "recent_context_interval_rounds" in g:
+            gateway_cfg["recent_context_interval_rounds"] = max(0, int(g["recent_context_interval_rounds"]))
+            gateway_hot_update_body["recent_context_interval_rounds"] = gateway_cfg["recent_context_interval_rounds"]
+            updated.append("gateway.recent_context_interval_rounds")
         if "date_persona_trace_enabled" in g:
             gateway_cfg["date_persona_trace_enabled"] = _bool_value(g["date_persona_trace_enabled"], True)
             gateway_hot_update_body["date_persona_trace_enabled"] = gateway_cfg["date_persona_trace_enabled"]
@@ -8936,10 +8940,22 @@ async def api_config_update(request):
             gateway_cfg["recalled_memory_budget"] = max(0, int(g["recalled_memory_budget"]))
             gateway_hot_update_body["recalled_memory_budget"] = gateway_cfg["recalled_memory_budget"]
             updated.append("gateway.recalled_memory_budget")
+        if "recalled_memory_interval_rounds" in g:
+            gateway_cfg["recalled_memory_interval_rounds"] = max(0, int(g["recalled_memory_interval_rounds"]))
+            gateway_hot_update_body["recalled_memory_interval_rounds"] = gateway_cfg[
+                "recalled_memory_interval_rounds"
+            ]
+            updated.append("gateway.recalled_memory_interval_rounds")
         if "related_memory_budget" in g:
             gateway_cfg["related_memory_budget"] = max(0, int(g["related_memory_budget"]))
             gateway_hot_update_body["related_memory_budget"] = gateway_cfg["related_memory_budget"]
             updated.append("gateway.related_memory_budget")
+        if "related_memory_interval_rounds" in g:
+            gateway_cfg["related_memory_interval_rounds"] = max(0, int(g["related_memory_interval_rounds"]))
+            gateway_hot_update_body["related_memory_interval_rounds"] = gateway_cfg[
+                "related_memory_interval_rounds"
+            ]
+            updated.append("gateway.related_memory_interval_rounds")
         if "current_inner_state_interval_rounds" in g:
             gateway_cfg["current_inner_state_interval_rounds"] = max(
                 0,
@@ -9233,6 +9249,11 @@ async def api_config_update(request):
                     )
                 if "recent_context_budget" in body["gateway"]:
                     sc_gateway["recent_context_budget"] = max(0, int(body["gateway"]["recent_context_budget"]))
+                if "recent_context_interval_rounds" in body["gateway"]:
+                    sc_gateway["recent_context_interval_rounds"] = max(
+                        0,
+                        int(body["gateway"]["recent_context_interval_rounds"]),
+                    )
                 if "date_persona_trace_enabled" in body["gateway"]:
                     sc_gateway["date_persona_trace_enabled"] = _bool_value(
                         body["gateway"]["date_persona_trace_enabled"],
@@ -9255,8 +9276,18 @@ async def api_config_update(request):
                     )
                 if "recalled_memory_budget" in body["gateway"]:
                     sc_gateway["recalled_memory_budget"] = max(0, int(body["gateway"]["recalled_memory_budget"]))
+                if "recalled_memory_interval_rounds" in body["gateway"]:
+                    sc_gateway["recalled_memory_interval_rounds"] = max(
+                        0,
+                        int(body["gateway"]["recalled_memory_interval_rounds"]),
+                    )
                 if "related_memory_budget" in body["gateway"]:
                     sc_gateway["related_memory_budget"] = max(0, int(body["gateway"]["related_memory_budget"]))
+                if "related_memory_interval_rounds" in body["gateway"]:
+                    sc_gateway["related_memory_interval_rounds"] = max(
+                        0,
+                        int(body["gateway"]["related_memory_interval_rounds"]),
+                    )
                 if "current_inner_state_interval_rounds" in body["gateway"]:
                     sc_gateway["current_inner_state_interval_rounds"] = max(
                         0,

@@ -303,6 +303,7 @@ gateway:
   date_persona_trace_max_events: 5
   date_persona_trace_include_daily: true
   recalled_memory_budget: 400
+  recalled_memory_interval_rounds: 1 # auto Recalled Memory every N rounds; explicit memory queries bypass
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   retrieval_mode: graph       # graph | bucket; bucket skips moment graph diffusion
   portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact + selected anchor
@@ -322,7 +323,9 @@ gateway:
   favorite_memory_budget: 180
   favorite_memory_max_cards: 1
   related_memory_budget: 220
+  related_memory_interval_rounds: 1 # auto Diffused Memory every N rounds; explicit memory queries bypass
   core_memory_interval_rounds: 0
+  recent_context_interval_rounds: 1 # auto Recent Context every N rounds; explicit recent queries bypass
   current_inner_state_interval_rounds: 15
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0

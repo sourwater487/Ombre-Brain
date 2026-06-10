@@ -290,6 +290,15 @@ class GatewayService:
         self.core_budget = int(self.gateway_cfg.get("core_memory_budget", 500))
         self.recent_budget = int(self.gateway_cfg.get("recent_context_budget", 300))
         self.recalled_budget = int(self.gateway_cfg.get("recalled_memory_budget", 400))
+        self.recent_context_interval_rounds = max(
+            0, int(self.gateway_cfg.get("recent_context_interval_rounds", 1))
+        )
+        self.recalled_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("recalled_memory_interval_rounds", 1))
+        )
+        self.related_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("related_memory_interval_rounds", 1))
+        )
         self.direct_render_mode = self._normalize_direct_render_mode(
             self.gateway_cfg.get("direct_render_mode", "auto")
         )
@@ -465,6 +474,7 @@ class GatewayService:
                 "recent_context_cooldown_hours": self.recent_context_cooldown_hours,
                 "recent_context_reentry_idle_hours": self.recent_context_reentry_idle_hours,
                 "recent_context_budget": self.recent_budget,
+                "recent_context_interval_rounds": self.recent_context_interval_rounds,
                 "just_now_context_enabled": self.just_now_context_enabled,
                 "just_now_context_hours": self.just_now_context_hours,
                 "just_now_context_max_turns": self.just_now_context_max_turns,
@@ -474,6 +484,8 @@ class GatewayService:
                 "date_persona_trace_max_events": self.date_persona_trace_max_events,
                 "recalled_memory_budget": self.recalled_budget,
                 "related_memory_budget": self.related_memory_budget,
+                "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
+                "related_memory_interval_rounds": self.related_memory_interval_rounds,
                 "current_inner_state_interval_rounds": self.current_inner_state_interval_rounds,
                 "direct_render_mode": self.direct_render_mode,
                 "retrieval_mode": self.retrieval_mode,
@@ -528,6 +540,9 @@ class GatewayService:
             "date_persona_trace_include_daily": self.date_persona_trace_include_daily,
             "recalled_memory_budget": self.recalled_budget,
             "related_memory_budget": self.related_memory_budget,
+            "recent_context_interval_rounds": self.recent_context_interval_rounds,
+            "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
+            "related_memory_interval_rounds": self.related_memory_interval_rounds,
             "current_inner_state_interval_rounds": self.current_inner_state_interval_rounds,
             "direct_render_mode": self.direct_render_mode,
             "retrieval_mode": self.retrieval_mode,
@@ -680,6 +695,18 @@ class GatewayService:
             self.related_memory_budget = max(0, int(payload["related_memory_budget"]))
             self.gateway_cfg["related_memory_budget"] = self.related_memory_budget
             updated.append("gateway.related_memory_budget")
+        if "recent_context_interval_rounds" in payload:
+            self.recent_context_interval_rounds = max(0, int(payload["recent_context_interval_rounds"]))
+            self.gateway_cfg["recent_context_interval_rounds"] = self.recent_context_interval_rounds
+            updated.append("gateway.recent_context_interval_rounds")
+        if "recalled_memory_interval_rounds" in payload:
+            self.recalled_memory_interval_rounds = max(0, int(payload["recalled_memory_interval_rounds"]))
+            self.gateway_cfg["recalled_memory_interval_rounds"] = self.recalled_memory_interval_rounds
+            updated.append("gateway.recalled_memory_interval_rounds")
+        if "related_memory_interval_rounds" in payload:
+            self.related_memory_interval_rounds = max(0, int(payload["related_memory_interval_rounds"]))
+            self.gateway_cfg["related_memory_interval_rounds"] = self.related_memory_interval_rounds
+            updated.append("gateway.related_memory_interval_rounds")
         if "current_inner_state_interval_rounds" in payload:
             self.current_inner_state_interval_rounds = max(
                 0,
@@ -1210,6 +1237,7 @@ class GatewayService:
         all_moments: list[dict] = []
         grouped_moments: dict[str, list[dict]] = {}
         moment_edges: list[dict] = []
+        displayed_recalled_moments: list[dict] = []
         recalled_memory = ""
         date_persona_trace = ""
         date_persona_trace_debug: dict[str, Any] = self._date_persona_trace_debug_base(current_user_query)
@@ -1231,6 +1259,15 @@ class GatewayService:
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
 
         if is_new_user_turn:
+            explicit_memory_recall = self._query_requests_explicit_memory_recall(current_user_query)
+            direct_recall_allowed = explicit_memory_recall or self._should_inject_interval(
+                session_id,
+                self.recalled_memory_interval_rounds,
+            )
+            related_recall_allowed = explicit_memory_recall or self._should_inject_interval(
+                session_id,
+                self.related_memory_interval_rounds,
+            )
             skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
                 current_user_query,
                 session_id,
@@ -1287,11 +1324,27 @@ class GatewayService:
             else:
                 portrait_memory, portrait_memory_debug = self._build_portrait_memory_block(all_buckets)
             if self.recalled_budget > 0 or self.related_memory_budget > 0:
+                should_select_dynamic_seeds = (
+                    (self.recalled_budget > 0 and direct_recall_allowed)
+                    or (
+                        self.retrieval_mode == "graph"
+                        and self.related_memory_budget > 0
+                        and related_recall_allowed
+                    )
+                )
                 if skip_broad_dynamic_recall:
                     logger.info(
                         "Gateway broad dynamic recall skipped | session=%s reason=%s",
                         session_id,
                         query_planner_debug.get("skip_reason") or "targeted_memory_detail_query",
+                    )
+                    suppressed_moments = []
+                    suppressed_buckets = []
+                elif not should_select_dynamic_seeds:
+                    query_planner_debug["skip_reason"] = "auto_recall_interval"
+                    logger.info(
+                        "Gateway broad dynamic recall skipped | session=%s reason=auto_recall_interval",
+                        session_id,
                     )
                     suppressed_moments = []
                     suppressed_buckets = []
@@ -1333,13 +1386,14 @@ class GatewayService:
             else:
                 suppressed_moments = []
                 suppressed_buckets = []
-            recalled_memory = await self._format_recalled_moments(
-                recalled_moments,
-                grouped_moments,
-                all_buckets,
-                self.recalled_budget,
-                current_user_query,
-            )
+            if direct_recall_allowed:
+                recalled_memory = await self._format_recalled_moments(
+                    recalled_moments,
+                    grouped_moments,
+                    all_buckets,
+                    self.recalled_budget,
+                    current_user_query,
+                )
             if needs_handoff_first or just_now_context_requested:
                 date_persona_trace_debug["skip_reason"] = (
                     "just_now_context"
@@ -1359,7 +1413,7 @@ class GatewayService:
                 or self._should_inject_interval(session_id, self.favorite_memory_interval_rounds)
             ):
                 favorite_memory, favorite_ids = await self._build_favorite_memory_block(all_buckets, session_id)
-            if self.retrieval_mode == "graph":
+            if self.retrieval_mode == "graph" and related_recall_allowed:
                 related_memory, diffused_moment_debug = self._build_moment_diffused_memory_with_debug(
                     recalled_moments,
                     moment_candidates,
@@ -1371,14 +1425,15 @@ class GatewayService:
                 )
             else:
                 related_memory = ""
+            displayed_recalled_moments = recalled_moments if recalled_memory.strip() else []
             current_direct_bucket_ids = [
                 str(moment.get("bucket_id") or "")
-                for moment in recalled_moments
+                for moment in displayed_recalled_moments
                 if moment.get("bucket_id")
             ]
             current_direct_moment_ids = [
                 str(moment.get("moment_id") or "")
-                for moment in recalled_moments
+                for moment in displayed_recalled_moments
                 if moment.get("moment_id")
             ]
             current_diffused_bucket_ids = self._extract_bucket_ids_from_context(related_memory)
@@ -1458,7 +1513,7 @@ class GatewayService:
                     recent_context_bucket_ids
                     + [
                         str(moment.get("bucket_id") or "")
-                        for moment in recalled_moments
+                        for moment in displayed_recalled_moments
                         if moment.get("bucket_id")
                     ]
                     + [
@@ -1518,7 +1573,7 @@ class GatewayService:
                 all_buckets=all_buckets,
                 portrait_memory=portrait_memory,
                 portrait_memory_debug=portrait_memory_debug,
-                recalled_moments=recalled_moments,
+                recalled_moments=displayed_recalled_moments,
                 recalled_memory=recalled_memory,
                 date_persona_trace=date_persona_trace,
                 date_persona_trace_debug=date_persona_trace_debug,
@@ -4050,6 +4105,8 @@ class GatewayService:
             return False
         if self._recent_context_in_cooldown(session_id):
             return False
+        if not self._should_inject_interval(session_id, self.recent_context_interval_rounds):
+            return False
         return bool(self._recent_context_reason(session_id, query_text, has_reliable_dynamic_context))
 
     def _recent_context_reason(
@@ -4401,6 +4458,45 @@ class GatewayService:
             "what did we talk",
             "last time",
             "earlier",
+        )
+        return any(phrase in text for phrase in explicit_phrases)
+
+    def _query_requests_explicit_memory_recall(self, query: str) -> bool:
+        text = " ".join(str(query or "").strip().lower().split())
+        if not text:
+            return False
+        if self._extract_explicit_bucket_ids_from_text(text) or self._extract_explicit_moment_ids_from_text(text):
+            return True
+        if (
+            self._query_requests_recent_context(text)
+            or self._query_requests_just_now_context(text)
+            or self._query_requests_favorite_memory(text)
+            or self._query_requests_targeted_memory_detail(text)
+        ):
+            return True
+        explicit_phrases = (
+            "你还记得",
+            "还记得",
+            "记得我",
+            "记得我们",
+            "你记不记得",
+            "帮我回忆",
+            "回忆一下",
+            "查一下记忆",
+            "查记忆",
+            "翻一下记忆",
+            "翻记忆",
+            "从记忆里",
+            "记忆里",
+            "以前有没有",
+            "之前有没有",
+            "以前是不是",
+            "之前是不是",
+            "do you remember",
+            "remember when",
+            "from memory",
+            "search memory",
+            "recall",
         )
         return any(phrase in text for phrase in explicit_phrases)
 

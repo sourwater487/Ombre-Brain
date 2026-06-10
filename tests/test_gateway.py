@@ -433,8 +433,11 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         recent_context_cooldown_hours=6,
         recent_context_reentry_idle_hours=24,
         recent_context_budget=300,
+        recent_context_interval_rounds=6,
         recalled_memory_budget=400,
+        recalled_memory_interval_rounds=2,
         related_memory_budget=220,
+        related_memory_interval_rounds=3,
         current_inner_state_interval_rounds=15,
         direct_render_mode="auto",
         retrieval_mode="graph",
@@ -465,8 +468,11 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
                     "recent_context_cooldown_hours": 4.5,
                     "recent_context_reentry_idle_hours": 24,
                     "recent_context_budget": 240,
+                    "recent_context_interval_rounds": 5,
                     "recalled_memory_budget": 520,
+                    "recalled_memory_interval_rounds": 4,
                     "related_memory_budget": 180,
+                    "related_memory_interval_rounds": 6,
                     "current_inner_state_interval_rounds": 9,
                     "direct_render_mode": "full",
                     "retrieval_mode": "bucket",
@@ -500,8 +506,11 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         "gateway.recent_context_cooldown_hours",
         "gateway.recent_context_reentry_idle_hours",
         "gateway.recent_context_budget",
+        "gateway.recent_context_interval_rounds",
         "gateway.recalled_memory_budget",
+        "gateway.recalled_memory_interval_rounds",
         "gateway.related_memory_budget",
+        "gateway.related_memory_interval_rounds",
         "gateway.current_inner_state_interval_rounds",
         "gateway.direct_render_mode",
         "gateway.retrieval_mode",
@@ -528,8 +537,11 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
     assert service.recent_context_cooldown_hours == pytest.approx(4.5)
     assert service.recent_context_reentry_idle_hours == pytest.approx(24)
     assert service.recent_budget == 240
+    assert service.recent_context_interval_rounds == 5
     assert service.recalled_budget == 520
+    assert service.recalled_memory_interval_rounds == 4
     assert service.related_memory_budget == 180
+    assert service.related_memory_interval_rounds == 6
     assert service.current_inner_state_interval_rounds == 9
     assert service.direct_render_mode == "full"
     assert service.retrieval_mode == "bucket"
@@ -562,8 +574,11 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
     assert response.json()["gateway"]["recent_context_cooldown_hours"] == pytest.approx(4.5)
     assert response.json()["gateway"]["recent_context_reentry_idle_hours"] == pytest.approx(24)
     assert response.json()["gateway"]["recent_context_budget"] == 240
+    assert response.json()["gateway"]["recent_context_interval_rounds"] == 5
     assert response.json()["gateway"]["recalled_memory_budget"] == 520
+    assert response.json()["gateway"]["recalled_memory_interval_rounds"] == 4
     assert response.json()["gateway"]["related_memory_budget"] == 180
+    assert response.json()["gateway"]["related_memory_interval_rounds"] == 6
     assert response.json()["gateway"]["current_inner_state_interval_rounds"] == 9
     assert response.json()["memory_diffusion"]["chain_walk_enabled"] is True
 
@@ -6906,6 +6921,103 @@ def test_high_confidence_match_survives_cooldown_after_recent_window(
     assert recalled_ids == [bucket_id]
     assert "Recalled Memory" in injected
     assert "不再依赖哥哥算长大吗" in injected
+
+
+def test_gateway_auto_recalled_memory_respects_interval_but_explicit_recall_bypasses(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        recalled_memory_interval_rounds=2,
+        related_memory_budget=0,
+        current_inner_state_interval_rounds=0,
+        first_card_min_score=0.1,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="星星计划需要在周五之前确认路线。",
+        name="星星计划路线",
+        hours_ago=6,
+        importance=10,
+    )
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.95)],
+    )
+    state_store.record_success("sess-recall-interval", [])
+    state_store.record_success("sess-recall-interval", [])
+
+    payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "星星计划怎么样"}]},
+            "sess-recall-interval",
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == []
+    assert "Recalled Memory" not in injected
+    assert "星星计划路线" not in injected
+
+    payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "你还记得星星计划吗"}]},
+            "sess-recall-interval",
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == [bucket_id]
+    assert "Recalled Memory" in injected
+    assert "星星计划路线" in injected
+
+
+def test_gateway_related_memory_interval_can_surface_without_recalled_memory(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        recalled_memory_interval_rounds=2,
+        related_memory_budget=1200,
+        related_memory_interval_rounds=3,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+    )
+    seed_id, target_id = _create_moment_diffusion_pair(bucket_mgr, cfg)
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.95)],
+    )
+    state_store.record_success("sess-related-interval", [])
+    state_store.record_success("sess-related-interval", [])
+
+    payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "种子项目"}]},
+            "sess-related-interval",
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == [target_id]
+    assert "Recalled Memory" not in injected
+    assert "种子项目现在需要被直接召回" not in injected
+    assert "Diffused Memory" in injected
+    assert "扩散摘要目标" in injected
 
 
 def test_recent_round_skip_fallback_keeps_cooldown(monkeypatch, test_config, bucket_mgr):
