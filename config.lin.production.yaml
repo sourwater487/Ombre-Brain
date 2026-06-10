@@ -171,7 +171,7 @@ gateway:
   relationship_weather_budget: 220
   favorite_memory_budget: 180
   favorite_memory_max_cards: 1
-  related_memory_budget: 160
+  related_memory_budget: 120
   related_memory_interval_rounds: 3
   related_memory_skip_recent_rounds: 12
   related_memory_cooldown_hours: 48
@@ -184,7 +184,7 @@ gateway:
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
-  edge_min_confidence: 0.62
+  edge_min_confidence: 0.68
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN
   #   OMBRE_GATEWAY_UPSTREAM_API_KEY
@@ -347,13 +347,13 @@ recall_diagnostics:
   max_text_chars: 220
 
 recall_thresholds:
-  vector_min_score: 0.5
-  facet_vector_min_score: 0.45
-  vague_vector_min_score: 0.4
-  explicit_vector_min_score: 0.55
-  explicit_admission_semantic_score: 0.72
-  explicit_admission_rerank_score: 0.65
-  vague_top_k: 50
+  vector_min_score: 0.55
+  facet_vector_min_score: 0.5
+  vague_vector_min_score: 0.5
+  explicit_vector_min_score: 0.6
+  explicit_admission_semantic_score: 0.75
+  explicit_admission_rerank_score: 0.7
+  vague_top_k: 40
 
 recall:
   query_resurface_enabled: false
@@ -459,8 +459,8 @@ memory_write_gate:
 memory_diffusion:
   enabled: true
   max_hops: 2
-  top_k: 3
-  min_activation: 0.25
+  top_k: 2
+  min_activation: 0.3
   hop_decays:
   - 0.8
   - 0.6
@@ -486,28 +486,28 @@ memory_diffusion:
   - reflects_on
   relation_type_weights:
     same_event: 1.15
-    context_of: 1.1
-    embodiment_chain: 1.05
-    same_topic: 0.9
-    precedes: 1.0
-    triggers: 1.0
-    cause: 0.95
-    causes: 0.95
-    followup: 0.9
-    updates: 0.9
-    supports: 0.85
-    promises: 0.9
-    belongs_to: 0.8
-    emotional_echo: 0.75
-    next_context: 0.85
-    previous_context: 0.75
-    reflects_on: 0.8
-    evidenced_by: 1.0
-    relates_to: 0.7
-    old_version: 0.3
-    conflict: 0.35
-    contradicts: 0.4
-    blocks: 0.4
+    context_of: 1.05
+    embodiment_chain: 0.9
+    same_topic: 0.75
+    precedes: 0.85
+    triggers: 0.75
+    cause: 0.75
+    causes: 0.75
+    followup: 0.65
+    updates: 0.85
+    supports: 0.8
+    promises: 0.55
+    belongs_to: 0.55
+    emotional_echo: 0.5
+    next_context: 0.7
+    previous_context: 0.6
+    reflects_on: 0.5
+    evidenced_by: 0.85
+    relates_to: 0.4
+    old_version: 0.2
+    conflict: 0.3
+    contradicts: 0.3
+    blocks: 0.3
 
 portrait:
   enabled: false
