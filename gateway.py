@@ -1289,6 +1289,10 @@ class GatewayService:
 
         if is_new_user_turn:
             explicit_memory_recall = self._query_requests_explicit_memory_recall(current_user_query)
+            memory_control_plane_query = (
+                self._query_discusses_memory_control_plane(current_user_query)
+                and not explicit_memory_recall
+            )
             direct_recall_allowed = explicit_memory_recall or self._should_inject_interval(
                 session_id,
                 self.recalled_memory_interval_rounds,
@@ -1297,6 +1301,12 @@ class GatewayService:
                 session_id,
                 self.related_memory_interval_rounds,
             )
+            query_planner_debug["explicit_memory_recall"] = explicit_memory_recall
+            query_planner_debug["memory_control_plane_query"] = memory_control_plane_query
+            query_planner_debug["direct_recall_allowed"] = direct_recall_allowed
+            query_planner_debug["related_recall_allowed"] = related_recall_allowed
+            query_planner_debug["recalled_memory_interval_rounds"] = self.recalled_memory_interval_rounds
+            query_planner_debug["related_memory_interval_rounds"] = self.related_memory_interval_rounds
             skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
                 current_user_query,
                 session_id,
@@ -1305,6 +1315,7 @@ class GatewayService:
                 skip_for_targeted_detail
                 or needs_handoff_first
                 or just_now_context_requested
+                or memory_control_plane_query
             )
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = (
@@ -1362,6 +1373,8 @@ class GatewayService:
                     )
                 )
                 if skip_broad_dynamic_recall:
+                    if memory_control_plane_query:
+                        query_planner_debug["skip_reason"] = "memory_control_plane_query"
                     logger.info(
                         "Gateway broad dynamic recall skipped | session=%s reason=%s",
                         session_id,
@@ -4527,9 +4540,55 @@ class GatewayService:
             "remember when",
             "from memory",
             "search memory",
-            "recall",
+            "can you recall",
+            "recall when",
         )
         return any(phrase in text for phrase in explicit_phrases)
+
+    @staticmethod
+    def _query_discusses_memory_control_plane(query: str) -> bool:
+        text = " ".join(str(query or "").strip().lower().split())
+        if not text:
+            return False
+        memory_terms = (
+            "gateway",
+            "ombre",
+            "memory",
+            "recalled",
+            "diffused",
+            "recent context",
+            "auto recall",
+            "recalled_memory",
+            "diffused_memory",
+            "related_memory",
+            "recent_context",
+            "召回",
+            "记忆",
+            "注入",
+            "浮现",
+            "网关",
+        )
+        control_terms = (
+            "参数",
+            "配置",
+            "阈值",
+            "频率",
+            "冷却",
+            "间隔",
+            "轮",
+            "自动",
+            "bucket",
+            "buckets",
+            "inject",
+            "injection",
+            "interval",
+            "threshold",
+            "cooldown",
+            "config",
+            "parameter",
+            "score",
+        )
+        return any(term in text for term in memory_terms) and any(term in text for term in control_terms)
 
     @staticmethod
     def _query_requests_just_now_context(query: str) -> bool:

@@ -7057,6 +7057,64 @@ def test_gateway_auto_recall_uses_stricter_threshold_than_explicit_recall(
     assert "星星计划路线" in injected
 
 
+def test_gateway_memory_control_plane_discussion_does_not_bypass_auto_recall(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        recalled_memory_interval_rounds=1,
+        related_memory_budget=0,
+        current_inner_state_interval_rounds=0,
+        first_card_min_score=0.55,
+        auto_recall_first_card_min_score=0.68,
+        recall_admission_semantic_score=0.0,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="凌晨诚实对话里确认了称呼冲突需要慢慢处理。",
+        name="凌晨诚实对话和称呼冲突",
+        hours_ago=6,
+        importance=10,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "Recalled每2轮还是太频繁，auto recall阈值要怎么调"}]},
+            "sess-control-plane",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == []
+    assert "Recalled Memory" not in injected
+    assert "凌晨诚实对话" not in injected
+    assert debug["query_planner_debug"]["skip_reason"] == "memory_control_plane_query"
+
+    payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "你还记得凌晨诚实对话和称呼冲突吗"}]},
+            "sess-control-plane",
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == [bucket_id]
+    assert "Recalled Memory" in injected
+    assert "凌晨诚实对话" in injected
+
+
 def test_gateway_related_memory_interval_can_surface_without_recalled_memory(
     monkeypatch,
     test_config,
