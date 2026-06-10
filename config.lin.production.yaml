@@ -171,7 +171,7 @@ gateway:
   relationship_weather_budget: 220
   favorite_memory_budget: 180
   favorite_memory_max_cards: 1
-  related_memory_budget: 300
+  related_memory_budget: 220
   related_memory_interval_rounds: 3
   related_memory_skip_recent_rounds: 12
   related_memory_cooldown_hours: 48
@@ -184,7 +184,7 @@ gateway:
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
-  edge_min_confidence: 0.55
+  edge_min_confidence: 0.62
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN
   #   OMBRE_GATEWAY_UPSTREAM_API_KEY
@@ -459,8 +459,8 @@ memory_write_gate:
 memory_diffusion:
   enabled: true
   max_hops: 2
-  top_k: 4
-  min_activation: 0.18
+  top_k: 3
+  min_activation: 0.25
   hop_decays:
   - 0.8
   - 0.6
@@ -498,16 +498,16 @@ memory_diffusion:
     supports: 0.85
     promises: 0.9
     belongs_to: 0.8
-    emotional_echo: 0.95
+    emotional_echo: 0.75
     next_context: 0.85
     previous_context: 0.75
     reflects_on: 0.8
     evidenced_by: 1.0
     relates_to: 0.7
-    old_version: 0.35
-    conflict: 0.4
-    contradicts: 0.45
-    blocks: 0.45
+    old_version: 0.3
+    conflict: 0.35
+    contradicts: 0.4
+    blocks: 0.4
 
 portrait:
   enabled: false
