@@ -171,7 +171,7 @@ gateway:
   relationship_weather_budget: 220
   favorite_memory_budget: 180
   favorite_memory_max_cards: 1
-  related_memory_budget: 200
+  related_memory_budget: 160
   related_memory_interval_rounds: 3
   related_memory_skip_recent_rounds: 12
   related_memory_cooldown_hours: 48
@@ -336,9 +336,9 @@ reranker:
   enabled: true
   model: Qwen/Qwen3-Reranker-4B
   base_url: 'https://api.siliconflow.cn/v1'
-  candidate_limit: 12
+  candidate_limit: 10
   score_weight: 0.65
-  timeout_seconds: 5
+  timeout_seconds: 4
 
 recall_diagnostics:
   enabled: false
