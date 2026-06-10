@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -123,6 +124,44 @@ class DummyRequest:
         if isinstance(self._body, bytes):
             return self._body
         return json.dumps(self._body or {}).encode("utf-8")
+
+
+def write_moment_edge_db(state_dir: str, rows: list[tuple[str, str, str, float]]) -> None:
+    os.makedirs(state_dir, exist_ok=True)
+    conn = sqlite3.connect(os.path.join(state_dir, "memory_moments.sqlite"))
+    conn.execute(
+        """
+        CREATE TABLE memory_moment_edges (
+            source TEXT NOT NULL,
+            target TEXT NOT NULL,
+            bucket_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(source, target, relation_type)
+        )
+        """
+    )
+    for index, (source, target, relation_type, confidence) in enumerate(rows):
+        conn.execute(
+            """
+            INSERT INTO memory_moment_edges
+            (source, target, bucket_id, relation_type, confidence, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source,
+                target,
+                source.split(":", 1)[0],
+                relation_type,
+                confidence,
+                "local_graph:test",
+                f"2026-01-01T00:00:{index:02d}+00:00",
+            ),
+        )
+    conn.commit()
+    conn.close()
 
 
 def mixed_affect_anchor_content() -> str:
@@ -3625,3 +3664,104 @@ async def test_chatgpt_oauth_middleware_protects_only_configured_host():
             (b"authorization", b"Bearer access"),
         ]
     ) == 204
+
+
+def test_load_derived_bucket_edges_from_moment_graph_aggregates_cross_bucket_edges(tmp_path):
+    import server
+
+    state_dir = str(tmp_path / "state")
+    write_moment_edge_db(
+        state_dir,
+        [
+            ("bucket-a:m1", "bucket-a:m2", "next_context", 0.9),
+            ("bucket-a:m2", "bucket-a:m3", "emotional_echo", 0.8),
+            ("bucket-a:m4", "bucket-b:m1", "supports", 0.4),
+            ("bucket-a:m5", "bucket-b:m2", "contradicts", 0.83),
+        ],
+    )
+
+    edges = server.load_derived_bucket_edges_from_moment_graph({"state_dir": state_dir})
+
+    assert edges == [
+        {
+            "source": "bucket-a",
+            "target": "bucket-b",
+            "similarity": 0.83,
+            "kind": "memory_edge",
+            "confidence": 0.83,
+            "relation_type": "moment_graph",
+            "relation_types": ["contradicts", "supports"],
+            "edge_count": 2,
+            "reason": "derived from v2 memory moment graph",
+            "edge_source": "moment_graph_derived",
+            "derived": True,
+        }
+    ]
+
+
+def test_load_derived_bucket_edges_from_moment_graph_missing_db_or_table_returns_empty(tmp_path):
+    import server
+
+    state_dir = str(tmp_path / "state")
+    assert server.load_derived_bucket_edges_from_moment_graph({"state_dir": state_dir}) == []
+
+    os.makedirs(state_dir, exist_ok=True)
+    conn = sqlite3.connect(os.path.join(state_dir, "memory_moments.sqlite"))
+    conn.execute("CREATE TABLE unrelated (id TEXT)")
+    conn.commit()
+    conn.close()
+
+    assert server.load_derived_bucket_edges_from_moment_graph({"state_dir": state_dir}) == []
+
+
+@pytest.mark.asyncio
+async def test_api_network_appends_derived_moment_graph_edges_without_explicit_duplicates(
+    monkeypatch,
+    bucket_mgr,
+    decay_eng,
+    test_config,
+):
+    import server
+    from memory_edges import MemoryEdgeStore
+
+    bucket_a = await bucket_mgr.create(content="A bucket", name="A")
+    bucket_b = await bucket_mgr.create(content="B bucket", name="B")
+    bucket_c = await bucket_mgr.create(content="C bucket", name="C")
+    write_moment_edge_db(
+        test_config["state_dir"],
+        [
+            (f"{bucket_a}:m1", f"{bucket_b}:m1", "supports", 0.7),
+            (f"{bucket_a}:m2", f"{bucket_c}:m1", "contradicts", 0.6),
+            (f"{bucket_a}:m3", f"{bucket_c}:m2", "supports", 0.9),
+        ],
+    )
+    edge_store = MemoryEdgeStore(test_config)
+    edge_store.add_edge(bucket_a, bucket_b, "relates_to", confidence=0.55, reason="explicit edge")
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    monkeypatch.setattr(server, "config", test_config)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_network(DummyRequest())
+    payload = json.loads(response.body)
+    visible_edges = [
+        edge
+        for edge in payload["edges"]
+        if {edge["source"], edge["target"]} in ({bucket_a, bucket_b}, {bucket_a, bucket_c})
+    ]
+
+    assert response.status_code == 200
+    assert len([edge for edge in visible_edges if {edge["source"], edge["target"]} == {bucket_a, bucket_b}]) == 1
+    explicit = next(edge for edge in visible_edges if {edge["source"], edge["target"]} == {bucket_a, bucket_b})
+    assert explicit["relation_type"] == "relates_to"
+    assert "derived" not in explicit
+
+    derived = next(edge for edge in visible_edges if {edge["source"], edge["target"]} == {bucket_a, bucket_c})
+    assert derived["derived"] is True
+    assert derived["edge_source"] == "moment_graph_derived"
+    assert derived["relation_types"] == ["contradicts", "supports"]
+    assert derived["edge_count"] == 2
+    assert derived["confidence"] == 0.9

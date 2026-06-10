@@ -48,6 +48,7 @@ import hmac
 import json as _json_lib
 import re
 import secrets
+import sqlite3
 import time
 from base64 import b64decode
 from dataclasses import replace
@@ -157,6 +158,94 @@ dream_engine = DreamEngine(config)                     # Night dream worker / �
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
+
+
+def _state_dir_from_config(config_obj: dict | None) -> str:
+    config_obj = config_obj or {}
+    return config_obj.get("state_dir") or os.path.join(
+        os.path.dirname(os.path.abspath(config_obj.get("buckets_dir", "buckets"))),
+        "state",
+    )
+
+
+def _moment_edge_bucket_id(value: str) -> str:
+    text = str(value or "").strip()
+    if ":" not in text:
+        return ""
+    return text.split(":", 1)[0].strip()
+
+
+def load_derived_bucket_edges_from_moment_graph(config_obj: dict | None) -> list[dict]:
+    """Return dashboard-only bucket links aggregated from v2 moment graph edges."""
+    db_path = os.path.join(_state_dir_from_config(config_obj), "memory_moments.sqlite")
+    if not os.path.exists(db_path):
+        return []
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT source, target, relation_type, confidence
+                FROM memory_moment_edges
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            logger.warning("memory_moment_edges table is missing; skipping derived dashboard edges")
+            return []
+        logger.warning("Failed to load derived dashboard edges from moment graph", exc_info=True)
+        return []
+
+    grouped: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        source_bucket = _moment_edge_bucket_id(row["source"])
+        target_bucket = _moment_edge_bucket_id(row["target"])
+        if not source_bucket or not target_bucket or source_bucket == target_bucket:
+            continue
+        key = (source_bucket, target_bucket)
+        group = grouped.setdefault(
+            key,
+            {
+                "source": source_bucket,
+                "target": target_bucket,
+                "confidence": 0.0,
+                "relation_types": set(),
+                "edge_count": 0,
+            },
+        )
+        try:
+            confidence = float(row["confidence"])
+        except (TypeError, ValueError):
+            confidence = 0.0
+        group["confidence"] = max(group["confidence"], max(0.0, min(1.0, confidence)))
+        relation_type = str(row["relation_type"] or "").strip()
+        if relation_type:
+            group["relation_types"].add(relation_type)
+        group["edge_count"] += 1
+
+    derived_edges = []
+    for group in grouped.values():
+        confidence = round(group["confidence"], 3)
+        derived_edges.append(
+            {
+                "source": group["source"],
+                "target": group["target"],
+                "similarity": confidence,
+                "kind": "memory_edge",
+                "confidence": confidence,
+                "relation_type": "moment_graph",
+                "relation_types": sorted(group["relation_types"]),
+                "edge_count": group["edge_count"],
+                "reason": "derived from v2 memory moment graph",
+                "edge_source": "moment_graph_derived",
+                "derived": True,
+            }
+        )
+    return sorted(derived_edges, key=lambda edge: (edge["source"], edge["target"]))
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -8072,8 +8161,11 @@ async def api_network(request):
                     })
 
         node_ids = {node["id"] for node in nodes}
+        explicit_bucket_edge_pairs = set()
         for edge in memory_edge_store.list_edges():
             if edge["source"] in node_ids and edge["target"] in node_ids:
+                explicit_bucket_edge_pairs.add((edge["source"], edge["target"]))
+                explicit_bucket_edge_pairs.add((edge["target"], edge["source"]))
                 edges.append({
                     "source": edge["source"],
                     "target": edge["target"],
@@ -8083,6 +8175,13 @@ async def api_network(request):
                     "confidence": edge["confidence"],
                     "reason": edge["reason"],
                 })
+
+        for edge in load_derived_bucket_edges_from_moment_graph(config):
+            if edge["source"] not in node_ids or edge["target"] not in node_ids:
+                continue
+            if (edge["source"], edge["target"]) in explicit_bucket_edge_pairs:
+                continue
+            edges.append(edge)
 
         return JSONResponse({"nodes": nodes, "edges": edges})
     except Exception as e:
