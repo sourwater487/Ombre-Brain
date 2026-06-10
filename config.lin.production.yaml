@@ -333,7 +333,7 @@ wikilink:
 
 # --- Mainline memory/recall sections merged for Lin production ---
 reranker:
-  enabled: true
+  enabled: false
   model: Qwen/Qwen3-Reranker-4B
   base_url: 'https://api.siliconflow.cn/v1'
   candidate_limit: 10
