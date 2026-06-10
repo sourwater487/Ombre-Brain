@@ -274,6 +274,17 @@ class GatewayService:
         self.skip_recent_rounds = max(0, int(self.gateway_cfg.get("skip_recent_rounds", 5)))
         self.cooldown_hours = float(self.gateway_cfg.get("cooldown_hours", 6))
         self.cooldown_floor = float(self.gateway_cfg.get("cooldown_floor", 0.3))
+        self.related_memory_skip_recent_rounds = max(
+            0,
+            int(self.gateway_cfg.get("related_memory_skip_recent_rounds", self.skip_recent_rounds)),
+        )
+        self.related_memory_cooldown_hours = max(
+            0.0,
+            float(self.gateway_cfg.get("related_memory_cooldown_hours", self.cooldown_hours)),
+        )
+        self.related_memory_cooldown_floor = self._clamp(
+            float(self.gateway_cfg.get("related_memory_cooldown_floor", self.cooldown_floor))
+        )
 
         self.inject_total_budget = int(self.gateway_cfg.get("inject_total_budget", 1200))
         self.core_budget = int(self.gateway_cfg.get("core_memory_budget", 500))
@@ -448,6 +459,9 @@ class GatewayService:
                 "upstream_models": self.upstream_models,
                 "cooldown_hours": self.cooldown_hours,
                 "skip_recent_rounds": self.skip_recent_rounds,
+                "related_memory_skip_recent_rounds": self.related_memory_skip_recent_rounds,
+                "related_memory_cooldown_hours": self.related_memory_cooldown_hours,
+                "related_memory_cooldown_floor": self.related_memory_cooldown_floor,
                 "recent_context_cooldown_hours": self.recent_context_cooldown_hours,
                 "recent_context_reentry_idle_hours": self.recent_context_reentry_idle_hours,
                 "recent_context_budget": self.recent_budget,
@@ -497,6 +511,9 @@ class GatewayService:
         return {
             "cooldown_hours": self.cooldown_hours,
             "skip_recent_rounds": self.skip_recent_rounds,
+            "related_memory_skip_recent_rounds": self.related_memory_skip_recent_rounds,
+            "related_memory_cooldown_hours": self.related_memory_cooldown_hours,
+            "related_memory_cooldown_floor": self.related_memory_cooldown_floor,
             "recent_context_cooldown_hours": self.recent_context_cooldown_hours,
             "recent_context_reentry_idle_hours": self.recent_context_reentry_idle_hours,
             "recent_context_budget": self.recent_budget,
@@ -575,6 +592,26 @@ class GatewayService:
             self.skip_recent_rounds = max(0, int(payload["skip_recent_rounds"]))
             self.gateway_cfg["skip_recent_rounds"] = self.skip_recent_rounds
             updated.append("gateway.skip_recent_rounds")
+        if "related_memory_skip_recent_rounds" in payload:
+            self.related_memory_skip_recent_rounds = max(
+                0,
+                int(payload["related_memory_skip_recent_rounds"]),
+            )
+            self.gateway_cfg["related_memory_skip_recent_rounds"] = self.related_memory_skip_recent_rounds
+            updated.append("gateway.related_memory_skip_recent_rounds")
+        if "related_memory_cooldown_hours" in payload:
+            self.related_memory_cooldown_hours = max(
+                0.0,
+                float(payload["related_memory_cooldown_hours"]),
+            )
+            self.gateway_cfg["related_memory_cooldown_hours"] = self.related_memory_cooldown_hours
+            updated.append("gateway.related_memory_cooldown_hours")
+        if "related_memory_cooldown_floor" in payload:
+            self.related_memory_cooldown_floor = self._clamp(
+                float(payload["related_memory_cooldown_floor"])
+            )
+            self.gateway_cfg["related_memory_cooldown_floor"] = self.related_memory_cooldown_floor
+            updated.append("gateway.related_memory_cooldown_floor")
         if "recent_context_cooldown_hours" in payload:
             self.recent_context_cooldown_hours = max(0.0, float(payload["recent_context_cooldown_hours"]))
             self.gateway_cfg["recent_context_cooldown_hours"] = self.recent_context_cooldown_hours
@@ -1180,6 +1217,7 @@ class GatewayService:
         favorite_memory = ""
         favorite_ids: list[str] = []
         related_memory = ""
+        recent_context_bucket_ids: list[str] = []
         targeted_memory_detail = ""
         targeted_memory_detail_debug: dict[str, Any] = self._targeted_memory_detail_debug_base()
         memory_detail_recall_instruction = ""
@@ -1328,6 +1366,7 @@ class GatewayService:
                     all_moments,
                     moment_edges,
                     current_user_query,
+                    session_id=session_id,
                     context_mode=context_mode,
                 )
             else:
@@ -1390,10 +1429,19 @@ class GatewayService:
                 has_handoff_context=has_handoff_context or needs_handoff_first,
             ):
                 explicit_recent_query = self._query_requests_recent_context(current_user_query)
-                recent_context = await self._build_recent_context_block(
+                recent_context_buckets = self._select_recent_context_buckets(
                     all_buckets,
                     current_user_query,
                     allow_vague=explicit_recent_query,
+                )
+                recent_context_bucket_ids = [
+                    str(bucket.get("id") or "")
+                    for bucket in recent_context_buckets[:6]
+                    if bucket.get("id")
+                ]
+                recent_context = await self._summarize_buckets(
+                    recent_context_buckets[:6],
+                    self.recent_budget,
                 )
                 if recent_context.strip():
                     recent_context_reason = self._recent_context_reason(
@@ -1407,11 +1455,18 @@ class GatewayService:
             )
             injected_ids = list(
                 dict.fromkeys(
-                    [
+                    recent_context_bucket_ids
+                    + [
                         str(moment.get("bucket_id") or "")
                         for moment in recalled_moments
                         if moment.get("bucket_id")
                     ]
+                    + [
+                        str(row.get("bucket_id") or "")
+                        for row in diffused_moment_debug
+                        if isinstance(row, dict) and row.get("bucket_id")
+                    ]
+                    + self._extract_bucket_ids_from_context(related_memory)
                     + favorite_ids
                     + [
                         str(bucket_id)
@@ -1475,6 +1530,7 @@ class GatewayService:
                 just_now_context=just_now_context,
                 just_now_context_debug=just_now_context_debug,
                 recent_context=recent_context,
+                recent_context_bucket_ids=recent_context_bucket_ids,
                 recent_context_reason=recent_context_reason,
                 favorite_ids=favorite_ids,
                 context_mode=context_mode,
@@ -3935,8 +3991,24 @@ class GatewayService:
         *,
         allow_vague: bool = False,
     ) -> str:
+        return await self._summarize_buckets(
+            self._select_recent_context_buckets(
+                all_buckets,
+                query_text,
+                allow_vague=allow_vague,
+            )[:6],
+            self.recent_budget,
+        )
+
+    def _select_recent_context_buckets(
+        self,
+        all_buckets: list[dict],
+        query_text: str = "",
+        *,
+        allow_vague: bool = False,
+    ) -> list[dict]:
         if self._auto_query_too_vague(query_text) and not allow_vague:
-            return ""
+            return []
         cutoff = datetime.now() - timedelta(hours=self.head_recent_hours)
         enforce_topic = (
             self._recent_context_requires_topic_evidence(query_text)
@@ -3958,7 +4030,7 @@ class GatewayService:
             key=lambda bucket: bucket.get("metadata", {}).get("created", ""),
             reverse=True,
         )
-        return await self._summarize_buckets(recent_buckets[:6], self.recent_budget)
+        return recent_buckets
 
     def _should_inject_recent_context(
         self,
@@ -5261,6 +5333,7 @@ class GatewayService:
         edges: list[dict],
         query_text: str = "",
         *,
+        session_id: str = "",
         context_mode: str = "",
     ) -> str:
         text, _debug_rows = self._build_moment_diffused_memory_with_debug(
@@ -5269,6 +5342,7 @@ class GatewayService:
             moments,
             edges,
             query_text,
+            session_id=session_id,
             context_mode=context_mode,
         )
         return text
@@ -5281,12 +5355,19 @@ class GatewayService:
         edges: list[dict],
         query_text: str = "",
         *,
+        session_id: str = "",
         context_mode: str = "",
     ) -> tuple[str, list[dict[str, Any]]]:
         if self.related_memory_budget <= 0 or not seed_moments:
             return "", []
 
         query_plan = self._recall_query_plan(query_text, context_mode=context_mode)
+        recent_diffused_bucket_ids = (
+            self.state_store.get_recent_bucket_ids(session_id, self.related_memory_skip_recent_rounds)
+            if session_id
+            else set()
+        )
+        now = datetime.now()
         remaining = self.related_memory_budget
         parts: list[str] = []
         debug_rows: list[dict[str, Any]] = []
@@ -5305,6 +5386,14 @@ class GatewayService:
             used_bucket_ids,
             query_plan=query_plan,
         ):
+            bucket_id = str(moment.get("bucket_id") or "")
+            if self._should_skip_diffused_bucket(
+                bucket_id,
+                recent_bucket_ids=recent_diffused_bucket_ids,
+                session_id=session_id,
+                now=now,
+            ):
+                continue
             if self._moment_is_caution_or_old(moment) and not allow_caution_paths:
                 continue
             block = self._format_diffused_moment_line(
@@ -5362,6 +5451,13 @@ class GatewayService:
             bucket_id = str(moment.get("bucket_id") or "")
             if bucket_id in used_bucket_ids:
                 continue
+            if self._should_skip_diffused_bucket(
+                bucket_id,
+                recent_bucket_ids=recent_diffused_bucket_ids,
+                session_id=session_id,
+                now=now,
+            ):
+                continue
             if not can_moment_be_related_target(moment, explicit_lookup=allow_archive_targets):
                 replacement = representatives.get(bucket_id)
                 if not replacement:
@@ -5418,6 +5514,31 @@ class GatewayService:
             if remaining <= 0:
                 break
         return "\n".join(parts), debug_rows
+
+    def _should_skip_diffused_bucket(
+        self,
+        bucket_id: str,
+        *,
+        recent_bucket_ids: set[str],
+        session_id: str = "",
+        now: datetime | None = None,
+    ) -> bool:
+        if not bucket_id:
+            return True
+        if bucket_id in recent_bucket_ids:
+            return True
+        if (
+            session_id
+            and self.related_memory_cooldown_hours > 0
+            and self.related_memory_cooldown_floor <= 0.0
+        ):
+            last_injected = self.state_store.get_last_injected_at(session_id, bucket_id)
+            if last_injected:
+                now = now or datetime.now()
+                elapsed_hours = max(0.0, (now - last_injected).total_seconds() / 3600)
+                if elapsed_hours < self.related_memory_cooldown_hours:
+                    return True
+        return False
 
     def _secondary_direct_moments(
         self,
@@ -7271,6 +7392,7 @@ class GatewayService:
         recent_context: str,
         recent_context_reason: str,
         favorite_ids: list[str],
+        recent_context_bucket_ids: list[str] | None = None,
         context_mode: str = "",
         diffused_moment_debug: list[dict[str, Any]] | None = None,
         suppressed_moments: list[dict] | None = None,
@@ -7288,6 +7410,11 @@ class GatewayService:
             str(moment.get("bucket_id") or "")
             for moment in recalled_moments
             if moment.get("bucket_id")
+        ]
+        recent_bucket_ids = [
+            str(bucket_id)
+            for bucket_id in (recent_context_bucket_ids or [])
+            if str(bucket_id or "").strip()
         ]
         diffused_debug_rows = diffused_moment_debug or []
         diffused_bucket_ids = list(
@@ -7316,7 +7443,13 @@ class GatewayService:
             if str(item or "").strip()
         ]
         injected_bucket_ids = list(
-            dict.fromkeys(recalled_bucket_ids + diffused_bucket_ids + favorite_ids + targeted_bucket_ids)
+            dict.fromkeys(
+                recent_bucket_ids
+                + recalled_bucket_ids
+                + diffused_bucket_ids
+                + favorite_ids
+                + targeted_bucket_ids
+            )
         )
         explicit_lookup = self._query_explicitly_requests_caution_memory(query)
         bucket_map = {
@@ -7334,6 +7467,7 @@ class GatewayService:
             "just_now_context_injected": bool(str(just_now_context or "").strip()),
             "just_now_context_debug": just_now_context_debug or self._just_now_context_debug_base(query),
             "recent_context_injected": bool(str(recent_context or "").strip()),
+            "recent_context_bucket_ids": recent_bucket_ids,
             "recent_context_reason": recent_context_reason,
             "date_persona_trace_injected": bool(str(date_persona_trace or "").strip()),
             "date_persona_trace_debug": date_persona_trace_debug or self._date_persona_trace_debug_base(query),

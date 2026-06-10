@@ -3578,6 +3578,220 @@ def test_gateway_injection_debug_exposes_diffused_chain_bundle(
     assert "链路目标温度锚点" in target_debug["temperature_context"][0]["text_preview"]
 
 
+def test_gateway_diffused_memory_skips_bucket_from_previous_turn(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=1200,
+        related_memory_skip_recent_rounds=3,
+        related_memory_cooldown_hours=0,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+    )
+    seed_id, target_id = _create_moment_diffusion_pair(
+        bucket_mgr,
+        cfg,
+        target_name="上一轮扩散目标",
+        target_content="上一轮扩散目标摘要可以出现一次。",
+    )
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    _app, service, state_store, _captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.99)],
+    )
+    all_buckets = _run(bucket_mgr.list_all())
+    all_moments, grouped_moments, moment_edges = service._refresh_moment_graph(all_buckets)
+    seed_moment = service._direct_representative_moment(grouped_moments[seed_id])
+
+    first_text, first_debug = service._build_moment_diffused_memory_with_debug(
+        [seed_moment],
+        [seed_moment],
+        all_moments,
+        moment_edges,
+        "种子项目现在怎样",
+        session_id="sess-diffused-skip-recent",
+    )
+    state_store.record_success(
+        "sess-diffused-skip-recent",
+        [
+            str(row.get("bucket_id") or "")
+            for row in first_debug
+            if isinstance(row, dict) and row.get("bucket_id")
+        ],
+    )
+    second_text, second_debug = service._build_moment_diffused_memory_with_debug(
+        [seed_moment],
+        [seed_moment],
+        all_moments,
+        moment_edges,
+        "种子项目现在怎样",
+        session_id="sess-diffused-skip-recent",
+    )
+    debug_payload = service._build_injection_debug_payload(
+        model="dummy-model",
+        query="种子项目现在怎样",
+        stable_context="",
+        dynamic_context=first_text,
+        all_buckets=all_buckets,
+        portrait_memory="",
+        portrait_memory_debug={},
+        recalled_moments=[seed_moment],
+        recalled_memory=f"- [bucket_id:{seed_id}] seed",
+        related_memory=first_text,
+        targeted_memory_detail="",
+        targeted_memory_detail_debug={},
+        dream_context="",
+        dream_context_status={},
+        just_now_context="",
+        just_now_context_debug={},
+        recent_context="",
+        recent_context_reason="",
+        favorite_ids=[],
+        diffused_moment_debug=first_debug,
+    )
+
+    assert "Diffused Memory" not in first_text
+    assert "上一轮扩散目标" in first_text
+    assert target_id in debug_payload["diffused_bucket_ids"]
+    assert target_id in debug_payload["injected_bucket_ids"]
+    assert "上一轮扩散目标" not in second_text
+    assert second_debug == []
+    assert target_id in state_store.get_recent_bucket_ids("sess-diffused-skip-recent", 3)
+
+
+def test_gateway_round_recording_persists_diffused_bucket_ids(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(test_config)
+    _app, service, state_store, _captured = _build_service(monkeypatch, cfg, bucket_mgr)
+
+    seed_id = _create_bucket(
+        bucket_mgr,
+        content="直接召回桶。",
+        name="直接桶",
+        hours_ago=12,
+    )
+    diffused_id = _create_bucket(
+        bucket_mgr,
+        content="扩散桶。",
+        name="扩散桶",
+        hours_ago=12,
+    )
+
+    _run(
+        service._record_successful_round(
+            "sess-record-diffused",
+            [seed_id, diffused_id],
+            {"injected_bucket_ids": [seed_id, diffused_id], "diffused_bucket_ids": [diffused_id]},
+        )
+    )
+
+    assert state_store.get_recent_bucket_ids("sess-record-diffused", 1) == {seed_id, diffused_id}
+
+
+def test_gateway_diffused_memory_excludes_zero_floor_cooldown_bucket(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=1200,
+        related_memory_skip_recent_rounds=0,
+        related_memory_cooldown_hours=48,
+        related_memory_cooldown_floor=0.0,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+    )
+    seed_id, target_id = _create_moment_diffusion_pair(
+        bucket_mgr,
+        cfg,
+        target_name="零冷却扩散目标",
+        target_content="零冷却扩散目标不该在冷却中出现。",
+    )
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    _app, service, state_store, _captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.99)],
+    )
+    state_store.record_success("sess-diffused-zero-floor", [target_id], completed_at=datetime.now())
+    all_buckets = _run(bucket_mgr.list_all())
+    all_moments, grouped_moments, moment_edges = service._refresh_moment_graph(all_buckets)
+    seed_moment = service._direct_representative_moment(grouped_moments[seed_id])
+
+    text, debug_rows = service._build_moment_diffused_memory_with_debug(
+        [seed_moment],
+        [seed_moment],
+        all_moments,
+        moment_edges,
+        "种子项目现在怎样",
+        session_id="sess-diffused-zero-floor",
+    )
+
+    assert "零冷却扩散目标" not in text
+    assert debug_rows == []
+
+
+def test_gateway_direct_recall_allows_strong_hit_despite_related_cooldown(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=0,
+        skip_recent_rounds=0,
+        cooldown_hours=0,
+        related_memory_skip_recent_rounds=12,
+        related_memory_cooldown_hours=48,
+        related_memory_cooldown_floor=0.0,
+        current_inner_state_interval_rounds=0,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="七日恋人这条直接命中时仍然应该作为 Recalled Memory 出现。",
+        name="七日恋人",
+        hours_ago=12,
+        importance=10,
+        domain=["关系"],
+    )
+    _app, service, state_store, _captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+    state_store.record_success("sess-direct-related-cooldown", [bucket_id], completed_at=datetime.now())
+
+    payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "七日恋人"}]},
+            "sess-direct-related-cooldown",
+        )
+    )
+
+    injected = _joined_message_content(payload["messages"])
+    assert recalled_ids == [bucket_id]
+    assert "Recalled Memory" in injected
+    assert f"[bucket_id:{bucket_id}]" in injected
+    assert "Diffused Memory" not in injected
+
+
 def test_gateway_bucket_edge_bridge_uses_direct_target_representative(
     monkeypatch,
     test_config,
