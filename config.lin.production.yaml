@@ -24,7 +24,7 @@ log_level: "INFO"
 # --- Runtime state path / 运行状态路径 ---
 # Stores runtime SQLite state such as Persona State outside bucket sync.
 # 保存 Persona State 等运行时 SQLite 状态，建议放在 buckets 同步目录外。
-# state_dir: "/path/to/ombre-brain/state"
+state_dir: "/opt/render/project/src/buckets/state"
 
 # --- Identity / 名字口径 ---
 identity:
