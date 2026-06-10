@@ -431,6 +431,19 @@ class GatewayService:
         self.query_planner_min_chars = max(0, int(self.gateway_cfg.get("query_planner_min_chars", 16)))
         self.query_planner_max_queries = max(1, min(3, int(self.gateway_cfg.get("query_planner_max_queries", 3))))
         self.query_planner_max_tokens = max(128, int(self.gateway_cfg.get("query_planner_max_tokens", 360)))
+        self.long_input_chars = max(0, int(self.gateway_cfg.get("long_input_chars", 3000)))
+        self.memory_search_query_max_chars = max(
+            80,
+            int(self.gateway_cfg.get("memory_search_query_max_chars", 1200)),
+        )
+        self.query_planner_input_max_chars = max(
+            80,
+            int(self.gateway_cfg.get("query_planner_input_max_chars", 1500)),
+        )
+        self.recall_timeout_seconds = max(
+            0.0,
+            float(self.gateway_cfg.get("recall_timeout_seconds", 5.0)),
+        )
         self.query_planner_score_bonus = self._clamp(
             float(self.gateway_cfg.get("query_planner_score_bonus", 0.04)),
             0.0,
@@ -570,6 +583,10 @@ class GatewayService:
             "query_planner_min_chars": self.query_planner_min_chars,
             "query_planner_max_queries": self.query_planner_max_queries,
             "query_planner_max_tokens": self.query_planner_max_tokens,
+            "long_input_chars": self.long_input_chars,
+            "memory_search_query_max_chars": self.memory_search_query_max_chars,
+            "query_planner_input_max_chars": self.query_planner_input_max_chars,
+            "recall_timeout_seconds": self.recall_timeout_seconds,
             "memory_detail_recall_enabled": self.memory_detail_recall_enabled,
             "memory_detail_recall_max_ids": self.memory_detail_recall_max_ids,
             "memory_detail_recall_budget": self.memory_detail_recall_budget,
@@ -790,6 +807,22 @@ class GatewayService:
             self.query_planner_max_tokens = max(128, int(payload["query_planner_max_tokens"]))
             self.gateway_cfg["query_planner_max_tokens"] = self.query_planner_max_tokens
             updated.append("gateway.query_planner_max_tokens")
+        if "long_input_chars" in payload:
+            self.long_input_chars = max(0, int(payload["long_input_chars"]))
+            self.gateway_cfg["long_input_chars"] = self.long_input_chars
+            updated.append("gateway.long_input_chars")
+        if "memory_search_query_max_chars" in payload:
+            self.memory_search_query_max_chars = max(80, int(payload["memory_search_query_max_chars"]))
+            self.gateway_cfg["memory_search_query_max_chars"] = self.memory_search_query_max_chars
+            updated.append("gateway.memory_search_query_max_chars")
+        if "query_planner_input_max_chars" in payload:
+            self.query_planner_input_max_chars = max(80, int(payload["query_planner_input_max_chars"]))
+            self.gateway_cfg["query_planner_input_max_chars"] = self.query_planner_input_max_chars
+            updated.append("gateway.query_planner_input_max_chars")
+        if "recall_timeout_seconds" in payload:
+            self.recall_timeout_seconds = max(0.0, float(payload["recall_timeout_seconds"]))
+            self.gateway_cfg["recall_timeout_seconds"] = self.recall_timeout_seconds
+            updated.append("gateway.recall_timeout_seconds")
         if "memory_detail_recall_enabled" in payload:
             self.memory_detail_recall_enabled = self._bool_config_value(
                 payload["memory_detail_recall_enabled"],
@@ -1289,6 +1322,10 @@ class GatewayService:
 
         if is_new_user_turn:
             explicit_memory_recall = self._query_requests_explicit_memory_recall(current_user_query)
+            long_input_without_memory_intent = (
+                self._query_is_long_input(current_user_query)
+                and not explicit_memory_recall
+            )
             memory_control_plane_query = (
                 self._query_discusses_memory_control_plane(current_user_query)
                 and not explicit_memory_recall
@@ -1303,6 +1340,7 @@ class GatewayService:
             )
             query_planner_debug["explicit_memory_recall"] = explicit_memory_recall
             query_planner_debug["memory_control_plane_query"] = memory_control_plane_query
+            query_planner_debug["long_input_without_memory_intent"] = long_input_without_memory_intent
             query_planner_debug["direct_recall_allowed"] = direct_recall_allowed
             query_planner_debug["related_recall_allowed"] = related_recall_allowed
             query_planner_debug["recalled_memory_interval_rounds"] = self.recalled_memory_interval_rounds
@@ -1316,6 +1354,7 @@ class GatewayService:
                 or needs_handoff_first
                 or just_now_context_requested
                 or memory_control_plane_query
+                or long_input_without_memory_intent
             )
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = (
@@ -1375,6 +1414,8 @@ class GatewayService:
                 if skip_broad_dynamic_recall:
                     if memory_control_plane_query:
                         query_planner_debug["skip_reason"] = "memory_control_plane_query"
+                    elif long_input_without_memory_intent:
+                        query_planner_debug["skip_reason"] = "long_input_without_memory_intent"
                     logger.info(
                         "Gateway broad dynamic recall skipped | session=%s reason=%s",
                         session_id,
@@ -1391,14 +1432,26 @@ class GatewayService:
                     suppressed_moments = []
                     suppressed_buckets = []
                 elif self.retrieval_mode == "bucket":
-                    selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
-                        current_user_query,
-                        session_id,
-                        all_buckets,
-                        search_query=recall_search_query(current_user_query, self.relevance_options),
-                        explicit_memory_recall=explicit_memory_recall,
-                        include_query_planner_debug=True,
-                    )
+                    try:
+                        selected_buckets, suppressed_buckets, query_planner_debug = await self._await_recall_selection(
+                            self._select_dynamic_buckets(
+                                current_user_query,
+                                session_id,
+                                all_buckets,
+                                search_query=recall_search_query(
+                                    self._memory_search_query_text(current_user_query),
+                                    self.relevance_options,
+                                ),
+                                explicit_memory_recall=explicit_memory_recall,
+                                include_query_planner_debug=True,
+                            ),
+                            session_id=session_id,
+                            planner_debug=query_planner_debug,
+                        )
+                    except asyncio.TimeoutError:
+                        query_planner_debug["skip_reason"] = "recall_timeout"
+                        selected_buckets = []
+                        suppressed_buckets = []
                     for bucket in selected_buckets:
                         bucket_id = str(bucket.get("id") or "")
                         if not bucket_id:
@@ -1413,20 +1466,31 @@ class GatewayService:
                     suppressed_moments = []
                 else:
                     all_moments, grouped_moments, moment_edges = self._refresh_moment_graph(all_buckets)
-                    (
-                        recalled_moments,
-                        moment_candidates,
-                        suppressed_moments,
-                        suppressed_buckets,
-                        query_planner_debug,
-                    ) = await self._select_dynamic_moments(
-                        current_user_query,
-                        session_id,
-                        all_buckets,
-                        grouped_moments,
-                        explicit_memory_recall=explicit_memory_recall,
-                        include_query_planner_debug=True,
-                    )
+                    try:
+                        (
+                            recalled_moments,
+                            moment_candidates,
+                            suppressed_moments,
+                            suppressed_buckets,
+                            query_planner_debug,
+                        ) = await self._await_recall_selection(
+                            self._select_dynamic_moments(
+                                current_user_query,
+                                session_id,
+                                all_buckets,
+                                grouped_moments,
+                                explicit_memory_recall=explicit_memory_recall,
+                                include_query_planner_debug=True,
+                            ),
+                            session_id=session_id,
+                            planner_debug=query_planner_debug,
+                        )
+                    except asyncio.TimeoutError:
+                        query_planner_debug["skip_reason"] = "recall_timeout"
+                        recalled_moments = []
+                        moment_candidates = []
+                        suppressed_moments = []
+                        suppressed_buckets = []
             else:
                 suppressed_moments = []
                 suppressed_buckets = []
@@ -4927,7 +4991,10 @@ class GatewayService:
                 query_planner_debug=query_planner_debug,
             )
 
-        search_query = recall_search_query(query, self.relevance_options)
+        search_query = recall_search_query(
+            self._memory_search_query_text(query),
+            self.relevance_options,
+        )
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
             session_id,
@@ -5060,7 +5127,11 @@ class GatewayService:
         head = candidates[:candidate_limit]
         tail = candidates[candidate_limit:]
         documents = [self._moment_rerank_document(moment) for moment in head]
-        results = await self.reranker_engine.rerank(query, documents, top_n=len(head))
+        results = await self.reranker_engine.rerank(
+            self._memory_search_query_text(query),
+            documents,
+            top_n=len(head),
+        )
         if not results:
             return candidates
 
@@ -6281,6 +6352,45 @@ class GatewayService:
     ) -> str:
         return await self._build_diffused_memory_block(recalled_buckets, all_buckets)
 
+    async def _await_recall_selection(
+        self,
+        awaitable,
+        *,
+        session_id: str,
+        planner_debug: dict[str, Any],
+    ):
+        if self.recall_timeout_seconds <= 0:
+            return await awaitable
+        try:
+            return await asyncio.wait_for(awaitable, timeout=self.recall_timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Gateway recall selection timed out | session=%s timeout=%.2fs",
+                session_id,
+                self.recall_timeout_seconds,
+            )
+            if isinstance(planner_debug, dict):
+                planner_debug.setdefault("errors", []).append("recall_timeout")
+            raise
+
+    def _query_is_long_input(self, query: str) -> bool:
+        if self.long_input_chars <= 0:
+            return False
+        compact = re.sub(r"\s+", "", str(query or ""))
+        return len(compact) >= self.long_input_chars
+
+    def _memory_search_query_text(self, query: str) -> str:
+        text = str(query or "").strip()
+        if not text:
+            return ""
+        return self._clip_text(text, self.memory_search_query_max_chars)
+
+    def _query_planner_query_text(self, query: str) -> str:
+        text = str(query or "").strip()
+        if not text:
+            return ""
+        return self._clip_text(text, self.query_planner_input_max_chars)
+
     def _query_planner_debug_base(self, query: str) -> dict[str, Any]:
         return {
             "enabled": bool(self.query_planner_enabled),
@@ -6301,7 +6411,13 @@ class GatewayService:
             "errors": [],
         }
 
-    def _query_planner_trigger_reason(self, query: str, selected_items: list[dict]) -> str:
+    def _query_planner_trigger_reason(
+        self,
+        query: str,
+        selected_items: list[dict],
+        *,
+        explicit_memory_recall: bool = False,
+    ) -> str:
         if not self.query_planner_enabled:
             return ""
         text = str(query or "").strip()
@@ -6309,15 +6425,16 @@ class GatewayService:
             return ""
         if self._auto_query_too_vague(text):
             return ""
-        multi_topic = self._query_looks_multi_topic(text)
-        compact_len = len(re.sub(r"\s+", "", text))
-        long_enough = compact_len >= self.query_planner_min_chars
-        if multi_topic:
-            return "multi_topic"
         if not selected_items and self._query_looks_emotional_reason_lookup(text):
             return "emotional_reason_lookup"
-        if not selected_items and long_enough:
-            return "direct_recall_empty_or_low_confidence"
+        if not explicit_memory_recall:
+            return ""
+        if self._query_looks_multi_topic(text):
+            return "multi_memory_lookup"
+        if not selected_items:
+            compact_len = len(re.sub(r"\s+", "", text))
+            if compact_len >= self.query_planner_min_chars:
+                return "explicit_recall_empty_or_low_confidence"
         return ""
 
     @staticmethod
@@ -6395,6 +6512,9 @@ class GatewayService:
         model = self.query_planner_model or self.upstream_default_model
         if not model:
             return None, "query_planner_model_missing"
+        planner_query = self._query_planner_query_text(query)
+        if not planner_query:
+            return None, "query_planner_query_empty"
         payload = {
             "model": model,
             "messages": [
@@ -6403,7 +6523,7 @@ class GatewayService:
                     "role": "user",
                     "content": json.dumps(
                         {
-                            "message": query,
+                            "message": planner_query,
                             "max_queries": self.query_planner_max_queries,
                         },
                         ensure_ascii=False,
@@ -6633,7 +6753,7 @@ class GatewayService:
             return [], []
 
         bucket_map = {bucket["id"]: bucket for bucket in eligible}
-        candidate_query = search_query or query
+        candidate_query = self._memory_search_query_text(search_query or query)
         keyword_scores = self._get_keyword_candidates(candidate_query, eligible)
         semantic_scores = await self._get_semantic_candidates(candidate_query, set(bucket_map))
         word_map_scores, word_map_debug = self._get_word_map_hint_scores(
@@ -6779,7 +6899,11 @@ class GatewayService:
         )
         selected_items = list(direct_selected)
 
-        trigger_reason = self._query_planner_trigger_reason(query, direct_selected)
+        trigger_reason = self._query_planner_trigger_reason(
+            query,
+            direct_selected,
+            explicit_memory_recall=explicit_memory_recall,
+        )
         if trigger_reason:
             planner_debug["triggered"] = True
             planner_debug["trigger_reason"] = trigger_reason
@@ -6869,7 +6993,11 @@ class GatewayService:
         head = scored_candidates[:candidate_limit]
         tail = scored_candidates[candidate_limit:]
         documents = [self._bucket_rerank_document(item["bucket"]) for item in head]
-        results = await self.reranker_engine.rerank(query, documents, top_n=len(head))
+        results = await self.reranker_engine.rerank(
+            self._memory_search_query_text(query),
+            documents,
+            top_n=len(head),
+        )
         if not results:
             return scored_candidates
 

@@ -4973,7 +4973,7 @@ def test_gateway_query_planner_supplemental_query_recalls_long_message_miss(
         importance=9,
         domain=["生活", "工作"],
     )
-    query = "我刚才说了一大串，家里来电、项目 delay、被批评、晚上睡不着都混在一起了，想看看之前是不是有相关背景。"
+    query = "你还记得我之前有没有说过，家里来电、项目 delay、被批评、晚上睡不着这些混在一起的相关背景吗？"
     planner_json = {
         "should_search": True,
         "too_vague": False,
@@ -5031,8 +5031,8 @@ def test_gateway_query_planner_supplemental_query_recalls_long_message_miss(
     planner_debug = debug_payload["query_planner_debug"]
     assert planner_debug["triggered"] is True
     assert planner_debug["trigger_reason"] in {
-        "multi_topic",
-        "direct_recall_empty_or_low_confidence",
+        "multi_memory_lookup",
+        "explicit_recall_empty_or_low_confidence",
     }
     assert planner_debug["queries"][0]["query"] == "妈妈电话"
     assert target_id in planner_debug["final_bucket_ids"]
@@ -5052,7 +5052,7 @@ def test_gateway_query_planner_must_terms_keep_noise_out_of_injection(
         importance=9,
         domain=["工作"],
     )
-    query = "我刚才说了一大串，家里来电、项目 delay、被批评、晚上睡不着都混在一起了，想看看之前是不是有相关背景。"
+    query = "帮我回忆一下之前有没有家里来电、项目 delay、被批评、晚上睡不着这些混在一起的相关背景。"
     planner_json = {
         "should_search": True,
         "too_vague": False,
@@ -5181,6 +5181,79 @@ def test_gateway_query_planner_handles_short_emotional_reason_lookup(
     assert planner_debug["triggered"] is True
     assert planner_debug["trigger_reason"] == "emotional_reason_lookup"
     assert target_id in planner_debug["final_bucket_ids"]
+
+
+def test_gateway_long_plain_input_skips_broad_recall_and_query_planner(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="Ombre 使用指南里不应该被普通长粘贴自动召回。",
+        name="Ombre使用指南旧记忆",
+        hours_ago=24,
+        importance=10,
+        domain=["Ombre"],
+    )
+    embedding_queries: list[str] = []
+    cfg = _gateway_config(
+        test_config,
+        retrieval_mode="bucket",
+        query_planner_enabled=True,
+        long_input_chars=120,
+        memory_search_query_max_chars=80,
+        query_planner_input_max_chars=80,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        current_inner_state_interval_rounds=0,
+    )
+    app, service, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+        embedding_queries=embedding_queries,
+    )
+    planner_calls: list[str] = []
+
+    async def fake_query_planner(query_text: str):
+        planner_calls.append(query_text)
+        return {
+            "should_search": True,
+            "too_vague": False,
+            "queries": [{"query": "Ombre 指南", "must_terms": ["Ombre"], "intent": "", "risk": "low"}],
+        }, None
+
+    monkeypatch.setattr(service, "_call_query_planner", fake_query_planner)
+    long_plain_message = (
+        "这是我新写的 Ombre 使用指南，请你完整阅读并理解，不要去查旧记忆。\n"
+        + "\n".join(f"第{i}条：这里是指南正文内容，需要直接给当前模型看。" for i in range(20))
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-long-plain-input",
+            },
+            json={"messages": [{"role": "user", "content": long_plain_message}]},
+        )
+        debug_response = client.get(
+            "/api/debug/injections?session_id=sess-long-plain-input&include_context=0",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+
+    assert response.status_code == 200
+    assert embedding_queries == []
+    assert planner_calls == []
+    injected = _joined_message_content(captured[-1]["json"]["messages"])
+    assert "Recalled Memory" not in injected
+    assert "Ombre使用指南旧记忆" not in injected
+    planner_debug = debug_response.json()["items"][0]["payload"]["query_planner_debug"]
+    assert planner_debug["triggered"] is False
+    assert planner_debug["skip_reason"] == "long_input_without_memory_intent"
 
 
 def test_gateway_query_planner_adds_exact_must_term_bucket_when_search_misses_it(
