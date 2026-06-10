@@ -6787,6 +6787,49 @@ def test_probe_technical_query_does_not_use_direct_lexical_seed(
     assert planner_debug["final_bucket_ids"] == []
 
 
+def test_short_taste_query_keeps_real_food_opinion_only(monkeypatch, test_config, bucket_mgr):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        word_map_hint_enabled=False,
+    )
+    meal_plan_id = _create_bucket(
+        bucket_mgr,
+        content="小雨排到下午答辩，决定在学校好好吃一顿再上场。",
+        name="答辩日与出行决策",
+        hours_ago=6,
+        domain=["事务"],
+    )
+    metaphor_id = _create_bucket(
+        bucket_mgr,
+        content="下次安利挑对地方，不要在别人家门口夸隔壁好吃。",
+        name="小雨在群内安利竞品",
+        hours_ago=6,
+        domain=["社交"],
+    )
+    taste_id = _create_bucket(
+        bucket_mgr,
+        content="小雨上次觉得瘦肉丸很好吃，汤也舒服。",
+        name="瘦肉丸口味",
+        hours_ago=6,
+        tags=["饮食"],
+        domain=["日常"],
+    )
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr)
+
+    meal_plan = {"bucket": _run(bucket_mgr.get(meal_plan_id)), "score": 0.2}
+    metaphor = {"bucket": _run(bucket_mgr.get(metaphor_id)), "score": 0.2}
+    taste = {"bucket": _run(bucket_mgr.get(taste_id)), "score": 0.2}
+
+    assert not service._admit_bucket_for_recall("好吃030", meal_plan)
+    assert meal_plan["admission_reason"] == "short_taste_query_without_taste_evidence"
+    assert not service._admit_bucket_for_recall("好吃030", metaphor)
+    assert metaphor["admission_reason"] == "short_taste_query_without_taste_evidence"
+    assert service._admit_bucket_for_recall("好吃030", taste)
+
+
 def test_high_confidence_match_survives_cooldown_after_recent_window(
     monkeypatch, test_config, bucket_mgr
 ):

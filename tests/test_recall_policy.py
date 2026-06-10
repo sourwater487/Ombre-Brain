@@ -82,6 +82,7 @@ def test_auto_vague_query_without_topic_is_suppressed():
     assert policy.is_auto_query_too_vague("哈哈")
     assert policy.is_auto_query_too_vague("老公～")
     assert policy.is_auto_query_too_vague("试一下handoff😽")
+    assert not policy.is_auto_query_too_vague("好吃030")
     assert not policy.is_auto_query_too_vague("最近少女暴君")
     assert not policy.is_auto_query_too_vague("今天猫咪药量")
     assert not policy.is_auto_query_too_vague("折角那次要不要回复")
@@ -109,6 +110,39 @@ def test_auto_vague_query_without_topic_is_suppressed():
 
     assert affect_decision.reason == "auto_vague_query_without_topic"
     assert not affect_decision.admit_direct
+
+
+def test_short_taste_query_requires_real_taste_evidence():
+    policy = RecallPolicy()
+
+    meal_plan = {
+        "content": "小雨排到下午答辩，决定在学校好好吃一顿再上场。",
+        "metadata": {"name": "答辩日与出行决策", "tags": ["午饭"], "domain": ["事务"]},
+    }
+    metaphor = {
+        "content": "下次安利挑对地方，不要在别人家门口夸隔壁好吃。",
+        "metadata": {"name": "小雨在群内安利竞品", "tags": ["社交"], "domain": ["社交"]},
+    }
+    taste = {
+        "content": "小雨上次觉得瘦肉丸很好吃，汤也舒服。",
+        "metadata": {"name": "瘦肉丸口味", "tags": ["饮食"], "domain": ["日常"]},
+    }
+    bad_taste = {
+        "content": "小雨觉得那家店难吃，下次不去了。",
+        "metadata": {"name": "饭店踩雷", "tags": ["餐厅"], "domain": ["日常"]},
+    }
+
+    assert not policy.bucket_has_topic_evidence("好吃030", meal_plan)
+    assert not policy.bucket_has_topic_evidence("好吃030", metaphor)
+    assert policy.bucket_has_topic_evidence("好吃030", taste)
+    assert policy.bucket_has_topic_evidence("难吃", bad_taste)
+
+    decision = policy.assess("好吃030", meal_plan, auto=True)
+    assert decision.reason == "short_taste_query_without_taste_evidence"
+    assert not decision.admit_direct
+
+    good_decision = policy.assess("好吃030", taste, auto=True)
+    assert good_decision.admit_direct
 
 
 def test_auto_concrete_topic_query_marks_short_chinese_topics_for_context_filtering():

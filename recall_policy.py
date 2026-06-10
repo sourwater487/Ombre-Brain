@@ -341,6 +341,92 @@ AFFECT_ONLY_QUERY_FILLERS = frozenset(
         "now",
     }
 )
+SHORT_CASUAL_ONLY_TERMS = frozenset(
+    {
+        "好耶",
+        "可恶",
+        "笑死",
+        "不玩了",
+        "不准",
+        "笨",
+        "笨笨",
+        "失败",
+        "成功",
+        "配好了",
+        "重来",
+        "太短",
+        "写一个",
+        "嘿嘿",
+    }
+)
+SHORT_TASTE_QUERY_TERMS = ("不好吃", "不好喝", "难吃", "难喝", "好吃", "好喝")
+TASTE_OBJECT_TERMS = frozenset(
+    {
+        "饭",
+        "菜",
+        "餐",
+        "食堂",
+        "店",
+        "馆",
+        "面",
+        "粉",
+        "丸",
+        "肉",
+        "汤",
+        "奶茶",
+        "咖啡",
+        "饮料",
+        "甜品",
+        "蛋糕",
+        "水果",
+        "口味",
+        "味道",
+        "瘦肉丸",
+    }
+)
+TASTE_METADATA_TERMS = frozenset({"饮食", "食物", "美食", "吃饭", "口味", "餐厅", "饭店", "午饭", "晚饭"})
+SHORT_CASUAL_FILLER_TERMS = frozenset(
+    {
+        "我",
+        "你",
+        "他",
+        "她",
+        "它",
+        "我们",
+        "你们",
+        "他们",
+        "她们",
+        "老公",
+        "老婆",
+        "宝宝",
+        "宝贝",
+        "亲爱的",
+        "让",
+        "叫",
+        "把",
+        "给",
+        "这",
+        "那",
+        "这个",
+        "那个",
+        "一个",
+        "一下",
+        "端",
+        "chat",
+        "chat端",
+        "的",
+        "了",
+        "啦",
+        "呢",
+        "啊",
+        "呀",
+        "嘛",
+        "吗",
+        "吧",
+        "欸",
+        "诶",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -442,6 +528,8 @@ class RecallPolicy:
         if self._is_reaction_only_query(text):
             return True
         if self._is_probe_only_query(text):
+            return True
+        if self._is_short_casual_only_query(text):
             return True
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
@@ -621,6 +709,83 @@ class RecallPolicy:
             return False
         return stripped in AFFECT_ONLY_QUERY_TERMS
 
+    def _is_short_casual_only_query(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        if any(marker in text for marker in AUTO_VAGUE_RECALL_MARKERS):
+            return False
+        if query_has_technical_recall_marker(text):
+            return False
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+        if not compact or len(compact) > 24:
+            return False
+        compact = re.sub(r"\d{1,4}$", "", compact)
+        if not compact:
+            return False
+        if compact in SHORT_CASUAL_ONLY_TERMS:
+            return True
+        has_casual_signal = any(term in compact for term in SHORT_CASUAL_ONLY_TERMS)
+        if not has_casual_signal:
+            return False
+        stripped = compact
+        removable = (
+            SHORT_CASUAL_ONLY_TERMS
+            | SHORT_CASUAL_FILLER_TERMS
+            | AFFECT_ONLY_QUERY_FILLERS
+            | set(self.options.context_terms)
+        )
+        for term in sorted(removable, key=len, reverse=True):
+            cleaned = re.sub(r"\s+", "", str(term or "").lower())
+            if cleaned:
+                stripped = stripped.replace(cleaned, "")
+        return len(stripped) < 2
+
+    def _short_taste_query_terms(self, query: str) -> list[str]:
+        text = str(query or "").strip().lower()
+        if not text:
+            return []
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+        compact = re.sub(r"\d{1,4}$", "", compact)
+        if not compact or len(compact) > 12:
+            return []
+        stripped = compact
+        removable = SHORT_CASUAL_FILLER_TERMS | (AFFECT_ONLY_QUERY_FILLERS - {"好"}) | set(self.options.context_terms)
+        for term in sorted(removable, key=len, reverse=True):
+            cleaned = re.sub(r"\s+", "", str(term or "").lower())
+            if cleaned:
+                stripped = stripped.replace(cleaned, "")
+        return [term for term in SHORT_TASTE_QUERY_TERMS if stripped == term]
+
+    def _fields_have_taste_evidence(
+        self,
+        taste_terms: list[str],
+        fields: str,
+        metadata_text: str,
+    ) -> bool:
+        text = str(fields or "").lower()
+        meta = str(metadata_text or "").lower()
+        has_food_metadata = any(term in meta for term in TASTE_METADATA_TERMS | TASTE_OBJECT_TERMS)
+        for term in taste_terms:
+            if term == "好吃":
+                pattern = r"(?<!好)好吃"
+            elif term == "好喝":
+                pattern = r"(?<!好)好喝"
+            else:
+                pattern = re.escape(term)
+            for match in re.finditer(pattern, text):
+                start, end = match.span()
+                window = text[max(0, start - 18): min(len(text), end + 18)]
+                if "隔壁好吃" in window or "隔壁好喝" in window:
+                    continue
+                if has_food_metadata and any(obj in window for obj in TASTE_OBJECT_TERMS | TASTE_METADATA_TERMS):
+                    return True
+                if any(obj in window for obj in TASTE_OBJECT_TERMS):
+                    return True
+                if re.search(r"觉得.{1,16}" + pattern, window):
+                    return True
+        return False
+
     def specific_query_terms(self, query: str) -> list[str]:
         raw = str(query or "")
         terms = list(content_terms_for_query(raw, self.options))
@@ -650,6 +815,7 @@ class RecallPolicy:
         return kept
 
     def moment_has_topic_evidence(self, query: str, moment: dict) -> bool:
+        taste_terms = self._short_taste_query_terms(query)
         terms = self.specific_query_terms(query)
         if not terms:
             return False
@@ -664,9 +830,19 @@ class RecallPolicy:
                 " ".join(str(item) for item in (meta.get("bucket_domain") or []) if str(item).strip()),
             ]
         ).lower()
+        if taste_terms:
+            metadata_text = " ".join(
+                [
+                    str(meta.get("bucket_name") or ""),
+                    " ".join(str(tag) for tag in (meta.get("bucket_tags") or []) if str(tag).strip()),
+                    " ".join(str(item) for item in (meta.get("bucket_domain") or []) if str(item).strip()),
+                ]
+            ).lower()
+            return self._fields_have_taste_evidence(taste_terms, fields, metadata_text)
         return any(term.lower() in fields for term in terms)
 
     def bucket_has_topic_evidence(self, query: str, bucket: dict) -> bool:
+        taste_terms = self._short_taste_query_terms(query)
         terms = self.specific_query_terms(query)
         if not terms:
             return False
@@ -681,6 +857,15 @@ class RecallPolicy:
                 " ".join(str(item) for item in (meta.get("domain") or []) if str(item).strip()),
             ]
         ).lower()
+        if taste_terms:
+            metadata_text = " ".join(
+                [
+                    str(meta.get("name") or ""),
+                    " ".join(str(tag) for tag in (meta.get("tags") or []) if str(tag).strip()),
+                    " ".join(str(item) for item in (meta.get("domain") or []) if str(item).strip()),
+                ]
+            ).lower()
+            return self._fields_have_taste_evidence(taste_terms, fields, metadata_text)
         return any(term.lower() in fields for term in terms)
 
     def node_has_topic_evidence(self, query: str, node: dict) -> bool:
@@ -740,6 +925,7 @@ class RecallPolicy:
             "requires_topic_evidence": self.requires_topic_evidence(query),
             "has_topic_evidence": bool(has_topic_evidence),
             "specific_query_terms": self.specific_query_terms(query),
+            "short_taste_query_terms": self._short_taste_query_terms(query),
             "semantic_score": _maybe_float(semantic_score),
             "rerank_score": _maybe_float(rerank_score),
             "high_confidence_edge": bool(high_confidence_edge),
@@ -786,6 +972,23 @@ class RecallPolicy:
                 admit_diffused=False,
                 seed_allowed=False,
                 reason=base.reason,
+                suppressed=True,
+                debug=debug,
+            )
+
+        if (
+            debug["short_taste_query_terms"]
+            and not has_topic_evidence
+            and not self.has_strong_score(
+                semantic_score=semantic_score,
+                rerank_score=rerank_score,
+            )
+        ):
+            return RecallPolicyDecision(
+                admit_direct=False,
+                admit_diffused=False,
+                seed_allowed=False,
+                reason="short_taste_query_without_taste_evidence",
                 suppressed=True,
                 debug=debug,
             )
