@@ -63,6 +63,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -274,6 +275,82 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8000,
 )
+HARD_HIDDEN_MCP_TOOLS = frozenset({"dream_tool", "profile_fact", "darkroom_enter"})
+
+
+def _hard_hidden_mcp_tool_name(name: str) -> str:
+    return str(name or "").strip()
+
+
+def _hard_hidden_mcp_tool_message(name: str) -> str:
+    return f'MCP tool "{name}" is disabled in Lin production.'
+
+
+def _raise_if_hard_hidden_mcp_tool(name: str) -> None:
+    tool_name = _hard_hidden_mcp_tool_name(name)
+    if tool_name in HARD_HIDDEN_MCP_TOOLS:
+        raise ToolError(_hard_hidden_mcp_tool_message(tool_name))
+
+
+def _install_hard_hidden_mcp_tool_guard() -> None:
+    manager = getattr(mcp, "_tool_manager", None)
+    if manager is None:
+        return
+
+    tools = getattr(manager, "_tools", None)
+    if isinstance(tools, dict):
+        for tool_name in HARD_HIDDEN_MCP_TOOLS:
+            tools.pop(tool_name, None)
+
+    if not getattr(manager, "_ombre_hard_hidden_guard_installed", False):
+        original_list_tools = manager.list_tools
+        original_call_tool = manager.call_tool
+        original_get_tool = manager.get_tool
+
+        def guarded_list_tools():
+            return [
+                tool
+                for tool in original_list_tools()
+                if _hard_hidden_mcp_tool_name(getattr(tool, "name", "")) not in HARD_HIDDEN_MCP_TOOLS
+            ]
+
+        async def guarded_call_tool(name, arguments, context=None, convert_result=False):
+            _raise_if_hard_hidden_mcp_tool(name)
+            return await original_call_tool(
+                name,
+                arguments,
+                context=context,
+                convert_result=convert_result,
+            )
+
+        def guarded_get_tool(name):
+            if _hard_hidden_mcp_tool_name(name) in HARD_HIDDEN_MCP_TOOLS:
+                return None
+            return original_get_tool(name)
+
+        manager.list_tools = guarded_list_tools
+        manager.call_tool = guarded_call_tool
+        manager.get_tool = guarded_get_tool
+        manager._ombre_hard_hidden_guard_installed = True
+
+    if not getattr(mcp, "_ombre_hard_hidden_guard_installed", False):
+        original_mcp_list_tools = mcp.list_tools
+        original_mcp_call_tool = mcp.call_tool
+
+        async def guarded_mcp_list_tools():
+            return [
+                tool
+                for tool in await original_mcp_list_tools()
+                if _hard_hidden_mcp_tool_name(getattr(tool, "name", "")) not in HARD_HIDDEN_MCP_TOOLS
+            ]
+
+        async def guarded_mcp_call_tool(name, arguments):
+            _raise_if_hard_hidden_mcp_tool(name)
+            return await original_mcp_call_tool(name, arguments)
+
+        mcp.list_tools = guarded_mcp_list_tools
+        mcp.call_tool = guarded_mcp_call_tool
+        mcp._ombre_hard_hidden_guard_installed = True
 
 
 def _int_env(name: str, default: int) -> int:
@@ -7215,6 +7292,9 @@ async def dream() -> str:
     """兼容旧客户端。旧 dream() 已改名为 introspection(); 夜梦由后台小模型自动生成。"""
     result = await introspection()
     return "dream() 已改名为 introspection()。夜梦由后台小模型自动生成，不需要主动调用工具。\n\n" + result
+
+
+_install_hard_hidden_mcp_tool_guard()
 
 
 # =============================================================
