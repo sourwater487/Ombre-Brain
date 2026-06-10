@@ -271,6 +271,7 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 - `gateway.recent_context_reentry_idle_hours`：闲置多久算长时间再进入，默认 `24`；设 `0` 可关闭再进入触发。
 - `gateway.recent_context_budget`：`Recent Context` 预算，默认 `300`；设 `0` 可关闭这块自动注入。
 - `gateway.recent_context_interval_rounds` / `recalled_memory_interval_rounds` / `related_memory_interval_rounds`：分别限制自动 Recent / Recalled / Diffused Memory 的轮次频率；主动查询记忆或最近上下文会绕过。
+- `gateway.auto_recall_*_score`：自动 Recalled / Diffused Memory 的专用卡片阈值；主动查询仍使用常规 `first_card_min_score` / `second_card_min_score`。
 - `gateway.just_now_context_*`：控制“刚刚/刚才/上一句/暗号”这类跨窗口短时上下文，默认开启。
 - `gateway.date_persona_trace_*`：控制“昨天/昨晚/前天/明确日期”这类问题的小段日期 trace，默认开启。
 - `gateway.recalled_memory_budget`：`Recalled Memory` 直命中预算，默认 `400`。

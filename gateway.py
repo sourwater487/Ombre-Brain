@@ -392,6 +392,15 @@ class GatewayService:
         self.second_card_relative_score = float(
             self.gateway_cfg.get("second_card_relative_score", 0.85)
         )
+        self.auto_recall_first_card_min_score = float(
+            self.gateway_cfg.get("auto_recall_first_card_min_score", self.first_card_min_score)
+        )
+        self.auto_recall_second_card_min_score = float(
+            self.gateway_cfg.get("auto_recall_second_card_min_score", self.second_card_min_score)
+        )
+        self.auto_recall_second_card_relative_score = float(
+            self.gateway_cfg.get("auto_recall_second_card_relative_score", self.second_card_relative_score)
+        )
         self.high_confidence_semantic_score = float(
             self.gateway_cfg.get("high_confidence_semantic_score", 0.72)
         )
@@ -486,6 +495,9 @@ class GatewayService:
                 "related_memory_budget": self.related_memory_budget,
                 "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
                 "related_memory_interval_rounds": self.related_memory_interval_rounds,
+                "auto_recall_first_card_min_score": self.auto_recall_first_card_min_score,
+                "auto_recall_second_card_min_score": self.auto_recall_second_card_min_score,
+                "auto_recall_second_card_relative_score": self.auto_recall_second_card_relative_score,
                 "current_inner_state_interval_rounds": self.current_inner_state_interval_rounds,
                 "direct_render_mode": self.direct_render_mode,
                 "retrieval_mode": self.retrieval_mode,
@@ -543,6 +555,9 @@ class GatewayService:
             "recent_context_interval_rounds": self.recent_context_interval_rounds,
             "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
             "related_memory_interval_rounds": self.related_memory_interval_rounds,
+            "auto_recall_first_card_min_score": self.auto_recall_first_card_min_score,
+            "auto_recall_second_card_min_score": self.auto_recall_second_card_min_score,
+            "auto_recall_second_card_relative_score": self.auto_recall_second_card_relative_score,
             "current_inner_state_interval_rounds": self.current_inner_state_interval_rounds,
             "direct_render_mode": self.direct_render_mode,
             "retrieval_mode": self.retrieval_mode,
@@ -707,6 +722,20 @@ class GatewayService:
             self.related_memory_interval_rounds = max(0, int(payload["related_memory_interval_rounds"]))
             self.gateway_cfg["related_memory_interval_rounds"] = self.related_memory_interval_rounds
             updated.append("gateway.related_memory_interval_rounds")
+        if "auto_recall_first_card_min_score" in payload:
+            self.auto_recall_first_card_min_score = self._clamp(float(payload["auto_recall_first_card_min_score"]))
+            self.gateway_cfg["auto_recall_first_card_min_score"] = self.auto_recall_first_card_min_score
+            updated.append("gateway.auto_recall_first_card_min_score")
+        if "auto_recall_second_card_min_score" in payload:
+            self.auto_recall_second_card_min_score = self._clamp(float(payload["auto_recall_second_card_min_score"]))
+            self.gateway_cfg["auto_recall_second_card_min_score"] = self.auto_recall_second_card_min_score
+            updated.append("gateway.auto_recall_second_card_min_score")
+        if "auto_recall_second_card_relative_score" in payload:
+            self.auto_recall_second_card_relative_score = self._clamp(
+                float(payload["auto_recall_second_card_relative_score"])
+            )
+            self.gateway_cfg["auto_recall_second_card_relative_score"] = self.auto_recall_second_card_relative_score
+            updated.append("gateway.auto_recall_second_card_relative_score")
         if "current_inner_state_interval_rounds" in payload:
             self.current_inner_state_interval_rounds = max(
                 0,
@@ -1354,6 +1383,7 @@ class GatewayService:
                         session_id,
                         all_buckets,
                         search_query=recall_search_query(current_user_query, self.relevance_options),
+                        explicit_memory_recall=explicit_memory_recall,
                         include_query_planner_debug=True,
                     )
                     for bucket in selected_buckets:
@@ -1381,6 +1411,7 @@ class GatewayService:
                         session_id,
                         all_buckets,
                         grouped_moments,
+                        explicit_memory_recall=explicit_memory_recall,
                         include_query_planner_debug=True,
                     )
             else:
@@ -4799,6 +4830,7 @@ class GatewayService:
         all_buckets: list[dict],
         grouped_moments: dict[str, list[dict]],
         *,
+        explicit_memory_recall: bool = False,
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
@@ -4842,6 +4874,7 @@ class GatewayService:
             session_id,
             all_buckets,
             search_query=search_query,
+            explicit_memory_recall=explicit_memory_recall,
             include_query_planner_debug=True,
         )
         selected_bucket_ids = [bucket["id"] for bucket in selected_buckets if bucket.get("id")]
@@ -4940,6 +4973,11 @@ class GatewayService:
         ] or candidates
         if relevance_query:
             active_candidates.sort(key=lambda moment: self._recall_rank(query, moment))
+        if not explicit_memory_recall:
+            active_candidates = self._pick_dynamic_cards(
+                active_candidates,
+                explicit_memory_recall=False,
+            )
         for moment in active_candidates:
             bucket_id = str(moment.get("bucket_id") or "")
             if not bucket_id or bucket_id in seen_buckets:
@@ -6516,6 +6554,7 @@ class GatewayService:
         search_query: str = "",
         required_terms: list[str] | None = None,
         planner_query: dict[str, Any] | None = None,
+        explicit_memory_recall: bool = False,
     ) -> tuple[list[dict], list[dict]]:
         if not query or self.inject_max_cards <= 0:
             return [], []
@@ -6595,7 +6634,8 @@ class GatewayService:
                 )
             final_score = round(base_score * cooldown_multiplier, 4)
             if lexical_match:
-                final_score = max(final_score, self.first_card_min_score)
+                first_threshold, _, _ = self._dynamic_card_thresholds(explicit_memory_recall)
+                final_score = max(final_score, first_threshold)
             scored_candidates.append(
                 {
                     "bucket": bucket,
@@ -6652,6 +6692,7 @@ class GatewayService:
         all_buckets: list[dict],
         *,
         search_query: str = "",
+        explicit_memory_recall: bool = False,
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], dict[str, Any]]:
         planner_debug = self._query_planner_debug_base(query)
@@ -6670,9 +6711,13 @@ class GatewayService:
             session_id,
             all_buckets,
             search_query=search_query,
+            explicit_memory_recall=explicit_memory_recall,
         )
         self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
-        direct_selected = self._pick_dynamic_cards(active_pool)
+        direct_selected = self._pick_dynamic_cards(
+            active_pool,
+            explicit_memory_recall=explicit_memory_recall,
+        )
         selected_items = list(direct_selected)
 
         trigger_reason = self._query_planner_trigger_reason(query, direct_selected)
@@ -6703,6 +6748,7 @@ class GatewayService:
                             search_query=short_search_query,
                             required_terms=must_terms,
                             planner_query=planner_query,
+                            explicit_memory_recall=explicit_memory_recall,
                         )
                         supplemental_items.extend(admitted)
                         suppressed_candidates.extend(suppressed)
@@ -6736,7 +6782,8 @@ class GatewayService:
                         )
                     if supplemental_items:
                         selected_items = self._pick_dynamic_cards(
-                            self._merge_dynamic_bucket_items(selected_items + supplemental_items, query)
+                            self._merge_dynamic_bucket_items(selected_items + supplemental_items, query),
+                            explicit_memory_recall=explicit_memory_recall,
                         )
                 else:
                     planner_debug["skip_reason"] = "planner_returned_no_search"
@@ -6968,13 +7015,34 @@ class GatewayService:
                 if value not in values:
                     values.append(value)
 
-    def _pick_dynamic_cards(self, scored_candidates: list[dict]) -> list[dict]:
+    def _dynamic_card_thresholds(self, explicit_memory_recall: bool) -> tuple[float, float, float]:
+        if explicit_memory_recall:
+            return (
+                self.first_card_min_score,
+                self.second_card_min_score,
+                self.second_card_relative_score,
+            )
+        return (
+            self.auto_recall_first_card_min_score,
+            self.auto_recall_second_card_min_score,
+            self.auto_recall_second_card_relative_score,
+        )
+
+    def _pick_dynamic_cards(
+        self,
+        scored_candidates: list[dict],
+        *,
+        explicit_memory_recall: bool = False,
+    ) -> list[dict]:
         if not scored_candidates:
             return []
 
+        first_min_score, second_min_score, second_relative_score = self._dynamic_card_thresholds(
+            explicit_memory_recall
+        )
         chosen = []
         first = scored_candidates[0]
-        if first["score"] < self.first_card_min_score:
+        if first["score"] < first_min_score:
             return []
         chosen.append(first)
 
@@ -6983,8 +7051,8 @@ class GatewayService:
 
         second = scored_candidates[1]
         if (
-            second["score"] >= self.second_card_min_score
-            and second["score"] >= first["score"] * self.second_card_relative_score
+            second["score"] >= second_min_score
+            and second["score"] >= first["score"] * second_relative_score
         ):
             chosen.append(second)
         return chosen

@@ -167,12 +167,12 @@ gateway:
   recent_context_budget: 300
   recent_context_interval_rounds: 6
   recalled_memory_budget: 550
-  recalled_memory_interval_rounds: 2
+  recalled_memory_interval_rounds: 5
   relationship_weather_budget: 220
   favorite_memory_budget: 180
   favorite_memory_max_cards: 1
   related_memory_budget: 120
-  related_memory_interval_rounds: 3
+  related_memory_interval_rounds: 6
   related_memory_skip_recent_rounds: 12
   related_memory_cooldown_hours: 48
   related_memory_cooldown_floor: 0.1
@@ -184,6 +184,9 @@ gateway:
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
+  auto_recall_first_card_min_score: 0.68
+  auto_recall_second_card_min_score: 0.64
+  auto_recall_second_card_relative_score: 0.88
   edge_min_confidence: 0.68
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN

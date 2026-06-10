@@ -8956,6 +8956,33 @@ async def api_config_update(request):
                 "related_memory_interval_rounds"
             ]
             updated.append("gateway.related_memory_interval_rounds")
+        if "auto_recall_first_card_min_score" in g:
+            gateway_cfg["auto_recall_first_card_min_score"] = _float_between(
+                g["auto_recall_first_card_min_score"],
+                0.68,
+            )
+            gateway_hot_update_body["auto_recall_first_card_min_score"] = gateway_cfg[
+                "auto_recall_first_card_min_score"
+            ]
+            updated.append("gateway.auto_recall_first_card_min_score")
+        if "auto_recall_second_card_min_score" in g:
+            gateway_cfg["auto_recall_second_card_min_score"] = _float_between(
+                g["auto_recall_second_card_min_score"],
+                0.64,
+            )
+            gateway_hot_update_body["auto_recall_second_card_min_score"] = gateway_cfg[
+                "auto_recall_second_card_min_score"
+            ]
+            updated.append("gateway.auto_recall_second_card_min_score")
+        if "auto_recall_second_card_relative_score" in g:
+            gateway_cfg["auto_recall_second_card_relative_score"] = _float_between(
+                g["auto_recall_second_card_relative_score"],
+                0.88,
+            )
+            gateway_hot_update_body["auto_recall_second_card_relative_score"] = gateway_cfg[
+                "auto_recall_second_card_relative_score"
+            ]
+            updated.append("gateway.auto_recall_second_card_relative_score")
         if "current_inner_state_interval_rounds" in g:
             gateway_cfg["current_inner_state_interval_rounds"] = max(
                 0,
@@ -9287,6 +9314,21 @@ async def api_config_update(request):
                     sc_gateway["related_memory_interval_rounds"] = max(
                         0,
                         int(body["gateway"]["related_memory_interval_rounds"]),
+                    )
+                if "auto_recall_first_card_min_score" in body["gateway"]:
+                    sc_gateway["auto_recall_first_card_min_score"] = _float_between(
+                        body["gateway"]["auto_recall_first_card_min_score"],
+                        0.68,
+                    )
+                if "auto_recall_second_card_min_score" in body["gateway"]:
+                    sc_gateway["auto_recall_second_card_min_score"] = _float_between(
+                        body["gateway"]["auto_recall_second_card_min_score"],
+                        0.64,
+                    )
+                if "auto_recall_second_card_relative_score" in body["gateway"]:
+                    sc_gateway["auto_recall_second_card_relative_score"] = _float_between(
+                        body["gateway"]["auto_recall_second_card_relative_score"],
+                        0.88,
                     )
                 if "current_inner_state_interval_rounds" in body["gateway"]:
                     sc_gateway["current_inner_state_interval_rounds"] = max(

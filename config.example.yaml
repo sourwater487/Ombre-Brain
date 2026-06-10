@@ -341,6 +341,9 @@ gateway:
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
+  auto_recall_first_card_min_score: 0.68       # stricter threshold for automatic Recalled/Diffused Memory
+  auto_recall_second_card_min_score: 0.64
+  auto_recall_second_card_relative_score: 0.88 # explicit memory queries still use the regular thresholds above
   high_confidence_semantic_score: 0.72
   high_confidence_keyword_score: 0.65
   high_confidence_cooldown_floor: 0.8

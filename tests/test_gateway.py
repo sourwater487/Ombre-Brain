@@ -438,6 +438,9 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         recalled_memory_interval_rounds=2,
         related_memory_budget=220,
         related_memory_interval_rounds=3,
+        auto_recall_first_card_min_score=0.68,
+        auto_recall_second_card_min_score=0.64,
+        auto_recall_second_card_relative_score=0.88,
         current_inner_state_interval_rounds=15,
         direct_render_mode="auto",
         retrieval_mode="graph",
@@ -473,6 +476,9 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
                     "recalled_memory_interval_rounds": 4,
                     "related_memory_budget": 180,
                     "related_memory_interval_rounds": 6,
+                    "auto_recall_first_card_min_score": 0.70,
+                    "auto_recall_second_card_min_score": 0.66,
+                    "auto_recall_second_card_relative_score": 0.88,
                     "current_inner_state_interval_rounds": 9,
                     "direct_render_mode": "full",
                     "retrieval_mode": "bucket",
@@ -511,6 +517,9 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         "gateway.recalled_memory_interval_rounds",
         "gateway.related_memory_budget",
         "gateway.related_memory_interval_rounds",
+        "gateway.auto_recall_first_card_min_score",
+        "gateway.auto_recall_second_card_min_score",
+        "gateway.auto_recall_second_card_relative_score",
         "gateway.current_inner_state_interval_rounds",
         "gateway.direct_render_mode",
         "gateway.retrieval_mode",
@@ -542,6 +551,9 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
     assert service.recalled_memory_interval_rounds == 4
     assert service.related_memory_budget == 180
     assert service.related_memory_interval_rounds == 6
+    assert service.auto_recall_first_card_min_score == pytest.approx(0.70)
+    assert service.auto_recall_second_card_min_score == pytest.approx(0.66)
+    assert service.auto_recall_second_card_relative_score == pytest.approx(0.88)
     assert service.current_inner_state_interval_rounds == 9
     assert service.direct_render_mode == "full"
     assert service.retrieval_mode == "bucket"
@@ -579,6 +591,9 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
     assert response.json()["gateway"]["recalled_memory_interval_rounds"] == 4
     assert response.json()["gateway"]["related_memory_budget"] == 180
     assert response.json()["gateway"]["related_memory_interval_rounds"] == 6
+    assert response.json()["gateway"]["auto_recall_first_card_min_score"] == pytest.approx(0.70)
+    assert response.json()["gateway"]["auto_recall_second_card_min_score"] == pytest.approx(0.66)
+    assert response.json()["gateway"]["auto_recall_second_card_relative_score"] == pytest.approx(0.88)
     assert response.json()["gateway"]["current_inner_state_interval_rounds"] == 9
     assert response.json()["memory_diffusion"]["chain_walk_enabled"] is True
 
@@ -6970,6 +6985,69 @@ def test_gateway_auto_recalled_memory_respects_interval_but_explicit_recall_bypa
         service.prepare_payload(
             {"messages": [{"role": "user", "content": "你还记得星星计划吗"}]},
             "sess-recall-interval",
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == [bucket_id]
+    assert "Recalled Memory" in injected
+    assert "星星计划路线" in injected
+
+
+def test_gateway_auto_recall_uses_stricter_threshold_than_explicit_recall(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        recalled_memory_interval_rounds=1,
+        related_memory_budget=0,
+        current_inner_state_interval_rounds=0,
+        first_card_min_score=0.55,
+        second_card_min_score=0.50,
+        auto_recall_first_card_min_score=0.68,
+        auto_recall_second_card_min_score=0.64,
+        auto_recall_second_card_relative_score=0.88,
+        semantic_weight=1.0,
+        keyword_weight=0.0,
+        importance_weight=0.0,
+        freshness_weight=0.0,
+        recall_admission_semantic_score=0.0,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="星星计划需要在周五之前确认路线。",
+        name="星星计划路线",
+        hours_ago=6,
+        importance=10,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.60)],
+    )
+
+    payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "星星计划怎么样"}]},
+            "sess-auto-threshold",
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == []
+    assert "Recalled Memory" not in injected
+    assert "星星计划路线" not in injected
+
+    payload, recalled_ids = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "你还记得星星计划吗"}]},
+            "sess-auto-threshold",
         )
     )
     injected = _joined_message_content(payload["messages"])
