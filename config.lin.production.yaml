@@ -296,8 +296,8 @@ reflection:
   candidate_recent_limit: 8
   candidate_semantic_limit: 6
   edge_min_confidence: 0.55
-  diary_mcp_url: ""               # optional Che-diary MCP URL, e.g. http://127.0.0.1:8000/mcp
-  diary_mcp_token_env: ""         # optional bearer token env var name, e.g. MCP_BEARER_TOKEN
+  diary_mcp_url: "https://riji.lin-che.com/mcp"               # optional Che-diary MCP URL, e.g. http://127.0.0.1:8000/mcp
+  diary_mcp_token_env: "RIJI_MCP_BEARER_TOKEN"         # optional bearer token env var name, e.g. MCP_BEARER_TOKEN
   diary_memory_extract_enabled: true
   diary_memory_extract_max_per_day: 1
   diary_memory_extract_min_confidence: 0.68
