@@ -71,6 +71,7 @@ from darkroom import DarkroomStore
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
+from gateway import GatewayService
 from identity import identity_names
 from identity_semantics import IdentitySemanticStore
 from import_memory import ImportEngine
@@ -158,6 +159,24 @@ dream_engine = DreamEngine(config)                     # Night dream worker / �
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
+_gateway_service: GatewayService | None = None
+
+
+def _get_gateway_service() -> GatewayService:
+    global _gateway_service
+    if _gateway_service is None:
+        _gateway_service = GatewayService(
+            config,
+            bucket_mgr=bucket_mgr,
+            dehydrator=dehydrator,
+            embedding_engine=embedding_engine,
+            reranker_engine=reranker_engine,
+            persona_engine=persona_engine,
+            dream_engine=dream_engine,
+            memory_node_store=memory_node_store,
+            word_map_store=word_map_store,
+        )
+    return _gateway_service
 
 
 def _state_dir_from_config(config_obj: dict | None) -> str:
@@ -2191,6 +2210,22 @@ async def health_check(request):
         })
     except Exception as e:
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/v1/models", methods=["GET"])
+async def gateway_models(request):
+    return await _get_gateway_service().handle_models(request)
+
+
+@mcp.custom_route("/v1/chat/completions", methods=["POST"])
+async def gateway_chat_completions(request):
+    return await _get_gateway_service().handle_chat(request)
+
+
+if hasattr(GatewayService, "handle_anthropic_messages"):
+    @mcp.custom_route("/v1/messages", methods=["POST"])
+    async def gateway_anthropic_messages(request):
+        return await _get_gateway_service().handle_anthropic_messages(request)
 
 
 # =============================================================
