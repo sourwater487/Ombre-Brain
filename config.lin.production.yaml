@@ -173,8 +173,8 @@ gateway:
   favorite_memory_max_cards: 1
   related_memory_budget: 120
   related_memory_interval_rounds: 6
-  related_memory_skip_recent_rounds: 12
-  related_memory_cooldown_hours: 48
+  related_memory_skip_recent_rounds: 6
+  related_memory_cooldown_hours: 24
   related_memory_cooldown_floor: 0.1
   related_memory_max_cards: 1
   semantic_weight: 0.45
@@ -184,9 +184,9 @@ gateway:
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
-  auto_recall_first_card_min_score: 0.60
-  auto_recall_second_card_min_score: 0.56
-  auto_recall_second_card_relative_score: 0.86
+  auto_recall_first_card_min_score: 0.42
+  auto_recall_second_card_min_score: 0.36
+  auto_recall_second_card_relative_score: 0.72
   edge_min_confidence: 0.68
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN
@@ -336,12 +336,12 @@ wikilink:
 
 # --- Mainline memory/recall sections merged for Lin production ---
 reranker:
-  enabled: false
+  enabled: true
   model: Qwen/Qwen3-Reranker-4B
   base_url: 'https://api.siliconflow.cn/v1'
   candidate_limit: 10
   score_weight: 0.65
-  timeout_seconds: 4
+  timeout_seconds: 3
 
 recall_diagnostics:
   enabled: false
@@ -463,7 +463,7 @@ memory_diffusion:
   enabled: true
   max_hops: 2
   top_k: 2
-  min_activation: 0.3
+  min_activation: 0.25
   hop_decays:
   - 0.8
   - 0.6
