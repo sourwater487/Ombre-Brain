@@ -41,6 +41,7 @@ from memory_edges import MemoryEdgeStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
+    emotional_recall_plan,
     expanded_terms_for_query,
     facets_for_node,
     facets_for_text,
@@ -190,7 +191,7 @@ QUERY_PLANNER_SYSTEM_PROMPT = """You are Ombre Memory Query Planner.
 Return only strict JSON. Do not write memory. Do not choose final memories.
 Split the user's long mixed message into 1-3 short memory search anchors.
 Each query must be concrete and should preserve names, projects, people, places, or events.
-For a short emotional reason lookup, preserve compound emotion phrases such as 激动哭, 感动哭, or 难过原因 when they are the user's actual anchor.
+For a short emotional reason lookup, preserve emotion+state/event anchors such as 激动哭, 难过睡不着, 妈妈 委屈, or 焦虑 简历 when they are the user's actual anchor.
 Each query must include must_terms: concrete words that a candidate memory should contain at least one of.
 Do not include generic terms such as recent, memory, context, current, remember, emotion, status, or the single word 哭.
 If the message is too vague or has no searchable memory anchor, return should_search=false.
@@ -7251,69 +7252,57 @@ class GatewayService:
             return ""
         compact_len = len(re.sub(r"\s+", "", text))
         long_enough = compact_len >= self.query_planner_min_chars
-        if not selected_items and self._query_looks_emotional_reason_lookup(text):
-            return "emotional_reason_lookup"
         multi_topic = self._query_looks_multi_topic(text)
         if multi_topic:
             return "multi_topic"
+        if not selected_items and self._query_looks_emotional_reason_lookup(text):
+            return "emotional_reason_lookup"
         if not selected_items and long_enough:
             return "direct_recall_empty_or_low_confidence"
         return ""
 
-    @staticmethod
-    def _query_looks_emotional_reason_lookup(query: str) -> bool:
-        text = str(query or "").strip().lower()
-        if not text:
-            return False
-        temporal_terms = (
-            "今天", "刚才", "刚刚", "这次", "现在", "今晚", "昨晚",
-            "today", "just now", "tonight",
-        )
-        reason_terms = (
-            "为什么", "知道", "记得", "想起", "想起来", "原因", "因为", "怎么",
-            "why", "know", "remember", "reason",
-        )
-        emotion_terms = (
-            "激动哭", "感动哭", "高兴哭", "开心哭", "难过哭", "委屈哭",
-            "哭了", "哭吗", "哭呢", "想哭", "激动", "感动", "难过", "委屈",
-            "崩溃", "破防",
-        )
-        has_temporal = any(term and term in text for term in temporal_terms)
-        has_reason = any(term and term in text for term in reason_terms)
-        has_emotion = any(term and term in text for term in emotion_terms)
-        return has_emotion and (has_temporal or has_reason)
+    def _query_looks_emotional_reason_lookup(self, query: str) -> bool:
+        return emotional_recall_plan(query, self.relevance_options).triggered
 
     def _emotional_reason_lookup_fallback_plan(self, query: str) -> dict[str, Any] | None:
-        terms = self._emotional_reason_lookup_terms(query)
+        plan = emotional_recall_plan(query, self.relevance_options)
+        if not plan.triggered:
+            return None
+        if plan.strong_terms:
+            terms = [plan.strong_terms[0]]
+        elif plan.event_terms and plan.weak_terms:
+            weak_keys = {str(term).strip() for term in plan.weak_terms}
+            event_term = next(
+                (
+                    term for term in plan.event_terms
+                    if not any(weak and weak in str(term) for weak in weak_keys)
+                ),
+                plan.event_terms[0],
+            )
+            terms = [event_term, plan.weak_terms[0]]
+        else:
+            terms = list(plan.search_terms[:2])
         if not terms:
             return None
-        anchor = terms[0]
+        anchor = " ".join(terms[:3])
         return {
             "should_search": True,
             "too_vague": False,
             "queries": [
                 {
                     "query": anchor,
-                    "must_terms": [anchor],
+                    "must_terms": terms[:3],
                     "intent": "deterministic emotional reason lookup",
                     "risk": "medium",
                 }
             ],
         }
 
-    @staticmethod
-    def _emotional_reason_lookup_terms(query: str) -> list[str]:
-        text = str(query or "").strip().lower()
-        compound_terms = (
-            "激动哭", "感动哭", "高兴哭", "开心哭", "难过哭", "委屈哭",
-            "哭了", "想哭",
-        )
-        fallback_terms = ("激动", "感动", "难过", "委屈", "崩溃", "破防")
-        terms: list[str] = []
-        for term in compound_terms + fallback_terms:
-            if term in text and term not in terms:
-                terms.append(term)
-        return terms[:2]
+    def _emotional_reason_lookup_terms(self, query: str) -> list[str]:
+        plan = emotional_recall_plan(query, self.relevance_options)
+        if not plan.triggered:
+            return []
+        return list(plan.search_terms[:4])
 
     def _query_looks_multi_topic(self, query: str) -> bool:
         text = str(query or "").strip()

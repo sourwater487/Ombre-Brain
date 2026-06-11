@@ -87,6 +87,7 @@ from memory_edges import MemoryEdgeStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
+    emotional_recall_plan,
     facets_for_text,
     memory_relevance_options_from_config,
     query_has_explicit_entity_marker,
@@ -4657,10 +4658,6 @@ def _breath_recall_thresholds(query: str, max_results: int) -> dict:
     }
 
 
-BREATH_LEXICAL_EMOTION_TERMS = (
-    "激动哭", "感动哭", "高兴哭", "开心哭", "难过哭", "委屈哭",
-    "破防哭", "想哭",
-)
 BREATH_LEXICAL_DROP_PREFIXES = ("今天", "昨天", "刚才", "刚刚", "这次", "现在", "今晚", "昨晚")
 BREATH_LEXICAL_GENERIC_TERMS = {
     "哭", "哭了", "哭吗", "哭呢", "今天哭", "昨天哭", "刚才哭", "刚刚哭",
@@ -4673,11 +4670,10 @@ def _breath_lexical_match_terms(query: str, all_buckets: list[dict] | None = Non
     text = str(query or "").strip()
     if not text:
         return []
-    compact = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", text.lower())
     terms: list[str] = []
-    for term in BREATH_LEXICAL_EMOTION_TERMS:
-        if term in compact:
-            terms.append(term)
+    emotion_plan = emotional_recall_plan(text, memory_relevance_options_from_config(config))
+    emotion_terms = list(emotion_plan.strong_terms)
+    terms.extend(emotion_terms)
     for term in _recall_policy().specific_query_terms(text):
         cleaned = str(term or "").strip()
         if not cleaned:
@@ -4702,7 +4698,7 @@ def _breath_lexical_match_terms(query: str, all_buckets: list[dict] | None = Non
         seen.add(key)
         output.append(str(term))
     if all_buckets is not None and hasattr(bucket_mgr, "filter_specific_lexical_terms"):
-        preserve_terms = {term for term in output if term in BREATH_LEXICAL_EMOTION_TERMS}
+        preserve_terms = {term for term in output if term in emotion_terms}
         output = bucket_mgr.filter_specific_lexical_terms(
             output,
             all_buckets,

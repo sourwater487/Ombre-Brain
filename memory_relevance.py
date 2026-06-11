@@ -336,6 +336,88 @@ ASSOCIATIVE_PROMPT_EMPTY_QUERY = {
     "你会联想到什么",
 }
 
+EMOTIONAL_RECALL_TERMS = frozenset(
+    {
+        "开心",
+        "高兴",
+        "快乐",
+        "幸福",
+        "甜",
+        "温柔",
+        "感动",
+        "激动",
+        "安心",
+        "舒服",
+        "喜欢",
+        "难过",
+        "伤心",
+        "痛苦",
+        "委屈",
+        "焦虑",
+        "紧张",
+        "担心",
+        "烦",
+        "烦躁",
+        "生气",
+        "愤怒",
+        "害怕",
+        "恐惧",
+        "低落",
+        "沮丧",
+        "崩溃",
+        "破防",
+        "失落",
+        "心疼",
+        "想念",
+        "吃醋",
+        "不安",
+        "孤独",
+        "寂寞",
+        "尴尬",
+        "羞耻",
+        "累",
+        "疲惫",
+        "emo",
+        "sad",
+        "happy",
+        "angry",
+        "tired",
+        "anxious",
+        "lonely",
+        "upset",
+    }
+)
+EMOTIONAL_RECALL_STATE_TERMS = frozenset(
+    {
+        "哭了",
+        "哭",
+        "想哭",
+        "睡不着",
+        "失眠",
+        "心慌",
+        "发抖",
+        "难受",
+        "崩溃",
+        "破防",
+    }
+)
+EMOTIONAL_RECALL_STANDALONE_STRONG_TERMS = frozenset({"想哭", "崩溃", "破防", "睡不着", "失眠", "心慌"})
+EMOTIONAL_RECALL_TEMPORAL_TERMS = frozenset(
+    {"今天", "昨天", "刚才", "刚刚", "这次", "那次", "现在", "今晚", "昨晚", "today", "tonight"}
+)
+EMOTIONAL_RECALL_REASON_TERMS = frozenset(
+    {"为什么", "知道", "记得", "想起", "想起来", "原因", "因为", "怎么", "why", "know", "remember", "reason"}
+)
+EMOTIONAL_RECALL_EVENT_STOP_TERMS = QUERY_TERM_STOPWORDS | EMOTIONAL_RECALL_TERMS | EMOTIONAL_RECALL_STATE_TERMS | {
+    "哥哥",
+    "宝宝",
+    "老婆",
+    "亲爱的",
+    "有点",
+    "一点",
+    "一点点",
+}
+
 
 @dataclass(frozen=True)
 class MemoryRelevanceOptions:
@@ -367,6 +449,18 @@ class RelevanceDecision:
 class RecallAdmissionDecision:
     admit: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class EmotionalRecallPlan:
+    triggered: bool
+    strong_terms: tuple[str, ...] = ()
+    weak_terms: tuple[str, ...] = ()
+    event_terms: tuple[str, ...] = ()
+
+    @property
+    def search_terms(self) -> tuple[str, ...]:
+        return tuple(_unique([*self.strong_terms, *self.event_terms, *self.weak_terms]))
 
 
 def memory_relevance_options_from_config(config: dict | None = None) -> MemoryRelevanceOptions:
@@ -527,6 +621,92 @@ def content_terms_for_query(
         if not _is_context_term(term, options.context_terms)
     ]
     return content_terms or terms
+
+
+def emotional_recall_plan(
+    query: str,
+    options: MemoryRelevanceOptions | None = None,
+    *,
+    max_terms: int = 4,
+) -> EmotionalRecallPlan:
+    options = options or memory_relevance_options_from_config()
+    text = str(query or "").strip()
+    if not text:
+        return EmotionalRecallPlan(False)
+    compact = _compact_emotional_text(text)
+    if not compact or compact in {"哭", "哭了", "哭吗", "哭呢"}:
+        return EmotionalRecallPlan(False)
+
+    emotion_hits = _emotional_term_hits(compact, EMOTIONAL_RECALL_TERMS)
+    state_hits = _emotional_term_hits(compact, EMOTIONAL_RECALL_STATE_TERMS)
+    strong_terms: list[str] = []
+    weak_terms: list[str] = []
+    event_terms: list[str] = []
+
+    for term, _start, _end in emotion_hits:
+        if term not in weak_terms:
+            weak_terms.append(term)
+
+    for emotion, emotion_start, emotion_end in emotion_hits:
+        for state, state_start, state_end in state_hits:
+            if state == emotion:
+                continue
+            gap = max(state_start - emotion_end, emotion_start - state_end, 0)
+            if gap > 8:
+                continue
+            for term in _emotional_compound_terms(
+                compact,
+                emotion,
+                emotion_start,
+                emotion_end,
+                state,
+                state_start,
+                state_end,
+            ):
+                if term and term not in strong_terms:
+                    strong_terms.append(term)
+                    if len(strong_terms) >= max_terms:
+                        break
+            if len(strong_terms) >= max_terms:
+                break
+        if len(strong_terms) >= max_terms:
+            break
+
+    has_lookup_shell = _emotional_query_has_lookup_shell(text, compact)
+    if has_lookup_shell:
+        for state, _start, _end in state_hits:
+            normalized_state = "哭" if state in {"哭", "哭了"} else state
+            if normalized_state in EMOTIONAL_RECALL_STANDALONE_STRONG_TERMS and normalized_state not in strong_terms:
+                strong_terms.append(normalized_state)
+
+    if emotion_hits or state_hits:
+        event_terms = _emotional_event_terms(text, options, compact, max_terms=max_terms)
+
+    triggered = bool(strong_terms) or bool(event_terms and weak_terms) or bool(has_lookup_shell and weak_terms)
+    if not triggered:
+        return EmotionalRecallPlan(False)
+    return EmotionalRecallPlan(
+        True,
+        strong_terms=tuple(_unique(strong_terms)[:max_terms]),
+        weak_terms=tuple(_unique(weak_terms)[:max_terms]),
+        event_terms=tuple(_unique(event_terms)[:max_terms]),
+    )
+
+
+def emotional_recall_terms(
+    query: str,
+    options: MemoryRelevanceOptions | None = None,
+    *,
+    include_weak: bool = False,
+    max_terms: int = 4,
+) -> list[str]:
+    plan = emotional_recall_plan(query, options, max_terms=max_terms)
+    if not plan.triggered:
+        return []
+    terms = [*plan.strong_terms, *plan.event_terms]
+    if include_weak:
+        terms.extend(plan.weak_terms)
+    return _unique(terms)[:max_terms]
 
 
 def recall_focus_query(
@@ -1095,6 +1275,95 @@ def _safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _compact_emotional_text(value: object) -> str:
+    return re.sub(
+        r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+        "",
+        str(value or "").strip().lower(),
+    )
+
+
+def _emotional_term_hits(text: str, terms: frozenset[str]) -> list[tuple[str, int, int]]:
+    hits: list[tuple[str, int, int]] = []
+    occupied: set[int] = set()
+    for term in sorted(terms, key=len, reverse=True):
+        needle = _compact_emotional_text(term)
+        if not needle:
+            continue
+        start = 0
+        while True:
+            index = text.find(needle, start)
+            if index < 0:
+                break
+            end = index + len(needle)
+            if not any(position in occupied for position in range(index, end)):
+                hits.append((term, index, end))
+                occupied.update(range(index, end))
+            start = index + 1
+    hits.sort(key=lambda item: (item[1], -len(item[0])))
+    return hits
+
+
+def _emotional_compound_terms(
+    compact: str,
+    emotion: str,
+    emotion_start: int,
+    emotion_end: int,
+    state: str,
+    state_start: int,
+    state_end: int,
+) -> list[str]:
+    left = min(emotion_start, state_start)
+    right = max(emotion_end, state_end)
+    span = compact[left:right]
+    state_key = _compact_emotional_text(state)
+    terms: list[str] = []
+    if state_key in {"哭", "哭了"}:
+        terms.append(f"{emotion}哭")
+    elif state_key:
+        terms.append(f"{emotion}{state_key}")
+    if span and span not in terms and len(span) <= 16:
+        terms.append(span)
+    return terms
+
+
+def _emotional_query_has_lookup_shell(text: str, compact: str) -> bool:
+    return any(term in text or term in compact for term in EMOTIONAL_RECALL_TEMPORAL_TERMS) or any(
+        term in text or term in compact for term in EMOTIONAL_RECALL_REASON_TERMS
+    )
+
+
+def _emotional_event_terms(
+    query: str,
+    options: MemoryRelevanceOptions,
+    compact_query: str,
+    *,
+    max_terms: int,
+) -> list[str]:
+    output: list[str] = []
+    has_lookup_shell = _emotional_query_has_lookup_shell(query, compact_query)
+    for term in content_terms_for_query(query, options):
+        cleaned = str(term or "").strip()
+        key = _compact_emotional_text(cleaned)
+        if not key or key in EMOTIONAL_RECALL_EVENT_STOP_TERMS:
+            continue
+        if _is_context_term(cleaned, options.context_terms):
+            continue
+        if any(marker in key for marker in EMOTIONAL_RECALL_REASON_TERMS):
+            continue
+        if any(marker in key for marker in EMOTIONAL_RECALL_TEMPORAL_TERMS) and len(key) <= 8:
+            continue
+        if has_lookup_shell and key == compact_query and len(key) > 12:
+            continue
+        if any(emotion in key for emotion in EMOTIONAL_RECALL_TERMS) and len(key) > 12:
+            continue
+        if key not in {_compact_emotional_text(item) for item in output}:
+            output.append(cleaned)
+            if len(output) >= max_terms:
+                break
+    return output
 
 
 def _query_terms(query: str) -> list[str]:

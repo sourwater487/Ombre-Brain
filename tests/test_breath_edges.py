@@ -1180,6 +1180,42 @@ async def test_short_emotion_phrase_uses_lexical_bucket_seed_when_search_misses(
 
 
 @pytest.mark.asyncio
+async def test_emotion_state_phrase_is_generated_without_manual_combo_entry(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "A",
+                "今天她焦虑哭，是因为简历投递一直没有回音。",
+                name="焦虑求职",
+                importance=10,
+            ),
+            _bucket("B", "今天她只是提到焦虑，但没有具体事件。", name="泛情绪"),
+        ],
+        search_ids=[],
+        embedding_engine=DummyEmbeddingEngine([]),
+    )
+
+    all_buckets = await server.bucket_mgr.list_all(include_archive=False)
+    terms = server._breath_lexical_match_terms("今天为什么焦虑哭了吗", all_buckets=all_buckets)
+    result = await server.breath(
+        query="今天为什么焦虑哭了吗",
+        retrieval_mode="bucket",
+        max_results=1,
+        max_tokens=500,
+        include_core=False,
+        include_related=False,
+        surface="auto",
+    )
+
+    assert "焦虑哭" in terms
+    assert "=== 直接命中记忆 ===" in result
+    assert "[bucket_id:A]" in result
+    assert "焦虑求职" in result
+
+
+@pytest.mark.asyncio
 async def test_search_uses_word_map_hint_without_showing_neighbor_only_candidate(
     monkeypatch,
     patch_breath,

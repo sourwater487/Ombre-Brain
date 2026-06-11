@@ -5643,6 +5643,28 @@ def test_gateway_query_planner_falls_back_when_emotional_reason_model_is_empty(
     assert target_id in planner_debug["final_bucket_ids"]
 
 
+def test_gateway_emotional_reason_fallback_pairs_event_and_emotion(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            query_planner_enabled=True,
+            query_planner_min_chars=16,
+        ),
+        bucket_mgr,
+    )
+
+    plan = service._emotional_reason_lookup_fallback_plan("哥哥知道我那次为什么被妈妈说得委屈吗")
+
+    assert plan is not None
+    assert plan["queries"][0]["query"] == "妈妈 委屈"
+    assert plan["queries"][0]["must_terms"] == ["妈妈", "委屈"]
+
+
 def test_gateway_memory_detail_recall_retries_with_allowed_bucket_id(
     monkeypatch,
     test_config,

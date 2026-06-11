@@ -1,6 +1,8 @@
 from memory_relevance import (
     active_facets,
     content_terms_for_query,
+    emotional_recall_plan,
+    emotional_recall_terms,
     facets_for_node,
     facets_for_text,
     memory_relevance_options_from_config,
@@ -222,6 +224,26 @@ def test_compound_recall_terms_keep_individual_anchors():
     assert "忠犬" in terms
     assert "小机数据库" in wrapped_terms
     assert "忠犬" in wrapped_terms
+
+
+def test_emotional_recall_plan_builds_state_and_event_anchors():
+    crying = emotional_recall_plan("那哥哥知道我今天为什么激动哭了吗")
+    event = emotional_recall_plan("被妈妈说得委屈")
+    sleep = emotional_recall_plan("难过到睡不着")
+
+    assert crying.triggered
+    assert crying.strong_terms[0] == "激动哭"
+    assert "激动" in crying.weak_terms
+    assert event.triggered
+    assert "妈妈" in event.event_terms
+    assert "委屈" in event.weak_terms
+    assert sleep.strong_terms[0] == "难过睡不着"
+
+
+def test_emotional_recall_plan_keeps_bare_emotions_weak():
+    assert not emotional_recall_plan("开心").triggered
+    assert not emotional_recall_plan("哭").triggered
+    assert emotional_recall_terms("今天怎么破防了") == ["破防"]
 
 
 def test_explicit_entity_marker_handles_titlecase_entities_without_sentence_starters():
