@@ -161,7 +161,7 @@ gateway:
   favorite_memory_interval_rounds: 0
   high_confidence_semantic_score: 0.72
   high_confidence_keyword_score: 0.65
-  high_confidence_cooldown_floor: 0.35
+  high_confidence_cooldown_floor: 0.65
   inject_total_budget: 1200
   core_memory_budget: 500
   recent_context_budget: 300
@@ -184,9 +184,9 @@ gateway:
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
-  auto_recall_first_card_min_score: 0.68
-  auto_recall_second_card_min_score: 0.64
-  auto_recall_second_card_relative_score: 0.88
+  auto_recall_first_card_min_score: 0.60
+  auto_recall_second_card_min_score: 0.56
+  auto_recall_second_card_relative_score: 0.86
   edge_min_confidence: 0.68
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN

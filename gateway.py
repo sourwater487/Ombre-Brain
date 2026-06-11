@@ -1330,6 +1330,9 @@ class GatewayService:
                 self._query_discusses_memory_control_plane(current_user_query)
                 and not explicit_memory_recall
             )
+            current_round = self.state_store.get_current_round(session_id)
+            query_planner_debug["current_round"] = current_round
+            query_planner_debug["next_round"] = current_round + 1
             direct_recall_allowed = explicit_memory_recall or self._should_inject_interval(
                 session_id,
                 self.recalled_memory_interval_rounds,
@@ -1345,6 +1348,15 @@ class GatewayService:
             query_planner_debug["related_recall_allowed"] = related_recall_allowed
             query_planner_debug["recalled_memory_interval_rounds"] = self.recalled_memory_interval_rounds
             query_planner_debug["related_memory_interval_rounds"] = self.related_memory_interval_rounds
+            first_min_score, second_min_score, second_relative_score = self._dynamic_card_thresholds(
+                explicit_memory_recall
+            )
+            query_planner_debug["auto_recall_thresholds"] = {
+                "explicit_memory_recall": explicit_memory_recall,
+                "first_min_score": first_min_score,
+                "second_min_score": second_min_score,
+                "second_relative_score": second_relative_score,
+            }
             skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
                 current_user_query,
                 session_id,
@@ -3898,6 +3910,13 @@ class GatewayService:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _maybe_round(value: Any, digits: int = 4) -> float | None:
+        try:
+            return round(float(value), digits)
+        except (TypeError, ValueError):
+            return None
+
     def _query_requests_favorite_memory(self, query: str) -> bool:
         text = (query or "").strip().lower()
         if not text:
@@ -6398,10 +6417,17 @@ class GatewayService:
             "trigger_reason": "",
             "skip_reason": "",
             "original_query": self._clip_text(query, 500),
+            "current_round": 0,
+            "next_round": 0,
+            "auto_recall_thresholds": {},
             "queries": [],
             "supplemental": [],
             "suppressed_by_must_terms": [],
             "final_bucket_ids": [],
+            "bucket_candidate_debug": {
+                "top_admitted": [],
+                "top_suppressed": [],
+            },
             "word_map_hints": {
                 "enabled": self._word_map_hint_available(),
                 "bucket_ids": [],
@@ -6819,6 +6845,8 @@ class GatewayService:
                 {
                     "bucket": bucket,
                     "score": final_score,
+                    "base_score": round(base_score, 4),
+                    "pre_rerank_score": final_score,
                     "semantic_score": semantic_score,
                     "keyword_score": keyword_score,
                     "word_map_score": word_map_score,
@@ -6978,6 +7006,23 @@ class GatewayService:
             for item in selected_items
             if (item.get("bucket") or {}).get("id")
         ]
+        debug_admitted_items = list(active_pool)
+        debug_admitted_ids = {
+            str((item.get("bucket") or {}).get("id") or "")
+            for item in debug_admitted_items
+            if isinstance(item, dict)
+        }
+        for item in selected_items:
+            bucket_id = str((item.get("bucket") or {}).get("id") or "")
+            if bucket_id and bucket_id not in debug_admitted_ids:
+                debug_admitted_items.append(item)
+                debug_admitted_ids.add(bucket_id)
+        planner_debug["bucket_candidate_debug"] = self._dynamic_bucket_candidate_debug(
+            debug_admitted_items,
+            suppressed_candidates,
+            selected_items,
+            explicit_memory_recall=explicit_memory_recall,
+        )
         result = ([item["bucket"] for item in selected_items], suppressed_candidates)
         if include_query_planner_debug:
             return (*result, planner_debug)
@@ -7045,6 +7090,65 @@ class GatewayService:
             semantic_score >= self.high_confidence_semantic_score
             or keyword_score >= self.high_confidence_keyword_score
         )
+
+    def _dynamic_bucket_candidate_debug(
+        self,
+        admitted_items: list[dict],
+        suppressed_items: list[dict],
+        selected_items: list[dict],
+        *,
+        explicit_memory_recall: bool = False,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        first_min_score, second_min_score, second_relative_score = self._dynamic_card_thresholds(
+            explicit_memory_recall
+        )
+        selected_ids = {
+            str((item.get("bucket") or {}).get("id") or "")
+            for item in selected_items
+            if isinstance(item, dict)
+        }
+
+        def item_debug(item: dict) -> dict[str, Any]:
+            bucket = item.get("bucket") if isinstance(item, dict) else {}
+            if not isinstance(bucket, dict):
+                bucket = {}
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            bucket_id = str(bucket.get("id") or "")
+            score = self._safe_float(item.get("score"), 0.0)
+            return {
+                "bucket_id": bucket_id,
+                "bucket_name": str(meta.get("name") or bucket_id or ""),
+                "selected": bucket_id in selected_ids,
+                "score": round(score, 4),
+                "below_first_threshold": score < first_min_score,
+                "first_threshold_gap": round(first_min_score - score, 4)
+                if score < first_min_score
+                else 0.0,
+                "base_score": self._maybe_round(item.get("base_score")),
+                "pre_rerank_score": self._maybe_round(item.get("pre_rerank_score")),
+                "combined_score": self._maybe_round(item.get("combined_score")),
+                "semantic_score": self._maybe_round(item.get("semantic_score")),
+                "keyword_score": self._maybe_round(item.get("keyword_score")),
+                "rerank_score": self._maybe_round(item.get("rerank_score")),
+                "word_map_score": self._maybe_round(item.get("word_map_score")),
+                "importance_score": self._maybe_round(item.get("importance_score")),
+                "freshness_score": self._maybe_round(item.get("freshness_score")),
+                "cooldown_multiplier": self._maybe_round(item.get("cooldown_multiplier")),
+                "admission_reason": str(item.get("admission_reason") or ""),
+                "recall_policy_debug": item.get("recall_policy_debug") or {},
+            }
+
+        return {
+            "explicit_memory_recall": explicit_memory_recall,
+            "thresholds": {
+                "first_min_score": first_min_score,
+                "second_min_score": second_min_score,
+                "second_relative_score": second_relative_score,
+            },
+            "top_admitted": [item_debug(item) for item in admitted_items[:limit]],
+            "top_suppressed": [item_debug(item) for item in suppressed_items[:limit]],
+        }
 
     def _admit_bucket_for_recall(self, query: str, item: dict) -> bool:
         bucket = item.get("bucket") if isinstance(item, dict) else None
