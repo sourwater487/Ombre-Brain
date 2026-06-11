@@ -156,7 +156,7 @@ gateway:
   cooldown_floor: 0.2
   default_session_id: "lin-main"
   core_memory_interval_rounds: 0
-  current_inner_state_interval_rounds: 15
+  current_inner_state_interval_rounds: 0
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
   high_confidence_semantic_score: 0.72
