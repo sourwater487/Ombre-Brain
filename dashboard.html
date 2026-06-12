@@ -2227,6 +2227,11 @@
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 400，控制 Recalled Memory 直命中最多带多少内容</div>
       <div class="config-row">
+        <label>候选上限</label>
+        <input type="number" id="cfg-recall-selection-candidate-limit" min="1" max="200" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 25；按现有分数排序后，最多这些候选进入 rerank/admission/debug</div>
+      <div class="config-row">
         <label>扩散预算</label>
         <input type="number" id="cfg-related-memory-budget" min="0" max="4000" />
       </div>
@@ -5636,6 +5641,8 @@ async function loadConfig() {
       ((cfg.gateway && cfg.gateway.recent_context_budget) ?? 300) > 0 ? 'true' : 'false';
     document.getElementById('cfg-recalled-memory-budget').value =
       (cfg.gateway && cfg.gateway.recalled_memory_budget) ?? 400;
+    document.getElementById('cfg-recall-selection-candidate-limit').value =
+      (cfg.gateway && cfg.gateway.recall_selection_candidate_limit) ?? 25;
     document.getElementById('cfg-related-memory-budget').value =
       (cfg.gateway && cfg.gateway.related_memory_budget) ?? 220;
     document.getElementById('cfg-memory-detail-recall-enabled').value =
@@ -5804,6 +5811,7 @@ async function saveConfig(persist, persistEnv) {
       recent_context_reentry_idle_hours: floatValue('cfg-recent-context-reentry', 24),
       recent_context_budget: recentContextBudget,
       recalled_memory_budget: numberValue('cfg-recalled-memory-budget', 400),
+      recall_selection_candidate_limit: numberValue('cfg-recall-selection-candidate-limit', 25),
       related_memory_budget: numberValue('cfg-related-memory-budget', 220),
       memory_detail_recall_enabled: document.getElementById('cfg-memory-detail-recall-enabled').value === 'true',
       memory_detail_recall_max_ids: numberValue('cfg-memory-detail-recall-max-ids', 3),

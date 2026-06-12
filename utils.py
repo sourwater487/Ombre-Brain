@@ -177,6 +177,7 @@ def load_config(config_path: str = None) -> dict:
             "core_memory_budget": 0,
             "recent_context_budget": 300,
             "recalled_memory_budget": 400,
+            "recall_selection_candidate_limit": 25,
             "direct_render_mode": "auto",
             "portrait_memory_enabled": False,
             "portrait_memory_budget": 360,

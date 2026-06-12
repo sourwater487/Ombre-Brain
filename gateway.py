@@ -1,5 +1,6 @@
 import logging
 import hashlib
+import math
 import os
 import re
 import secrets
@@ -82,6 +83,7 @@ from word_map import WordMapStore
 
 logger = logging.getLogger("ombre_brain.gateway")
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
+DEFAULT_RECALL_SELECTION_CANDIDATE_LIMIT = 25
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
 QUERY_PLANNER_GENERIC_TERMS = {
     "recent",
@@ -444,6 +446,10 @@ class GatewayService:
             0.0,
             float(self.gateway_cfg.get("recall_timeout_seconds", 5.0)),
         )
+        self.recall_selection_candidate_limit = self._positive_int_config_value(
+            self.gateway_cfg.get("recall_selection_candidate_limit"),
+            DEFAULT_RECALL_SELECTION_CANDIDATE_LIMIT,
+        )
         self.query_planner_score_bonus = self._clamp(
             float(self.gateway_cfg.get("query_planner_score_bonus", 0.04)),
             0.0,
@@ -508,6 +514,7 @@ class GatewayService:
                 "related_memory_budget": self.related_memory_budget,
                 "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
                 "related_memory_interval_rounds": self.related_memory_interval_rounds,
+                "recall_selection_candidate_limit": self.recall_selection_candidate_limit,
                 "auto_recall_first_card_min_score": self.auto_recall_first_card_min_score,
                 "auto_recall_second_card_min_score": self.auto_recall_second_card_min_score,
                 "auto_recall_second_card_relative_score": self.auto_recall_second_card_relative_score,
@@ -587,6 +594,7 @@ class GatewayService:
             "memory_search_query_max_chars": self.memory_search_query_max_chars,
             "query_planner_input_max_chars": self.query_planner_input_max_chars,
             "recall_timeout_seconds": self.recall_timeout_seconds,
+            "recall_selection_candidate_limit": self.recall_selection_candidate_limit,
             "memory_detail_recall_enabled": self.memory_detail_recall_enabled,
             "memory_detail_recall_max_ids": self.memory_detail_recall_max_ids,
             "memory_detail_recall_budget": self.memory_detail_recall_budget,
@@ -823,6 +831,13 @@ class GatewayService:
             self.recall_timeout_seconds = max(0.0, float(payload["recall_timeout_seconds"]))
             self.gateway_cfg["recall_timeout_seconds"] = self.recall_timeout_seconds
             updated.append("gateway.recall_timeout_seconds")
+        if "recall_selection_candidate_limit" in payload:
+            self.recall_selection_candidate_limit = self._positive_int_config_value(
+                payload["recall_selection_candidate_limit"],
+                DEFAULT_RECALL_SELECTION_CANDIDATE_LIMIT,
+            )
+            self.gateway_cfg["recall_selection_candidate_limit"] = self.recall_selection_candidate_limit
+            updated.append("gateway.recall_selection_candidate_limit")
         if "memory_detail_recall_enabled" in payload:
             self.memory_detail_recall_enabled = self._bool_config_value(
                 payload["memory_detail_recall_enabled"],
@@ -5443,6 +5458,18 @@ class GatewayService:
         return bool(value)
 
     @staticmethod
+    def _positive_int_config_value(value: Any, default: int) -> int:
+        if isinstance(value, bool) or value is None:
+            return default
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(numeric) or numeric <= 0:
+            return default
+        return int(numeric)
+
+    @staticmethod
     def _query_requests_direct_detail(query: str) -> bool:
         text = str(query or "").strip().lower()
         if not text:
@@ -6766,6 +6793,7 @@ class GatewayService:
         if self._auto_query_too_vague(query):
             return [], []
 
+        started_at = time.perf_counter()
         relevance_query = self._query_has_relevance_facet(query)
         eligible = [
             bucket for bucket in all_buckets
@@ -6870,6 +6898,20 @@ class GatewayService:
                 item["score"],
             )
         )
+        before_limit = len(scored_candidates)
+        limit = self.recall_selection_candidate_limit
+        if before_limit > limit:
+            scored_candidates = scored_candidates[:limit]
+            logger.info(
+                "Gateway recall selection candidate limit applied | session=%s "
+                "recall_candidates_before_limit=%s recall_candidates_after_limit=%s "
+                "recall_selection_candidate_limit=%s elapsed_ms=%s",
+                session_id,
+                before_limit,
+                len(scored_candidates),
+                limit,
+                int((time.perf_counter() - started_at) * 1000),
+            )
         scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
         filtered = [item for item in scored_candidates if item["bucket"]["id"] not in recent_ids]
         active_pool = filtered or scored_candidates

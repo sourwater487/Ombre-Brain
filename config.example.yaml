@@ -315,6 +315,7 @@ gateway:
   query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"
   query_planner_max_queries: 3
   query_planner_max_tokens: 360
+  recall_selection_candidate_limit: 25 # hard cap after scoring, before rerank/admission/debug
   memory_detail_recall_enabled: false # optional internal [memory_detail ids="..."] retry for admitted bucket ids
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200

@@ -46,6 +46,7 @@ import asyncio
 import hashlib
 import hmac
 import json as _json_lib
+import math
 import re
 import secrets
 import sqlite3
@@ -970,9 +971,21 @@ def _float_between(value, default: float, low: float = 0.0, high: float = 1.0) -
 def _int_between(value, default: int, low: int = 1, high: int = 10) -> int:
     try:
         number = int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         number = default
     return max(low, min(high, number))
+
+
+def _positive_int_or_default(value, default: int) -> int:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number) or number <= 0:
+        return default
+    return int(number)
 
 
 def _date_key(value) -> str:
@@ -8623,6 +8636,10 @@ async def api_config_get(request):
             "date_persona_trace_max_events": gateway_cfg.get("date_persona_trace_max_events", 5),
             "date_persona_trace_include_daily": _bool_value(gateway_cfg.get("date_persona_trace_include_daily"), True),
             "recalled_memory_budget": gateway_cfg.get("recalled_memory_budget", 400),
+            "recall_selection_candidate_limit": _positive_int_or_default(
+                gateway_cfg.get("recall_selection_candidate_limit"),
+                25,
+            ),
             "related_memory_budget": gateway_cfg.get("related_memory_budget", 220),
             "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 15),
             "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
@@ -8940,6 +8957,15 @@ async def api_config_update(request):
             gateway_cfg["recalled_memory_budget"] = max(0, int(g["recalled_memory_budget"]))
             gateway_hot_update_body["recalled_memory_budget"] = gateway_cfg["recalled_memory_budget"]
             updated.append("gateway.recalled_memory_budget")
+        if "recall_selection_candidate_limit" in g:
+            gateway_cfg["recall_selection_candidate_limit"] = _positive_int_or_default(
+                g["recall_selection_candidate_limit"],
+                25,
+            )
+            gateway_hot_update_body["recall_selection_candidate_limit"] = gateway_cfg[
+                "recall_selection_candidate_limit"
+            ]
+            updated.append("gateway.recall_selection_candidate_limit")
         if "recalled_memory_interval_rounds" in g:
             gateway_cfg["recalled_memory_interval_rounds"] = max(0, int(g["recalled_memory_interval_rounds"]))
             gateway_hot_update_body["recalled_memory_interval_rounds"] = gateway_cfg[
@@ -9303,6 +9329,11 @@ async def api_config_update(request):
                     )
                 if "recalled_memory_budget" in body["gateway"]:
                     sc_gateway["recalled_memory_budget"] = max(0, int(body["gateway"]["recalled_memory_budget"]))
+                if "recall_selection_candidate_limit" in body["gateway"]:
+                    sc_gateway["recall_selection_candidate_limit"] = _positive_int_or_default(
+                        body["gateway"]["recall_selection_candidate_limit"],
+                        25,
+                    )
                 if "recalled_memory_interval_rounds" in body["gateway"]:
                     sc_gateway["recalled_memory_interval_rounds"] = max(
                         0,

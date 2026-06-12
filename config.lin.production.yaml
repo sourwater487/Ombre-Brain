@@ -220,6 +220,7 @@ gateway:
   query_planner_min_chars: 24
   query_planner_max_queries: 3
   query_planner_max_tokens: 360
+  recall_selection_candidate_limit: 25
   memory_detail_recall_enabled: false
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
