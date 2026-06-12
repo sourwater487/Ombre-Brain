@@ -151,7 +151,7 @@ gateway:
   head_recent_hours: 24
   dynamic_top_k: 10
   inject_max_cards: 2
-  skip_recent_rounds: 6
+  skip_recent_rounds: 5
   cooldown_hours: 24
   cooldown_floor: 0.2
   default_session_id: "lin-main"
@@ -174,7 +174,7 @@ gateway:
   related_memory_budget: 220
   related_memory_interval_rounds: 5
   related_memory_skip_recent_rounds: 6
-  related_memory_cooldown_hours: 24
+  related_memory_cooldown_hours: 18
   related_memory_cooldown_floor: 0.1
   related_memory_max_cards: 1
   semantic_weight: 0.45
@@ -184,8 +184,8 @@ gateway:
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
-  auto_recall_first_card_min_score: 0.35
-  auto_recall_second_card_min_score: 0.30
+  auto_recall_first_card_min_score: 0.25
+  auto_recall_second_card_min_score: 0.32
   auto_recall_second_card_relative_score: 0.65
   edge_min_confidence: 0.68
   # Env vars:
