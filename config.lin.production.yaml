@@ -161,7 +161,7 @@ gateway:
   favorite_memory_interval_rounds: 0
   high_confidence_semantic_score: 0.72
   high_confidence_keyword_score: 0.65
-  high_confidence_cooldown_floor: 0.65
+  high_confidence_cooldown_floor: 0.7
   inject_total_budget: 1200
   core_memory_budget: 500
   recent_context_budget: 300
@@ -174,8 +174,8 @@ gateway:
   related_memory_budget: 220
   related_memory_interval_rounds: 5
   related_memory_skip_recent_rounds: 6
-  related_memory_cooldown_hours: 18
-  related_memory_cooldown_floor: 0.1
+  related_memory_cooldown_hours: 8
+  related_memory_cooldown_floor: 0.22
   related_memory_max_cards: 1
   semantic_weight: 0.45
   keyword_weight: 0.35
@@ -185,9 +185,9 @@ gateway:
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
   auto_recall_first_card_min_score: 0.25
-  auto_recall_second_card_min_score: 0.32
-  auto_recall_second_card_relative_score: 0.65
-  edge_min_confidence: 0.68
+  auto_recall_second_card_min_score: 0.20
+  auto_recall_second_card_relative_score: 0.55
+  edge_min_confidence: 0.62
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN
   #   OMBRE_GATEWAY_UPSTREAM_API_KEY
@@ -462,8 +462,8 @@ memory_write_gate:
 memory_diffusion:
   enabled: true
   max_hops: 2
-  top_k: 2
-  min_activation: 0.22
+  top_k: 3
+  min_activation: 0.18
   hop_decays:
   - 0.8
   - 0.6
