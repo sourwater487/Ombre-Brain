@@ -151,11 +151,11 @@ embedding:
 reranker:
   enabled: true
   model: "Qwen/Qwen3-Reranker-4B"
-  base_url: ""
+  base_url: "https://api.siliconflow.cn/v1"
   # api_key: ""                   # Use OMBRE_RERANKER_API_KEY or reuse embedding key
-  candidate_limit: 20
+  candidate_limit: 15
   score_weight: 0.65
-  timeout_seconds: 12
+  timeout_seconds: 5
   # Env vars / 环境变量:
   #   OMBRE_RERANKER_API_KEY
   #   OMBRE_RERANKER_BASE_URL
@@ -183,11 +183,11 @@ recall_diagnostics:
 recall_thresholds:
   vector_min_score: 0.50
   facet_vector_min_score: 0.45       # relationship/email/body/intimacy context / 有明确语境
-  vague_vector_min_score: 0.40       # broad queries like "recent interesting things" / 模糊查询
+  vague_vector_min_score: 0.42       # broad queries like "recent interesting things" / 模糊查询
   explicit_vector_min_score: 0.55    # IDs/protocols/model names / 明确实体
-  explicit_admission_semantic_score: 0.72
-  explicit_admission_rerank_score: 0.65
-  vague_top_k: 50
+  explicit_admission_semantic_score: 0.68
+  explicit_admission_rerank_score: 0.60
+  vague_top_k: 40
 
 # --- Recall behavior / 召回行为 ---
 recall:
@@ -288,8 +288,8 @@ gateway:
   dynamic_top_k: 10
   inject_max_cards: 2
   skip_recent_rounds: 5
-  cooldown_hours: 6
-  cooldown_floor: 0.3
+  cooldown_hours: 12
+  cooldown_floor: 0.15
   inject_total_budget: 1200
   core_memory_budget: 0
   recent_context_budget: 300
@@ -302,17 +302,17 @@ gateway:
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
   date_persona_trace_include_daily: true
-  recalled_memory_budget: 400
-  recalled_memory_interval_rounds: 1 # auto Recalled Memory every N rounds; explicit memory queries bypass
+  recalled_memory_budget: 500
+  recalled_memory_interval_rounds: 2 # auto Recalled Memory every N rounds; explicit memory queries bypass
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   retrieval_mode: graph       # graph | bucket; bucket skips moment graph diffusion
   portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact + selected anchor
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: true # false = profile_fact only; never includes pinned/protected by default
-  query_planner_enabled: true  # extra LLM call: split long/low-confidence messages into short recall queries
+  query_planner_enabled: true  # explicit memory lookup only; passive recall uses one local query
   query_planner_model: ""      # empty = gateway upstream_default_model
-  query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"
+  query_planner_min_chars: 24
   query_planner_max_queries: 3
   query_planner_max_tokens: 360
   recall_selection_candidate_limit: 25 # hard cap after scoring, before rerank/admission/debug
@@ -324,9 +324,13 @@ gateway:
   favorite_memory_budget: 180
   favorite_memory_max_cards: 1
   related_memory_budget: 220
-  related_memory_interval_rounds: 1 # auto Diffused Memory every N rounds; explicit memory queries bypass
+  related_memory_interval_rounds: 4 # auto Diffused Memory every N rounds; explicit memory queries bypass
+  related_memory_skip_recent_rounds: 6
+  related_memory_cooldown_hours: 8
+  related_memory_cooldown_floor: 0.18
+  related_memory_max_cards: 1
   core_memory_interval_rounds: 0
-  recent_context_interval_rounds: 1 # auto Recent Context every N rounds; explicit recent queries bypass
+  recent_context_interval_rounds: 6 # auto Recent Context every N rounds; explicit recent queries bypass
   current_inner_state_interval_rounds: 15
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
@@ -342,14 +346,14 @@ gateway:
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
-  auto_recall_first_card_min_score: 0.68       # stricter threshold for automatic Recalled/Diffused Memory
-  auto_recall_second_card_min_score: 0.64
-  auto_recall_second_card_relative_score: 0.88 # explicit memory queries still use the regular thresholds above
+  auto_recall_first_card_min_score: 0.30       # stricter threshold for automatic Recalled/Diffused Memory
+  auto_recall_second_card_min_score: 0.24
+  auto_recall_second_card_relative_score: 0.60 # explicit memory queries still use the regular thresholds above
   high_confidence_semantic_score: 0.72
   high_confidence_keyword_score: 0.65
-  high_confidence_cooldown_floor: 0.8
-  recall_admission_semantic_score: 0.72  # explicit entity queries need reliable evidence before injection
-  recall_admission_rerank_score: 0.65
+  high_confidence_cooldown_floor: 0.65
+  recall_admission_semantic_score: 0.62  # admission gate before card selection/rerank display
+  recall_admission_rerank_score: 0.55
   edge_min_confidence: 0.55
   upstream_key_cooldown_seconds: 300
   # Env vars:

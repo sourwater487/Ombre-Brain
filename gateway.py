@@ -336,6 +336,7 @@ class GatewayService:
         self.favorite_memory_budget = int(self.gateway_cfg.get("favorite_memory_budget", 180))
         self.favorite_memory_max_cards = max(0, int(self.gateway_cfg.get("favorite_memory_max_cards", 1)))
         self.related_memory_budget = int(self.gateway_cfg.get("related_memory_budget", 220))
+        self.related_memory_max_cards = max(0, int(self.gateway_cfg.get("related_memory_max_cards", 1)))
         self.diffusion_options = diffusion_options_from_config(config)
         self.core_memory_interval_rounds = max(0, int(self.gateway_cfg.get("core_memory_interval_rounds", 0)))
         self.word_map_hint_enabled = self._bool_config_value(
@@ -553,11 +554,15 @@ class GatewayService:
 
     def _gateway_memory_config_payload(self) -> dict[str, Any]:
         return {
+            "dynamic_top_k": self.dynamic_top_k,
+            "inject_max_cards": self.inject_max_cards,
             "cooldown_hours": self.cooldown_hours,
+            "cooldown_floor": self.cooldown_floor,
             "skip_recent_rounds": self.skip_recent_rounds,
             "related_memory_skip_recent_rounds": self.related_memory_skip_recent_rounds,
             "related_memory_cooldown_hours": self.related_memory_cooldown_hours,
             "related_memory_cooldown_floor": self.related_memory_cooldown_floor,
+            "related_memory_max_cards": self.related_memory_max_cards,
             "recent_context_cooldown_hours": self.recent_context_cooldown_hours,
             "recent_context_reentry_idle_hours": self.recent_context_reentry_idle_hours,
             "recent_context_budget": self.recent_budget,
@@ -575,9 +580,22 @@ class GatewayService:
             "recent_context_interval_rounds": self.recent_context_interval_rounds,
             "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
             "related_memory_interval_rounds": self.related_memory_interval_rounds,
+            "semantic_weight": self.semantic_weight,
+            "keyword_weight": self.keyword_weight,
+            "importance_weight": self.importance_weight,
+            "freshness_weight": self.freshness_weight,
+            "first_card_min_score": self.first_card_min_score,
+            "second_card_min_score": self.second_card_min_score,
+            "second_card_relative_score": self.second_card_relative_score,
             "auto_recall_first_card_min_score": self.auto_recall_first_card_min_score,
             "auto_recall_second_card_min_score": self.auto_recall_second_card_min_score,
             "auto_recall_second_card_relative_score": self.auto_recall_second_card_relative_score,
+            "high_confidence_semantic_score": self.high_confidence_semantic_score,
+            "high_confidence_keyword_score": self.high_confidence_keyword_score,
+            "high_confidence_cooldown_floor": self.high_confidence_cooldown_floor,
+            "recall_admission_semantic_score": self.recall_admission_semantic_score,
+            "recall_admission_rerank_score": self.recall_admission_rerank_score,
+            "edge_min_confidence": self.edge_min_confidence,
             "current_inner_state_interval_rounds": self.current_inner_state_interval_rounds,
             "direct_render_mode": self.direct_render_mode,
             "retrieval_mode": self.retrieval_mode,
@@ -639,10 +657,22 @@ class GatewayService:
 
     def _apply_gateway_memory_config(self, payload: dict[str, Any]) -> list[str]:
         updated: list[str] = []
+        if "dynamic_top_k" in payload:
+            self.dynamic_top_k = max(1, int(payload["dynamic_top_k"]))
+            self.gateway_cfg["dynamic_top_k"] = self.dynamic_top_k
+            updated.append("gateway.dynamic_top_k")
+        if "inject_max_cards" in payload:
+            self.inject_max_cards = max(0, min(2, int(payload["inject_max_cards"])))
+            self.gateway_cfg["inject_max_cards"] = self.inject_max_cards
+            updated.append("gateway.inject_max_cards")
         if "cooldown_hours" in payload:
             self.cooldown_hours = max(0.0, float(payload["cooldown_hours"]))
             self.gateway_cfg["cooldown_hours"] = self.cooldown_hours
             updated.append("gateway.cooldown_hours")
+        if "cooldown_floor" in payload:
+            self.cooldown_floor = self._clamp(float(payload["cooldown_floor"]))
+            self.gateway_cfg["cooldown_floor"] = self.cooldown_floor
+            updated.append("gateway.cooldown_floor")
         if "skip_recent_rounds" in payload:
             self.skip_recent_rounds = max(0, int(payload["skip_recent_rounds"]))
             self.gateway_cfg["skip_recent_rounds"] = self.skip_recent_rounds
@@ -667,6 +697,10 @@ class GatewayService:
             )
             self.gateway_cfg["related_memory_cooldown_floor"] = self.related_memory_cooldown_floor
             updated.append("gateway.related_memory_cooldown_floor")
+        if "related_memory_max_cards" in payload:
+            self.related_memory_max_cards = max(0, int(payload["related_memory_max_cards"]))
+            self.gateway_cfg["related_memory_max_cards"] = self.related_memory_max_cards
+            updated.append("gateway.related_memory_max_cards")
         if "recent_context_cooldown_hours" in payload:
             self.recent_context_cooldown_hours = max(0.0, float(payload["recent_context_cooldown_hours"]))
             self.gateway_cfg["recent_context_cooldown_hours"] = self.recent_context_cooldown_hours
@@ -747,6 +781,34 @@ class GatewayService:
             self.related_memory_interval_rounds = max(0, int(payload["related_memory_interval_rounds"]))
             self.gateway_cfg["related_memory_interval_rounds"] = self.related_memory_interval_rounds
             updated.append("gateway.related_memory_interval_rounds")
+        if "semantic_weight" in payload:
+            self.semantic_weight = max(0.0, float(payload["semantic_weight"]))
+            self.gateway_cfg["semantic_weight"] = self.semantic_weight
+            updated.append("gateway.semantic_weight")
+        if "keyword_weight" in payload:
+            self.keyword_weight = max(0.0, float(payload["keyword_weight"]))
+            self.gateway_cfg["keyword_weight"] = self.keyword_weight
+            updated.append("gateway.keyword_weight")
+        if "importance_weight" in payload:
+            self.importance_weight = max(0.0, float(payload["importance_weight"]))
+            self.gateway_cfg["importance_weight"] = self.importance_weight
+            updated.append("gateway.importance_weight")
+        if "freshness_weight" in payload:
+            self.freshness_weight = max(0.0, float(payload["freshness_weight"]))
+            self.gateway_cfg["freshness_weight"] = self.freshness_weight
+            updated.append("gateway.freshness_weight")
+        if "first_card_min_score" in payload:
+            self.first_card_min_score = self._clamp(float(payload["first_card_min_score"]))
+            self.gateway_cfg["first_card_min_score"] = self.first_card_min_score
+            updated.append("gateway.first_card_min_score")
+        if "second_card_min_score" in payload:
+            self.second_card_min_score = self._clamp(float(payload["second_card_min_score"]))
+            self.gateway_cfg["second_card_min_score"] = self.second_card_min_score
+            updated.append("gateway.second_card_min_score")
+        if "second_card_relative_score" in payload:
+            self.second_card_relative_score = self._clamp(float(payload["second_card_relative_score"]))
+            self.gateway_cfg["second_card_relative_score"] = self.second_card_relative_score
+            updated.append("gateway.second_card_relative_score")
         if "auto_recall_first_card_min_score" in payload:
             self.auto_recall_first_card_min_score = self._clamp(float(payload["auto_recall_first_card_min_score"]))
             self.gateway_cfg["auto_recall_first_card_min_score"] = self.auto_recall_first_card_min_score
@@ -761,6 +823,39 @@ class GatewayService:
             )
             self.gateway_cfg["auto_recall_second_card_relative_score"] = self.auto_recall_second_card_relative_score
             updated.append("gateway.auto_recall_second_card_relative_score")
+        if "high_confidence_semantic_score" in payload:
+            self.high_confidence_semantic_score = self._clamp(float(payload["high_confidence_semantic_score"]))
+            self.gateway_cfg["high_confidence_semantic_score"] = self.high_confidence_semantic_score
+            updated.append("gateway.high_confidence_semantic_score")
+        if "high_confidence_keyword_score" in payload:
+            self.high_confidence_keyword_score = self._clamp(float(payload["high_confidence_keyword_score"]))
+            self.gateway_cfg["high_confidence_keyword_score"] = self.high_confidence_keyword_score
+            updated.append("gateway.high_confidence_keyword_score")
+        if "high_confidence_cooldown_floor" in payload:
+            self.high_confidence_cooldown_floor = self._clamp(float(payload["high_confidence_cooldown_floor"]))
+            self.gateway_cfg["high_confidence_cooldown_floor"] = self.high_confidence_cooldown_floor
+            updated.append("gateway.high_confidence_cooldown_floor")
+        recall_policy_needs_refresh = False
+        if "recall_admission_semantic_score" in payload:
+            self.recall_admission_semantic_score = self._clamp(float(payload["recall_admission_semantic_score"]))
+            self.gateway_cfg["recall_admission_semantic_score"] = self.recall_admission_semantic_score
+            recall_policy_needs_refresh = True
+            updated.append("gateway.recall_admission_semantic_score")
+        if "recall_admission_rerank_score" in payload:
+            self.recall_admission_rerank_score = self._clamp(float(payload["recall_admission_rerank_score"]))
+            self.gateway_cfg["recall_admission_rerank_score"] = self.recall_admission_rerank_score
+            recall_policy_needs_refresh = True
+            updated.append("gateway.recall_admission_rerank_score")
+        if recall_policy_needs_refresh:
+            self.recall_policy = RecallPolicy(
+                self.relevance_options,
+                semantic_threshold=self.recall_admission_semantic_score,
+                rerank_threshold=self.recall_admission_rerank_score,
+            )
+        if "edge_min_confidence" in payload:
+            self.edge_min_confidence = self._clamp(float(payload["edge_min_confidence"]))
+            self.gateway_cfg["edge_min_confidence"] = self.edge_min_confidence
+            updated.append("gateway.edge_min_confidence")
         if "current_inner_state_interval_rounds" in payload:
             self.current_inner_state_interval_rounds = max(
                 0,
@@ -1336,14 +1431,41 @@ class GatewayService:
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
 
         if is_new_user_turn:
-            explicit_memory_recall = self._query_requests_explicit_memory_recall(current_user_query)
+            is_explicit_memory_intent = self._query_requests_explicit_memory_recall(current_user_query)
+            explicit_memory_recall = is_explicit_memory_intent
             long_input_without_memory_intent = (
                 self._query_is_long_input(current_user_query)
-                and not explicit_memory_recall
+                and not is_explicit_memory_intent
             )
+            is_large_pasted_content = self._query_is_large_pasted_content(current_user_query)
             memory_control_plane_query = (
                 self._query_discusses_memory_control_plane(current_user_query)
-                and not explicit_memory_recall
+                and not is_explicit_memory_intent
+            )
+            skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
+                current_user_query,
+                session_id,
+            )
+            allow_query_planner = bool(is_explicit_memory_intent)
+            allow_passive_recall = bool(
+                not is_explicit_memory_intent
+                and not is_large_pasted_content
+                and not memory_control_plane_query
+                and not skip_for_targeted_detail
+                and not needs_handoff_first
+                and not just_now_context_requested
+            )
+            passive_query = self._passive_recall_query(current_user_query) if allow_passive_recall else ""
+            if allow_passive_recall and not passive_query:
+                allow_passive_recall = False
+            memory_intent = (
+                "explicit"
+                if is_explicit_memory_intent
+                else ("passive" if allow_passive_recall else "none")
+            )
+            allow_dynamic_seed_search = bool(
+                is_explicit_memory_intent
+                or allow_passive_recall
             )
             current_round = self.state_store.get_current_round(session_id)
             query_planner_debug["current_round"] = current_round
@@ -1356,6 +1478,13 @@ class GatewayService:
                 session_id,
                 self.related_memory_interval_rounds,
             )
+            query_planner_debug["memory_intent"] = memory_intent
+            query_planner_debug["is_explicit_memory_intent"] = is_explicit_memory_intent
+            query_planner_debug["is_large_pasted_content"] = is_large_pasted_content
+            query_planner_debug["allow_query_planner"] = allow_query_planner
+            query_planner_debug["allow_passive_recall"] = allow_passive_recall
+            query_planner_debug["allow_dynamic_seed_search"] = allow_dynamic_seed_search
+            query_planner_debug["passive_query"] = passive_query
             query_planner_debug["explicit_memory_recall"] = explicit_memory_recall
             query_planner_debug["memory_control_plane_query"] = memory_control_plane_query
             query_planner_debug["long_input_without_memory_intent"] = long_input_without_memory_intent
@@ -1372,16 +1501,13 @@ class GatewayService:
                 "second_min_score": second_min_score,
                 "second_relative_score": second_relative_score,
             }
-            skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
-                current_user_query,
-                session_id,
-            )
-            skip_broad_dynamic_recall = (
-                skip_for_targeted_detail
+            skip_dynamic_seed_search = (
+                not allow_dynamic_seed_search
+                or skip_for_targeted_detail
                 or needs_handoff_first
                 or just_now_context_requested
                 or memory_control_plane_query
-                or long_input_without_memory_intent
+                or (is_large_pasted_content and not is_explicit_memory_intent)
             )
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = (
@@ -1431,42 +1557,64 @@ class GatewayService:
                 portrait_memory, portrait_memory_debug = self._build_portrait_memory_block(all_buckets)
             if self.recalled_budget > 0 or self.related_memory_budget > 0:
                 should_select_dynamic_seeds = (
-                    (self.recalled_budget > 0 and direct_recall_allowed)
+                    allow_dynamic_seed_search
+                    and (
+                        self.recalled_budget > 0
+                        and direct_recall_allowed
+                    )
                     or (
+                        allow_dynamic_seed_search
+                        and
                         self.retrieval_mode == "graph"
                         and self.related_memory_budget > 0
                         and related_recall_allowed
                     )
                 )
-                if skip_broad_dynamic_recall:
+                if skip_dynamic_seed_search:
                     if memory_control_plane_query:
                         query_planner_debug["skip_reason"] = "memory_control_plane_query"
-                    elif long_input_without_memory_intent:
-                        query_planner_debug["skip_reason"] = "long_input_without_memory_intent"
+                    elif is_large_pasted_content and not is_explicit_memory_intent:
+                        query_planner_debug["skip_reason"] = "large_pasted_content"
+                    elif needs_handoff_first:
+                        query_planner_debug["skip_reason"] = (
+                            "handoff_trigger" if is_handoff_trigger_query else "session_start_handoff"
+                        )
+                    elif just_now_context_requested:
+                        query_planner_debug["skip_reason"] = "just_now_context"
+                    elif skip_for_targeted_detail:
+                        query_planner_debug["skip_reason"] = "targeted_memory_detail_query"
+                    elif not allow_dynamic_seed_search:
+                        query_planner_debug["skip_reason"] = "no_dynamic_seed_search_intent"
                     logger.info(
-                        "Gateway broad dynamic recall skipped | session=%s reason=%s",
+                        "Gateway dynamic seed search skipped | session=%s memory_intent=%s reason=%s",
                         session_id,
-                        query_planner_debug.get("skip_reason") or "targeted_memory_detail_query",
+                        memory_intent,
+                        query_planner_debug.get("skip_reason") or "dynamic_seed_search_disabled",
                     )
                     suppressed_moments = []
                     suppressed_buckets = []
                 elif not should_select_dynamic_seeds:
                     query_planner_debug["skip_reason"] = "auto_recall_interval"
                     logger.info(
-                        "Gateway broad dynamic recall skipped | session=%s reason=auto_recall_interval",
+                        "Gateway dynamic seed search skipped | session=%s memory_intent=%s reason=auto_recall_interval",
                         session_id,
+                        memory_intent,
                     )
                     suppressed_moments = []
                     suppressed_buckets = []
                 elif self.retrieval_mode == "bucket":
+                    dynamic_seed_query = current_user_query if is_explicit_memory_intent else passive_query
+                    query_planner_debug["dynamic_seed_search_used"] = True
+                    query_planner_debug["passive_recall_used"] = bool(not is_explicit_memory_intent)
+                    query_planner_debug["seed_query"] = self._clip_text(dynamic_seed_query, 500)
                     try:
-                        selected_buckets, suppressed_buckets, query_planner_debug = await self._await_recall_selection(
+                        selected_buckets, suppressed_buckets, selection_debug = await self._await_recall_selection(
                             self._select_dynamic_buckets(
-                                current_user_query,
+                                dynamic_seed_query,
                                 session_id,
                                 all_buckets,
                                 search_query=recall_search_query(
-                                    self._memory_search_query_text(current_user_query),
+                                    self._memory_search_query_text(dynamic_seed_query),
                                     self.relevance_options,
                                 ),
                                 explicit_memory_recall=explicit_memory_recall,
@@ -1474,6 +1622,10 @@ class GatewayService:
                             ),
                             session_id=session_id,
                             planner_debug=query_planner_debug,
+                        )
+                        query_planner_debug = self._merge_query_planner_debug(
+                            query_planner_debug,
+                            selection_debug,
                         )
                     except asyncio.TimeoutError:
                         query_planner_debug["skip_reason"] = "recall_timeout"
@@ -1492,6 +1644,10 @@ class GatewayService:
                     moment_candidates = list(recalled_moments)
                     suppressed_moments = []
                 else:
+                    dynamic_seed_query = current_user_query if is_explicit_memory_intent else passive_query
+                    query_planner_debug["dynamic_seed_search_used"] = True
+                    query_planner_debug["passive_recall_used"] = bool(not is_explicit_memory_intent)
+                    query_planner_debug["seed_query"] = self._clip_text(dynamic_seed_query, 500)
                     all_moments, grouped_moments, moment_edges = self._refresh_moment_graph(all_buckets)
                     try:
                         (
@@ -1499,10 +1655,10 @@ class GatewayService:
                             moment_candidates,
                             suppressed_moments,
                             suppressed_buckets,
-                            query_planner_debug,
+                            selection_debug,
                         ) = await self._await_recall_selection(
                             self._select_dynamic_moments(
-                                current_user_query,
+                                dynamic_seed_query,
                                 session_id,
                                 all_buckets,
                                 grouped_moments,
@@ -1511,6 +1667,10 @@ class GatewayService:
                             ),
                             session_id=session_id,
                             planner_debug=query_planner_debug,
+                        )
+                        query_planner_debug = self._merge_query_planner_debug(
+                            query_planner_debug,
+                            selection_debug,
                         )
                     except asyncio.TimeoutError:
                         query_planner_debug["skip_reason"] = "recall_timeout"
@@ -1561,6 +1721,14 @@ class GatewayService:
             else:
                 related_memory = ""
             displayed_recalled_moments = recalled_moments if recalled_memory.strip() else []
+            query_planner_debug["query_planner_used"] = bool(query_planner_debug.get("triggered"))
+            query_planner_debug["planner_queries_count"] = len(query_planner_debug.get("queries") or [])
+            query_planner_debug["injected_recalled_count"] = len(displayed_recalled_moments)
+            query_planner_debug["injected_related_count"] = (
+                len(diffused_moment_debug)
+                if related_memory.strip()
+                else 0
+            )
             current_direct_bucket_ids = [
                 str(moment.get("bucket_id") or "")
                 for moment in displayed_recalled_moments
@@ -5075,6 +5243,7 @@ class GatewayService:
         ]
         candidates = self._apply_relevance_to_moment_candidates(query, candidates)
         candidates = await self._rerank_moment_candidates(query, candidates)
+        moment_candidate_count_before_admission = len(candidates)
         admitted_bucket_ids = set(selected_bucket_ids)
         admitted_candidates = []
         suppressed_candidates = []
@@ -5108,6 +5277,16 @@ class GatewayService:
             else:
                 suppressed_candidates.append(item)
         candidates = admitted_candidates
+        query_planner_debug["moment_candidate_count_before_admission"] = moment_candidate_count_before_admission
+        query_planner_debug["moment_candidate_count_after_admission"] = len(admitted_candidates)
+        query_planner_debug["candidate_count_before_admission"] = max(
+            int(query_planner_debug.get("candidate_count_before_admission") or 0),
+            moment_candidate_count_before_admission,
+        )
+        query_planner_debug["candidate_count_after_admission"] = max(
+            int(query_planner_debug.get("candidate_count_after_admission") or 0),
+            len(admitted_candidates),
+        )
 
         selected: list[dict] = []
         seen_buckets: set[str] = set()
@@ -5676,7 +5855,7 @@ class GatewayService:
         session_id: str = "",
         context_mode: str = "",
     ) -> tuple[str, list[dict[str, Any]]]:
-        if self.related_memory_budget <= 0 or not seed_moments:
+        if self.related_memory_budget <= 0 or self.related_memory_max_cards <= 0 or not seed_moments:
             return "", []
 
         query_plan = self._recall_query_plan(query_text, context_mode=context_mode)
@@ -5738,10 +5917,12 @@ class GatewayService:
             )
             remaining -= tokens
             used_bucket_ids.add(str(moment.get("bucket_id") or ""))
-            if remaining <= 0:
+            if remaining <= 0 or len(parts) >= self.related_memory_max_cards:
                 break
 
         if remaining <= 0 or not self.diffusion_options.enabled or self.diffusion_options.top_k <= 0:
+            return "\n".join(parts), debug_rows
+        if len(parts) >= self.related_memory_max_cards:
             return "\n".join(parts), debug_rows
 
         filtered_edges = [
@@ -5829,7 +6010,7 @@ class GatewayService:
             remaining -= tokens
             used_bucket_ids.add(bucket_id)
             seen_moment_ids.add(str(moment.get("moment_id") or hit.bucket_id))
-            if remaining <= 0:
+            if remaining <= 0 or len(parts) >= self.related_memory_max_cards:
                 break
         return "\n".join(parts), debug_rows
 
@@ -6272,6 +6453,7 @@ class GatewayService:
     ) -> str:
         if (
             self.related_memory_budget <= 0
+            or self.related_memory_max_cards <= 0
             or not recalled_buckets
             or not self.diffusion_options.enabled
             or self.diffusion_options.top_k <= 0
@@ -6342,7 +6524,7 @@ class GatewayService:
                 tokens = count_tokens_approx(line)
             parts.append(line)
             remaining -= tokens
-            if remaining <= 0:
+            if remaining <= 0 or len(parts) >= self.related_memory_max_cards:
                 break
         return "\n".join(parts)
 
@@ -6433,6 +6615,92 @@ class GatewayService:
         compact = re.sub(r"\s+", "", str(query or ""))
         return len(compact) >= self.long_input_chars
 
+    @staticmethod
+    def _query_is_large_pasted_content(query: str) -> bool:
+        text = str(query or "")
+        if not text.strip():
+            return False
+        lines = text.splitlines()
+        compact_len = len(re.sub(r"\s+", "", text))
+        if "```" in text and (len(lines) >= 4 or compact_len >= 500):
+            return True
+        if compact_len < 700 and len(lines) < 12:
+            return False
+
+        nonempty = [line.rstrip() for line in lines if line.strip()]
+        if not nonempty:
+            return False
+        sample = nonempty[:120]
+        code_like = 0
+        diff_like = 0
+        log_like = 0
+        config_like = 0
+        prose_like = 0
+        for line in sample:
+            stripped = line.strip()
+            lower = stripped.lower()
+            if re.match(r"^(diff --git|index [0-9a-f]{6,}|@@ |[+-]{3} |\+\+\+ |--- )", stripped):
+                diff_like += 1
+            if re.match(r"^[+-](?![+-])", stripped):
+                diff_like += 1
+            if re.match(r"^\[?\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}", stripped, flags=re.IGNORECASE):
+                log_like += 1
+            if re.search(r"\b(traceback|exception|error|warn|fatal|stack trace|at [\w.$]+\(.*:\d+\))\b", lower):
+                log_like += 1
+            if re.match(r"^[A-Za-z0-9_.-]+\s*[:=]\s*['\"]?[^，。！？]*$", stripped):
+                config_like += 1
+            if re.search(r"[{};]|=>|==|!=|<=|>=|def |class |function |const |let |var |import |from .* import", stripped):
+                code_like += 1
+            if re.search(r"[。！？.!?]$", stripped) and len(stripped) > 18:
+                prose_like += 1
+
+        total = max(1, len(sample))
+        structured = code_like + diff_like + log_like + config_like
+        if diff_like >= 3 or log_like >= 4:
+            return True
+        if structured >= 8 and structured / total >= 0.28:
+            return True
+        if len(nonempty) >= 30 and structured > prose_like:
+            return True
+        return False
+
+    def _stable_recall_anchors(self, query: str) -> list[str]:
+        text = str(query or "")
+        anchors: list[str] = []
+
+        def add(value: str) -> None:
+            cleaned = str(value or "").strip().strip("\"'`“”‘’")
+            if not cleaned:
+                return
+            if len(cleaned) > 80:
+                cleaned = cleaned[:80].strip()
+            key = cleaned.lower()
+            if key and key not in {item.lower() for item in anchors}:
+                anchors.append(cleaned)
+
+        for value in self._extract_explicit_bucket_ids_from_text(text):
+            add(value)
+        for value in self._extract_explicit_moment_ids_from_text(text):
+            add(value)
+        for match in re.findall(r"\b[\w.-]+\.(?:py|ya?ml|json|toml|md|txt|log|diff|patch|js|jsx|ts|tsx|css|html|sql)\b", text):
+            add(match)
+        for match in re.findall(r"\b[A-Za-z][A-Za-z0-9_.:/-]{2,}\b", text):
+            add(match)
+        for match in re.findall(r"[《「『“\"]([^《》「」『』“”\"]{2,40})[》」』”\"]", text):
+            add(match)
+        for match in re.findall(r"\b(?:bucket_id|moment_id)\s*[:=]\s*([A-Za-z0-9_.:-]{3,})\b", text, flags=re.IGNORECASE):
+            add(match)
+        return anchors[:8]
+
+    def _passive_recall_query(self, query: str) -> str:
+        text = " ".join(str(query or "").strip().split())
+        if not text:
+            return ""
+        anchors = self._stable_recall_anchors(text)
+        if anchors:
+            return self._clip_text(" ".join(anchors), 180)
+        return self._clip_text(text, min(self.memory_search_query_max_chars, 260))
+
     def _memory_search_query_text(self, query: str) -> str:
         text = str(query or "").strip()
         if not text:
@@ -6449,9 +6717,24 @@ class GatewayService:
         return {
             "enabled": bool(self.query_planner_enabled),
             "triggered": False,
+            "query_planner_used": False,
             "trigger_reason": "",
             "skip_reason": "",
             "original_query": self._clip_text(query, 500),
+            "memory_intent": "none",
+            "is_explicit_memory_intent": False,
+            "is_large_pasted_content": False,
+            "allow_query_planner": False,
+            "allow_passive_recall": False,
+            "allow_dynamic_seed_search": False,
+            "passive_recall_used": False,
+            "dynamic_seed_search_used": False,
+            "passive_query": "",
+            "planner_queries_count": 0,
+            "candidate_count_before_admission": 0,
+            "candidate_count_after_admission": 0,
+            "injected_recalled_count": 0,
+            "injected_related_count": 0,
             "current_round": 0,
             "next_round": 0,
             "auto_recall_thresholds": {},
@@ -6472,6 +6755,58 @@ class GatewayService:
             "errors": [],
         }
 
+    @staticmethod
+    def _merge_query_planner_debug(
+        base: dict[str, Any],
+        selected: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(base or {})
+        selected = selected or {}
+        preserve_outer_defaults = {
+            "memory_intent",
+            "is_explicit_memory_intent",
+            "is_large_pasted_content",
+            "allow_query_planner",
+            "allow_passive_recall",
+            "allow_dynamic_seed_search",
+            "passive_recall_used",
+            "dynamic_seed_search_used",
+            "passive_query",
+            "current_round",
+            "next_round",
+            "direct_recall_allowed",
+            "related_recall_allowed",
+            "recalled_memory_interval_rounds",
+            "related_memory_interval_rounds",
+            "long_input_without_memory_intent",
+            "memory_control_plane_query",
+        }
+        for key, value in selected.items():
+            if (
+                key in preserve_outer_defaults
+                and key in merged
+                and value in ("", False, 0, "none", None)
+                and merged.get(key) not in ("", False, 0, "none", None)
+            ):
+                continue
+            if key == "errors":
+                errors = list(merged.get("errors") or [])
+                for error in value or []:
+                    if error not in errors:
+                        errors.append(error)
+                merged["errors"] = errors
+                continue
+            if key == "skip_reason" and not value:
+                continue
+            if key == "original_query" and merged.get("original_query"):
+                merged["seed_query"] = value
+                continue
+            merged[key] = value
+        if merged.get("triggered"):
+            merged["query_planner_used"] = True
+        merged["planner_queries_count"] = len(merged.get("queries") or [])
+        return merged
+
     def _query_planner_trigger_reason(
         self,
         query: str,
@@ -6486,10 +6821,10 @@ class GatewayService:
             return ""
         if self._auto_query_too_vague(text):
             return ""
-        if not selected_items and self._query_looks_emotional_reason_lookup(text):
-            return "emotional_reason_lookup"
         if not explicit_memory_recall:
             return ""
+        if not selected_items and self._query_looks_emotional_reason_lookup(text):
+            return "emotional_reason_lookup"
         if self._query_looks_multi_topic(text):
             return "multi_memory_lookup"
         if not selected_items:
@@ -6970,6 +7305,8 @@ class GatewayService:
             search_query=search_query,
             explicit_memory_recall=explicit_memory_recall,
         )
+        planner_debug["candidate_count_before_admission"] = len(active_pool) + len(suppressed_candidates)
+        planner_debug["candidate_count_after_admission"] = len(active_pool)
         self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
         direct_selected = self._pick_dynamic_cards(
             active_pool,
@@ -6984,6 +7321,7 @@ class GatewayService:
         )
         if trigger_reason:
             planner_debug["triggered"] = True
+            planner_debug["query_planner_used"] = True
             planner_debug["trigger_reason"] = trigger_reason
             plan, error = await self._call_query_planner(query)
             if error:
@@ -6994,6 +7332,7 @@ class GatewayService:
                         planner_debug["errors"].append("query_planner_fallback_used")
             if plan:
                 planner_debug["queries"] = plan.get("queries", [])
+                planner_debug["planner_queries_count"] = len(planner_debug["queries"])
                 if plan.get("should_search") and not plan.get("too_vague"):
                     supplemental_items: list[dict] = []
                     for planner_query in plan.get("queries", [])[: self.query_planner_max_queries]:
@@ -7011,6 +7350,8 @@ class GatewayService:
                             planner_query=planner_query,
                             explicit_memory_recall=explicit_memory_recall,
                         )
+                        planner_debug["candidate_count_before_admission"] += len(admitted) + len(suppressed)
+                        planner_debug["candidate_count_after_admission"] += len(admitted)
                         supplemental_items.extend(admitted)
                         suppressed_candidates.extend(suppressed)
                         self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)

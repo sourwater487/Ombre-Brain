@@ -434,8 +434,6 @@ class RecallPolicy:
             return False
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
-        if self._is_affect_only_query(text):
-            return True
         if self._is_context_free_response_action_query(text):
             return True
         lowered = text.lower()

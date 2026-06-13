@@ -8604,6 +8604,12 @@ async def api_config_get(request):
     emb = config.get("embedding", {})
     gateway_cfg = config.get("gateway", {}) if isinstance(config.get("gateway", {}), dict) else {}
     recall_cfg = config.get("recall", {}) if isinstance(config.get("recall", {}), dict) else {}
+    recall_threshold_cfg = (
+        config.get("recall_thresholds", {})
+        if isinstance(config.get("recall_thresholds", {}), dict)
+        else {}
+    )
+    reranker_cfg = config.get("reranker", {}) if isinstance(config.get("reranker", {}), dict) else {}
     diffusion_options = diffusion_options_from_config(config)
     persona_cfg = config.get("persona", {}) if isinstance(config.get("persona", {}), dict) else {}
     dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
@@ -8626,24 +8632,53 @@ async def api_config_get(request):
             "has_own_api_key": bool(emb.get("api_key", "")),
         },
         "gateway": {
+            "dynamic_top_k": gateway_cfg.get("dynamic_top_k", 10),
+            "inject_max_cards": gateway_cfg.get("inject_max_cards", 2),
             "cooldown_hours": gateway_cfg.get("cooldown_hours", 6),
+            "cooldown_floor": gateway_cfg.get("cooldown_floor", 0.3),
             "skip_recent_rounds": gateway_cfg.get("skip_recent_rounds", 5),
+            "related_memory_skip_recent_rounds": gateway_cfg.get("related_memory_skip_recent_rounds", 5),
+            "related_memory_cooldown_hours": gateway_cfg.get("related_memory_cooldown_hours", 6),
+            "related_memory_cooldown_floor": gateway_cfg.get("related_memory_cooldown_floor", 0.3),
+            "related_memory_max_cards": gateway_cfg.get("related_memory_max_cards", 1),
             "recent_context_cooldown_hours": gateway_cfg.get("recent_context_cooldown_hours", 6),
             "recent_context_reentry_idle_hours": gateway_cfg.get("recent_context_reentry_idle_hours", 24),
             "recent_context_budget": gateway_cfg.get("recent_context_budget", 300),
+            "recent_context_interval_rounds": gateway_cfg.get("recent_context_interval_rounds", 1),
             "date_persona_trace_enabled": _bool_value(gateway_cfg.get("date_persona_trace_enabled"), True),
             "date_persona_trace_budget": gateway_cfg.get("date_persona_trace_budget", 220),
             "date_persona_trace_max_events": gateway_cfg.get("date_persona_trace_max_events", 5),
             "date_persona_trace_include_daily": _bool_value(gateway_cfg.get("date_persona_trace_include_daily"), True),
             "recalled_memory_budget": gateway_cfg.get("recalled_memory_budget", 400),
+            "recalled_memory_interval_rounds": gateway_cfg.get("recalled_memory_interval_rounds", 1),
             "recall_selection_candidate_limit": _positive_int_or_default(
                 gateway_cfg.get("recall_selection_candidate_limit"),
                 25,
             ),
             "related_memory_budget": gateway_cfg.get("related_memory_budget", 220),
+            "related_memory_interval_rounds": gateway_cfg.get("related_memory_interval_rounds", 1),
             "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 15),
             "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
             "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "graph")),
+            "semantic_weight": gateway_cfg.get("semantic_weight", 0.45),
+            "keyword_weight": gateway_cfg.get("keyword_weight", 0.35),
+            "importance_weight": gateway_cfg.get("importance_weight", 0.10),
+            "freshness_weight": gateway_cfg.get("freshness_weight", 0.10),
+            "first_card_min_score": gateway_cfg.get("first_card_min_score", 0.55),
+            "second_card_min_score": gateway_cfg.get("second_card_min_score", 0.50),
+            "second_card_relative_score": gateway_cfg.get("second_card_relative_score", 0.85),
+            "auto_recall_first_card_min_score": gateway_cfg.get("auto_recall_first_card_min_score", 0.68),
+            "auto_recall_second_card_min_score": gateway_cfg.get("auto_recall_second_card_min_score", 0.64),
+            "auto_recall_second_card_relative_score": gateway_cfg.get(
+                "auto_recall_second_card_relative_score",
+                0.88,
+            ),
+            "high_confidence_semantic_score": gateway_cfg.get("high_confidence_semantic_score", 0.72),
+            "high_confidence_keyword_score": gateway_cfg.get("high_confidence_keyword_score", 0.65),
+            "high_confidence_cooldown_floor": gateway_cfg.get("high_confidence_cooldown_floor", 0.8),
+            "recall_admission_semantic_score": gateway_cfg.get("recall_admission_semantic_score", 0.72),
+            "recall_admission_rerank_score": gateway_cfg.get("recall_admission_rerank_score", 0.65),
+            "edge_min_confidence": gateway_cfg.get("edge_min_confidence", 0.55),
             "portrait_memory_enabled": _bool_value(gateway_cfg.get("portrait_memory_enabled"), False),
             "portrait_memory_budget": gateway_cfg.get("portrait_memory_budget", 360),
             "portrait_memory_max_sources": gateway_cfg.get("portrait_memory_max_sources", 8),
@@ -8662,6 +8697,31 @@ async def api_config_get(request):
         },
         "recall": {
             "query_resurface_enabled": _bool_value(recall_cfg.get("query_resurface_enabled"), False),
+        },
+        "recall_thresholds": {
+            "vector_min_score": recall_threshold_cfg.get("vector_min_score", 0.50),
+            "facet_vector_min_score": recall_threshold_cfg.get("facet_vector_min_score", 0.45),
+            "vague_vector_min_score": recall_threshold_cfg.get("vague_vector_min_score", 0.42),
+            "explicit_vector_min_score": recall_threshold_cfg.get("explicit_vector_min_score", 0.55),
+            "explicit_admission_semantic_score": recall_threshold_cfg.get(
+                "explicit_admission_semantic_score",
+                0.68,
+            ),
+            "explicit_admission_rerank_score": recall_threshold_cfg.get(
+                "explicit_admission_rerank_score",
+                0.60,
+            ),
+            "vague_top_k": recall_threshold_cfg.get("vague_top_k", 40),
+        },
+        "reranker": {
+            "enabled": _bool_value(reranker_cfg.get("enabled"), True),
+            "model": getattr(reranker_engine, "model", reranker_cfg.get("model", "")),
+            "base_url": getattr(reranker_engine, "base_url", reranker_cfg.get("base_url", "")),
+            "api_key_masked": _mask_key(getattr(reranker_engine, "api_key", "") or reranker_cfg.get("api_key", "")),
+            "api_ready": bool(getattr(reranker_engine, "api_key", "") or reranker_cfg.get("api_key", "")),
+            "candidate_limit": getattr(reranker_engine, "candidate_limit", reranker_cfg.get("candidate_limit", 20)),
+            "score_weight": getattr(reranker_engine, "score_weight", reranker_cfg.get("score_weight", 0.65)),
+            "timeout_seconds": getattr(reranker_engine, "timeout", reranker_cfg.get("timeout_seconds", 12)),
         },
         "memory_diffusion": {
             "enabled": diffusion_options.enabled,
@@ -8787,7 +8847,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine, persona_engine, portrait_engine, reflection_engine
+    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -8903,14 +8963,54 @@ async def api_config_update(request):
         g = body["gateway"]
         gateway_cfg = config.setdefault("gateway", {})
         gateway_hot_update_body = {}
+        if "dynamic_top_k" in g:
+            gateway_cfg["dynamic_top_k"] = _int_between(g["dynamic_top_k"], 10, 1, 100)
+            gateway_hot_update_body["dynamic_top_k"] = gateway_cfg["dynamic_top_k"]
+            updated.append("gateway.dynamic_top_k")
+        if "inject_max_cards" in g:
+            gateway_cfg["inject_max_cards"] = _int_between(g["inject_max_cards"], 2, 0, 2)
+            gateway_hot_update_body["inject_max_cards"] = gateway_cfg["inject_max_cards"]
+            updated.append("gateway.inject_max_cards")
         if "cooldown_hours" in g:
             gateway_cfg["cooldown_hours"] = max(0.0, float(g["cooldown_hours"]))
             gateway_hot_update_body["cooldown_hours"] = gateway_cfg["cooldown_hours"]
             updated.append("gateway.cooldown_hours")
+        if "cooldown_floor" in g:
+            gateway_cfg["cooldown_floor"] = _float_between(g["cooldown_floor"], 0.3)
+            gateway_hot_update_body["cooldown_floor"] = gateway_cfg["cooldown_floor"]
+            updated.append("gateway.cooldown_floor")
         if "skip_recent_rounds" in g:
             gateway_cfg["skip_recent_rounds"] = max(0, int(g["skip_recent_rounds"]))
             gateway_hot_update_body["skip_recent_rounds"] = gateway_cfg["skip_recent_rounds"]
             updated.append("gateway.skip_recent_rounds")
+        if "related_memory_skip_recent_rounds" in g:
+            gateway_cfg["related_memory_skip_recent_rounds"] = max(
+                0,
+                int(g["related_memory_skip_recent_rounds"]),
+            )
+            gateway_hot_update_body["related_memory_skip_recent_rounds"] = gateway_cfg[
+                "related_memory_skip_recent_rounds"
+            ]
+            updated.append("gateway.related_memory_skip_recent_rounds")
+        if "related_memory_cooldown_hours" in g:
+            gateway_cfg["related_memory_cooldown_hours"] = max(0.0, float(g["related_memory_cooldown_hours"]))
+            gateway_hot_update_body["related_memory_cooldown_hours"] = gateway_cfg[
+                "related_memory_cooldown_hours"
+            ]
+            updated.append("gateway.related_memory_cooldown_hours")
+        if "related_memory_cooldown_floor" in g:
+            gateway_cfg["related_memory_cooldown_floor"] = _float_between(
+                g["related_memory_cooldown_floor"],
+                0.3,
+            )
+            gateway_hot_update_body["related_memory_cooldown_floor"] = gateway_cfg[
+                "related_memory_cooldown_floor"
+            ]
+            updated.append("gateway.related_memory_cooldown_floor")
+        if "related_memory_max_cards" in g:
+            gateway_cfg["related_memory_max_cards"] = max(0, int(g["related_memory_max_cards"]))
+            gateway_hot_update_body["related_memory_max_cards"] = gateway_cfg["related_memory_max_cards"]
+            updated.append("gateway.related_memory_max_cards")
         if "recent_context_cooldown_hours" in g:
             gateway_cfg["recent_context_cooldown_hours"] = max(0.0, float(g["recent_context_cooldown_hours"]))
             gateway_hot_update_body["recent_context_cooldown_hours"] = gateway_cfg["recent_context_cooldown_hours"]
@@ -9026,6 +9126,25 @@ async def api_config_update(request):
             gateway_cfg["retrieval_mode"] = _normalize_retrieval_mode(g["retrieval_mode"])
             gateway_hot_update_body["retrieval_mode"] = gateway_cfg["retrieval_mode"]
             updated.append("gateway.retrieval_mode")
+        for key, default in (
+            ("semantic_weight", 0.45),
+            ("keyword_weight", 0.35),
+            ("importance_weight", 0.10),
+            ("freshness_weight", 0.10),
+            ("first_card_min_score", 0.55),
+            ("second_card_min_score", 0.50),
+            ("second_card_relative_score", 0.85),
+            ("high_confidence_semantic_score", 0.72),
+            ("high_confidence_keyword_score", 0.65),
+            ("high_confidence_cooldown_floor", 0.8),
+            ("recall_admission_semantic_score", 0.72),
+            ("recall_admission_rerank_score", 0.65),
+            ("edge_min_confidence", 0.55),
+        ):
+            if key in g:
+                gateway_cfg[key] = _float_between(g[key], default)
+                gateway_hot_update_body[key] = gateway_cfg[key]
+                updated.append(f"gateway.{key}")
         if "portrait_memory_enabled" in g:
             gateway_cfg["portrait_memory_enabled"] = _bool_value(g["portrait_memory_enabled"], False)
             gateway_hot_update_body["portrait_memory_enabled"] = gateway_cfg["portrait_memory_enabled"]
@@ -9089,6 +9208,49 @@ async def api_config_update(request):
         if "query_resurface_enabled" in r:
             recall_cfg["query_resurface_enabled"] = _bool_value(r["query_resurface_enabled"], False)
             updated.append("recall.query_resurface_enabled")
+
+    if "recall_thresholds" in body and isinstance(body["recall_thresholds"], dict):
+        r = body["recall_thresholds"]
+        recall_threshold_cfg = config.setdefault("recall_thresholds", {})
+        for key, default in (
+            ("vector_min_score", 0.50),
+            ("facet_vector_min_score", 0.45),
+            ("vague_vector_min_score", 0.42),
+            ("explicit_vector_min_score", 0.55),
+            ("explicit_admission_semantic_score", 0.68),
+            ("explicit_admission_rerank_score", 0.60),
+        ):
+            if key in r:
+                recall_threshold_cfg[key] = _float_between(r[key], default)
+                updated.append(f"recall_thresholds.{key}")
+        if "vague_top_k" in r:
+            recall_threshold_cfg["vague_top_k"] = _int_between(r["vague_top_k"], 40, 20, 100)
+            updated.append("recall_thresholds.vague_top_k")
+
+    if "reranker" in body and isinstance(body["reranker"], dict):
+        r = body["reranker"]
+        reranker_cfg = config.setdefault("reranker", {})
+        if "enabled" in r:
+            reranker_cfg["enabled"] = _bool_value(r["enabled"], True)
+            updated.append("reranker.enabled")
+        if "model" in r:
+            reranker_cfg["model"] = str(r["model"] or "").strip()
+            updated.append("reranker.model")
+        if "base_url" in r:
+            reranker_cfg["base_url"] = str(r["base_url"] or "").strip()
+            updated.append("reranker.base_url")
+        if "candidate_limit" in r:
+            reranker_cfg["candidate_limit"] = _int_between(r["candidate_limit"], 15, 1, 100)
+            updated.append("reranker.candidate_limit")
+        if "score_weight" in r:
+            reranker_cfg["score_weight"] = _float_between(r["score_weight"], 0.65)
+            updated.append("reranker.score_weight")
+        if "timeout_seconds" in r:
+            reranker_cfg["timeout_seconds"] = _float_between(r["timeout_seconds"], 5, 1, 120)
+            updated.append("reranker.timeout_seconds")
+        reranker_engine = RerankerEngine(config)
+        if _gateway_service is not None:
+            _gateway_service.reranker_engine = reranker_engine
 
     # --- Memory diffusion config ---
     if "memory_diffusion" in body:
@@ -9286,10 +9448,36 @@ async def api_config_update(request):
 
             if "gateway" in body:
                 sc_gateway = save_config.setdefault("gateway", {})
+                if "dynamic_top_k" in body["gateway"]:
+                    sc_gateway["dynamic_top_k"] = _int_between(body["gateway"]["dynamic_top_k"], 10, 1, 100)
+                if "inject_max_cards" in body["gateway"]:
+                    sc_gateway["inject_max_cards"] = _int_between(body["gateway"]["inject_max_cards"], 2, 0, 2)
                 if "cooldown_hours" in body["gateway"]:
                     sc_gateway["cooldown_hours"] = max(0.0, float(body["gateway"]["cooldown_hours"]))
+                if "cooldown_floor" in body["gateway"]:
+                    sc_gateway["cooldown_floor"] = _float_between(body["gateway"]["cooldown_floor"], 0.3)
                 if "skip_recent_rounds" in body["gateway"]:
                     sc_gateway["skip_recent_rounds"] = max(0, int(body["gateway"]["skip_recent_rounds"]))
+                if "related_memory_skip_recent_rounds" in body["gateway"]:
+                    sc_gateway["related_memory_skip_recent_rounds"] = max(
+                        0,
+                        int(body["gateway"]["related_memory_skip_recent_rounds"]),
+                    )
+                if "related_memory_cooldown_hours" in body["gateway"]:
+                    sc_gateway["related_memory_cooldown_hours"] = max(
+                        0.0,
+                        float(body["gateway"]["related_memory_cooldown_hours"]),
+                    )
+                if "related_memory_cooldown_floor" in body["gateway"]:
+                    sc_gateway["related_memory_cooldown_floor"] = _float_between(
+                        body["gateway"]["related_memory_cooldown_floor"],
+                        0.3,
+                    )
+                if "related_memory_max_cards" in body["gateway"]:
+                    sc_gateway["related_memory_max_cards"] = max(
+                        0,
+                        int(body["gateway"]["related_memory_max_cards"]),
+                    )
                 if "recent_context_cooldown_hours" in body["gateway"]:
                     sc_gateway["recent_context_cooldown_hours"] = max(
                         0.0,
@@ -9370,6 +9558,23 @@ async def api_config_update(request):
                     sc_gateway["direct_render_mode"] = _normalize_direct_render_mode(body["gateway"]["direct_render_mode"])
                 if "retrieval_mode" in body["gateway"]:
                     sc_gateway["retrieval_mode"] = _normalize_retrieval_mode(body["gateway"]["retrieval_mode"])
+                for key, default in (
+                    ("semantic_weight", 0.45),
+                    ("keyword_weight", 0.35),
+                    ("importance_weight", 0.10),
+                    ("freshness_weight", 0.10),
+                    ("first_card_min_score", 0.55),
+                    ("second_card_min_score", 0.50),
+                    ("second_card_relative_score", 0.85),
+                    ("high_confidence_semantic_score", 0.72),
+                    ("high_confidence_keyword_score", 0.65),
+                    ("high_confidence_cooldown_floor", 0.8),
+                    ("recall_admission_semantic_score", 0.72),
+                    ("recall_admission_rerank_score", 0.65),
+                    ("edge_min_confidence", 0.55),
+                ):
+                    if key in body["gateway"]:
+                        sc_gateway[key] = _float_between(body["gateway"][key], default)
                 if "portrait_memory_enabled" in body["gateway"]:
                     sc_gateway["portrait_memory_enabled"] = _bool_value(
                         body["gateway"]["portrait_memory_enabled"],
@@ -9448,6 +9653,51 @@ async def api_config_update(request):
                     sc_recall["query_resurface_enabled"] = _bool_value(
                         body["recall"]["query_resurface_enabled"],
                         False,
+                    )
+
+            if "recall_thresholds" in body and isinstance(body["recall_thresholds"], dict):
+                sc_thresholds = save_config.setdefault("recall_thresholds", {})
+                for key, default in (
+                    ("vector_min_score", 0.50),
+                    ("facet_vector_min_score", 0.45),
+                    ("vague_vector_min_score", 0.42),
+                    ("explicit_vector_min_score", 0.55),
+                    ("explicit_admission_semantic_score", 0.68),
+                    ("explicit_admission_rerank_score", 0.60),
+                ):
+                    if key in body["recall_thresholds"]:
+                        sc_thresholds[key] = _float_between(body["recall_thresholds"][key], default)
+                if "vague_top_k" in body["recall_thresholds"]:
+                    sc_thresholds["vague_top_k"] = _int_between(
+                        body["recall_thresholds"]["vague_top_k"],
+                        40,
+                        20,
+                        100,
+                    )
+
+            if "reranker" in body and isinstance(body["reranker"], dict):
+                sc_reranker = save_config.setdefault("reranker", {})
+                if "enabled" in body["reranker"]:
+                    sc_reranker["enabled"] = _bool_value(body["reranker"]["enabled"], True)
+                if "model" in body["reranker"]:
+                    sc_reranker["model"] = str(body["reranker"]["model"] or "").strip()
+                if "base_url" in body["reranker"]:
+                    sc_reranker["base_url"] = str(body["reranker"]["base_url"] or "").strip()
+                if "candidate_limit" in body["reranker"]:
+                    sc_reranker["candidate_limit"] = _int_between(
+                        body["reranker"]["candidate_limit"],
+                        15,
+                        1,
+                        100,
+                    )
+                if "score_weight" in body["reranker"]:
+                    sc_reranker["score_weight"] = _float_between(body["reranker"]["score_weight"], 0.65)
+                if "timeout_seconds" in body["reranker"]:
+                    sc_reranker["timeout_seconds"] = _float_between(
+                        body["reranker"]["timeout_seconds"],
+                        5,
+                        1,
+                        120,
                     )
 
             if "memory_diffusion" in body:
