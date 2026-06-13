@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,45 +46,61 @@ class RerankerEngine:
         self.score_weight = _float_between(rerank_cfg.get("score_weight", 0.65), 0.65, 0.0, 1.0)
 
     async def rerank(self, query: str, documents: list[str], top_n: int | None = None) -> list[RerankResult]:
-        if not self.enabled or not query or not documents:
-            return []
-        endpoint = f"{self.base_url}/rerank"
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "query": str(query),
-            "documents": [str(document or "") for document in documents],
-            "return_documents": False,
-        }
-        if top_n is not None:
-            payload["top_n"] = max(1, min(int(top_n), len(documents)))
-
+        started_at = time.perf_counter()
+        status = "skipped"
+        error_type = ""
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    endpoint,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                body = response.json()
-        except Exception as exc:
-            logger.warning("Reranker request failed: %s", exc)
-            return []
+            if not self.enabled or not query or not documents:
+                return []
+            endpoint = f"{self.base_url}/rerank"
+            payload: dict[str, Any] = {
+                "model": self.model,
+                "query": str(query),
+                "documents": [str(document or "") for document in documents],
+                "return_documents": False,
+            }
+            if top_n is not None:
+                payload["top_n"] = max(1, min(int(top_n), len(documents)))
 
-        results = []
-        for item in body.get("results", []) if isinstance(body, dict) else []:
             try:
-                index = int(item.get("index"))
-                score = float(item.get("relevance_score", 0.0))
-            except (TypeError, ValueError):
-                continue
-            if 0 <= index < len(documents):
-                results.append(RerankResult(index=index, score=max(0.0, min(1.0, score))))
-        results.sort(key=lambda item: item.score, reverse=True)
-        return results
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(
+                        endpoint,
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    body = response.json()
+            except Exception as exc:
+                status = "error"
+                error_type = type(exc).__name__
+                logger.warning("Reranker request failed: %s", exc)
+                return []
+
+            results = []
+            for item in body.get("results", []) if isinstance(body, dict) else []:
+                try:
+                    index = int(item.get("index"))
+                    score = float(item.get("relevance_score", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(documents):
+                    results.append(RerankResult(index=index, score=max(0.0, min(1.0, score))))
+            results.sort(key=lambda item: item.score, reverse=True)
+            status = "ok"
+            return results
+        finally:
+            logger.info(
+                "Reranker timing | documents_count=%s timeout=%s latency_ms=%s status=%s error_type=%s",
+                len(documents or []),
+                self.timeout,
+                int((time.perf_counter() - started_at) * 1000),
+                status,
+                error_type,
+            )
 
 
 def _bool_value(value: Any, default: bool = True) -> bool:

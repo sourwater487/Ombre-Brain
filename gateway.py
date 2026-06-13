@@ -1622,6 +1622,7 @@ class GatewayService:
                             ),
                             session_id=session_id,
                             planner_debug=query_planner_debug,
+                            selection_kind="bucket",
                         )
                         query_planner_debug = self._merge_query_planner_debug(
                             query_planner_debug,
@@ -1649,6 +1650,7 @@ class GatewayService:
                     query_planner_debug["passive_recall_used"] = bool(not is_explicit_memory_intent)
                     query_planner_debug["seed_query"] = self._clip_text(dynamic_seed_query, 500)
                     all_moments, grouped_moments, moment_edges = self._refresh_moment_graph(all_buckets)
+                    moment_selection_state: dict[str, Any] = {}
                     try:
                         (
                             recalled_moments,
@@ -1664,9 +1666,18 @@ class GatewayService:
                                 grouped_moments,
                                 explicit_memory_recall=explicit_memory_recall,
                                 include_query_planner_debug=True,
+                                selection_state=moment_selection_state,
                             ),
                             session_id=session_id,
                             planner_debug=query_planner_debug,
+                            selection_kind="moment_graph",
+                            timeout_fallback=lambda: self._moment_selection_timeout_fallback(
+                                moment_selection_state,
+                                grouped_moments,
+                                explicit_memory_recall=explicit_memory_recall,
+                                include_query_planner_debug=True,
+                                planner_debug=query_planner_debug,
+                            ),
                         )
                         query_planner_debug = self._merge_query_planner_debug(
                             query_planner_debug,
@@ -5017,11 +5028,20 @@ class GatewayService:
         self,
         all_buckets: list[dict],
     ) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
+        bulk_started = time.perf_counter()
         self.memory_moment_store.bulk_upsert(all_buckets)
+        bulk_upsert_ms = int((time.perf_counter() - bulk_started) * 1000)
         moments = self._recallable_moments(self.memory_moment_store.list_all())
         grouped = self._moments_by_bucket(moments)
         edges = self.memory_moment_store.list_edges()
         edges.extend(self._bucket_edges_as_moment_edges(self.memory_edge_store.list_edges(), grouped))
+        logger.info(
+            "Gateway moment graph refresh timing | bucket_count=%s bulk_upsert_ms=%s moments_count=%s edges_count=%s",
+            len(all_buckets or []),
+            bulk_upsert_ms,
+            len(moments),
+            len(edges),
+        )
         return moments, grouped, edges
 
     def _recallable_moments(self, moments: list[dict]) -> list[dict]:
@@ -5156,6 +5176,114 @@ class GatewayService:
             return [], [], [], [], (query_planner_debug or self._query_planner_debug_base(""))
         return [], [], [], []
 
+    def _bucket_seed_moments_from_selection(
+        self,
+        selected_buckets: list[dict],
+        grouped_moments: dict[str, list[dict]],
+        *,
+        explicit_lookup: bool = False,
+    ) -> list[dict]:
+        seeds = []
+        seen_buckets: set[str] = set()
+        for bucket in selected_buckets or []:
+            bucket_id = str(bucket.get("id") or "")
+            if not bucket_id or bucket_id in seen_buckets:
+                continue
+            moment = self._direct_representative_moment(
+                grouped_moments.get(bucket_id, []),
+                explicit_lookup=explicit_lookup,
+            )
+            if moment:
+                seeds.append(moment)
+                seen_buckets.add(bucket_id)
+        return seeds
+
+    def _moment_selection_timeout_fallback(
+        self,
+        selection_state: dict[str, Any],
+        grouped_moments: dict[str, list[dict]],
+        *,
+        explicit_memory_recall: bool = False,
+        include_query_planner_debug: bool = False,
+        planner_debug: dict[str, Any] | None = None,
+    ):
+        explicit_lookup = bool(selection_state.get("explicit_lookup"))
+        if not selection_state and planner_debug is not None:
+            selection_state["query_planner_debug"] = planner_debug
+        debug = dict(selection_state.get("query_planner_debug") or planner_debug or self._query_planner_debug_base(""))
+        debug["skip_reason"] = "recall_timeout_best_effort"
+        debug.setdefault("errors", []).append("recall_timeout_best_effort")
+
+        suppressed_buckets = list(selection_state.get("suppressed_buckets") or [])
+        suppressed_moments = list(selection_state.get("suppressed_moments") or [])
+        candidates = list(
+            selection_state.get("admitted_candidates")
+            or selection_state.get("moment_candidates")
+            or selection_state.get("bucket_seed_moments")
+            or []
+        )
+        selected = list(selection_state.get("selected_moments") or [])
+        if not selected:
+            selected_buckets = list(selection_state.get("selected_buckets") or [])
+            selected_bucket_ids = [str(bucket.get("id") or "") for bucket in selected_buckets if bucket.get("id")]
+            seen_buckets: set[str] = set()
+            for bucket_id in selected_bucket_ids:
+                moment = next(
+                    (
+                        candidate for candidate in candidates
+                        if str(candidate.get("bucket_id") or "") == bucket_id
+                    ),
+                    None,
+                )
+                if not moment:
+                    moment = self._direct_representative_moment(
+                        grouped_moments.get(bucket_id, []),
+                        explicit_lookup=explicit_lookup,
+                    )
+                if moment and bucket_id not in seen_buckets:
+                    selected.append(moment)
+                    seen_buckets.add(bucket_id)
+            if not selected:
+                active_candidates = self._pick_dynamic_cards(
+                    candidates,
+                    explicit_memory_recall=explicit_memory_recall,
+                )
+                for moment in active_candidates:
+                    bucket_id = str(moment.get("bucket_id") or "")
+                    if not bucket_id or bucket_id in seen_buckets:
+                        continue
+                    selected.append(moment)
+                    seen_buckets.add(bucket_id)
+                    if len(selected) >= self.inject_max_cards:
+                        break
+
+        if selected and not candidates:
+            candidates = list(selected)
+        selected = selected[: self.inject_max_cards]
+        debug["timeout_best_effort"] = True
+        debug["final_count"] = len(selected)
+        timing = selection_state.get("timing") if isinstance(selection_state.get("timing"), dict) else {}
+        logger.info(
+            "Gateway dynamic moment selection timing | bucket_seed_ms=%s moment_search_ms=%s "
+            "moment_rerank_ms=%s admission_ms=%s final_count=%s",
+            int(timing.get("bucket_seed_ms") or 0),
+            int(timing.get("moment_search_ms") or 0),
+            int(timing.get("moment_rerank_ms") or 0),
+            int(timing.get("admission_ms") or 0),
+            len(selected),
+        )
+        logger.warning(
+            "Gateway moment selection timeout fallback | reason=timeout_best_effort "
+            "bucket_seed_count=%s candidate_count=%s final_count=%s",
+            len(selection_state.get("bucket_seed_moments") or []),
+            len(candidates),
+            len(selected),
+        )
+        result = (selected, candidates, suppressed_moments, suppressed_buckets)
+        if include_query_planner_debug:
+            return (*result, debug)
+        return result
+
     async def _select_dynamic_moments(
         self,
         query: str,
@@ -5165,17 +5293,51 @@ class GatewayService:
         *,
         explicit_memory_recall: bool = False,
         include_query_planner_debug: bool = False,
+        selection_state: dict[str, Any] | None = None,
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
     ]:
         query_planner_debug = self._query_planner_debug_base(query)
+        selection_state = selection_state if isinstance(selection_state, dict) else {}
+        selection_state["query_planner_debug"] = query_planner_debug
+        bucket_seed_ms = 0
+        moment_search_ms = 0
+        moment_rerank_ms = 0
+        admission_ms = 0
+        selection_state["timing"] = {
+            "bucket_seed_ms": bucket_seed_ms,
+            "moment_search_ms": moment_search_ms,
+            "moment_rerank_ms": moment_rerank_ms,
+            "admission_ms": admission_ms,
+        }
+
+        def log_selection_timing(final_count: int) -> None:
+            selection_state["timing"] = {
+                "bucket_seed_ms": bucket_seed_ms,
+                "moment_search_ms": moment_search_ms,
+                "moment_rerank_ms": moment_rerank_ms,
+                "admission_ms": admission_ms,
+            }
+            logger.info(
+                "Gateway dynamic moment selection timing | bucket_seed_ms=%s moment_search_ms=%s "
+                "moment_rerank_ms=%s admission_ms=%s final_count=%s",
+                bucket_seed_ms,
+                moment_search_ms,
+                moment_rerank_ms,
+                admission_ms,
+                final_count,
+            )
+
         if not query or self.inject_max_cards <= 0:
+            log_selection_timing(0)
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
             )
         if self._auto_query_too_vague(query):
             query_planner_debug["skip_reason"] = "auto_vague_query"
+            selection_state["query_planner_debug"] = query_planner_debug
+            log_selection_timing(0)
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
@@ -5196,15 +5358,20 @@ class GatewayService:
         }
         if not eligible_ids:
             query_planner_debug["skip_reason"] = "no_eligible_buckets"
+            selection_state["query_planner_debug"] = query_planner_debug
+            log_selection_timing(0)
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
             )
 
+        explicit_lookup = self._query_explicitly_requests_caution_memory(query)
+        selection_state["explicit_lookup"] = explicit_lookup
         search_query = recall_search_query(
             self._memory_search_query_text(query),
             self.relevance_options,
         )
+        stage_started = time.perf_counter()
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
             session_id,
@@ -5213,8 +5380,24 @@ class GatewayService:
             explicit_memory_recall=explicit_memory_recall,
             include_query_planner_debug=True,
         )
+        bucket_seed_ms = int((time.perf_counter() - stage_started) * 1000)
+        selection_state["timing"]["bucket_seed_ms"] = bucket_seed_ms
+        bucket_seed_moments = self._bucket_seed_moments_from_selection(
+            selected_buckets,
+            grouped_moments,
+            explicit_lookup=explicit_lookup,
+        )
+        selection_state.update(
+            {
+                "query_planner_debug": query_planner_debug,
+                "selected_buckets": list(selected_buckets),
+                "suppressed_buckets": list(suppressed_buckets),
+                "bucket_seed_moments": bucket_seed_moments,
+            }
+        )
         selected_bucket_ids = [bucket["id"] for bucket in selected_buckets if bucket.get("id")]
         bucket_boosts = {bucket_id: 1.0 for bucket_id in selected_bucket_ids}
+        stage_started = time.perf_counter()
         eligible_buckets = [
             bucket
             for bucket in all_buckets
@@ -5235,18 +5418,25 @@ class GatewayService:
             limit=max(20, self.dynamic_top_k * 2, self.inject_max_cards * 8),
             bucket_boosts=bucket_boosts,
         )
-        explicit_lookup = self._query_explicitly_requests_caution_memory(query)
         candidates = [
             moment for moment in candidates
             if str(moment.get("bucket_id") or "") in eligible_ids
             and can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
         ]
         candidates = self._apply_relevance_to_moment_candidates(query, candidates)
+        moment_search_ms = int((time.perf_counter() - stage_started) * 1000)
+        selection_state["timing"]["moment_search_ms"] = moment_search_ms
+        selection_state["moment_candidates"] = list(candidates)
+        stage_started = time.perf_counter()
         candidates = await self._rerank_moment_candidates(query, candidates)
+        moment_rerank_ms = int((time.perf_counter() - stage_started) * 1000)
+        selection_state["timing"]["moment_rerank_ms"] = moment_rerank_ms
+        selection_state["moment_candidates"] = list(candidates)
         moment_candidate_count_before_admission = len(candidates)
         admitted_bucket_ids = set(selected_bucket_ids)
         admitted_candidates = []
         suppressed_candidates = []
+        stage_started = time.perf_counter()
         for moment in candidates:
             item = dict(moment)
             bucket_id = str(item.get("bucket_id") or "")
@@ -5277,6 +5467,8 @@ class GatewayService:
             else:
                 suppressed_candidates.append(item)
         candidates = admitted_candidates
+        selection_state["admitted_candidates"] = list(admitted_candidates)
+        selection_state["suppressed_moments"] = list(suppressed_candidates)
         query_planner_debug["moment_candidate_count_before_admission"] = moment_candidate_count_before_admission
         query_planner_debug["moment_candidate_count_after_admission"] = len(admitted_candidates)
         query_planner_debug["candidate_count_before_admission"] = max(
@@ -5309,6 +5501,11 @@ class GatewayService:
 
         if selected:
             result = (selected[: self.inject_max_cards], candidates, suppressed_candidates, suppressed_buckets)
+            admission_ms = int((time.perf_counter() - stage_started) * 1000)
+            selection_state["timing"]["admission_ms"] = admission_ms
+            selection_state["selected_moments"] = list(result[0])
+            selection_state["query_planner_debug"] = query_planner_debug
+            log_selection_timing(len(result[0]))
             if include_query_planner_debug:
                 return (*result, query_planner_debug)
             return result
@@ -5334,6 +5531,11 @@ class GatewayService:
             if len(selected) >= self.inject_max_cards:
                 break
         result = (selected, candidates, suppressed_candidates, suppressed_buckets)
+        admission_ms = int((time.perf_counter() - stage_started) * 1000)
+        selection_state["timing"]["admission_ms"] = admission_ms
+        selection_state["selected_moments"] = list(selected)
+        selection_state["query_planner_debug"] = query_planner_debug
+        log_selection_timing(len(selected))
         if include_query_planner_debug:
             return (*result, query_planner_debug)
         return result
@@ -6594,20 +6796,47 @@ class GatewayService:
         *,
         session_id: str,
         planner_debug: dict[str, Any],
+        selection_kind: str = "unknown",
+        timeout_fallback=None,
     ):
+        started_at = time.perf_counter()
+        timed_out = False
         if self.recall_timeout_seconds <= 0:
-            return await awaitable
+            try:
+                return await awaitable
+            finally:
+                logger.info(
+                    "Gateway recall selection timing | selection_kind=%s timeout_seconds=%s total_ms=%s timed_out=%s",
+                    selection_kind,
+                    self.recall_timeout_seconds,
+                    int((time.perf_counter() - started_at) * 1000),
+                    timed_out,
+                )
         try:
             return await asyncio.wait_for(awaitable, timeout=self.recall_timeout_seconds)
         except asyncio.TimeoutError:
+            timed_out = True
+            reason = "timeout_best_effort" if timeout_fallback is not None else "recall_timeout"
             logger.warning(
-                "Gateway recall selection timed out | session=%s timeout=%.2fs",
+                "Gateway recall selection timed out | session=%s selection_kind=%s timeout=%.2fs reason=%s",
                 session_id,
+                selection_kind,
                 self.recall_timeout_seconds,
+                reason,
             )
             if isinstance(planner_debug, dict):
                 planner_debug.setdefault("errors", []).append("recall_timeout")
+            if timeout_fallback is not None:
+                return timeout_fallback()
             raise
+        finally:
+            logger.info(
+                "Gateway recall selection timing | selection_kind=%s timeout_seconds=%s total_ms=%s timed_out=%s",
+                selection_kind,
+                self.recall_timeout_seconds,
+                int((time.perf_counter() - started_at) * 1000),
+                timed_out,
+            )
 
     def _query_is_long_input(self, query: str) -> bool:
         if self.long_input_chars <= 0:

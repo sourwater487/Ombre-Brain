@@ -6,6 +6,13 @@ services:
     command: ["python", "server.py"]
     env_file:
       - .env
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
     ports:
       - "127.0.0.1:8789:8000"
     environment:
@@ -25,7 +32,7 @@ services:
           "-c",
           "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
         ]
-      interval: 30s
+      interval: 60s
       timeout: 8s
       retries: 3
       start_period: 30s

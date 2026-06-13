@@ -102,6 +102,14 @@ embedding:
   enabled: true                   # Enable embedding / 启用向量化
   model: "Qwen/Qwen3-Embedding-0.6B"       # Embedding model / 向量化模型
   base_url: "https://api.siliconflow.cn/v1"
+  vector_index:
+    enabled: false
+    backend: hnswlib
+    space: cosine
+    M: 16
+    ef_construction: 100
+    ef_search: 40
+    rebuild_on_start: false
   # api_key: ""                   # Use env var OMBRE_EMBEDDING_API_KEY / 请使用环境变量
   # Common embedding model examples / 常见向量模型示例：
   #   SiliconFlow Qwen: Qwen/Qwen3-Embedding-0.6B

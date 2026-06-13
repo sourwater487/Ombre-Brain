@@ -74,6 +74,15 @@ def load_config(config_path: str = None) -> dict:
             "max_chars": 6000,
             "query_instruction": "Given a memory search query, retrieve relevant long-term memory passages.",
             "document_instruction": "",
+            "vector_index": {
+                "enabled": False,
+                "backend": "hnswlib",
+                "space": "cosine",
+                "M": 16,
+                "ef_construction": 100,
+                "ef_search": 40,
+                "rebuild_on_start": False,
+            },
         },
         "reranker": {
             "enabled": True,
