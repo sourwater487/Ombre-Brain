@@ -11,6 +11,7 @@ compose.local.yml
 connection_guide.txt
 start_mobile.sh
 buckets/
+data/
 state/
 output/
 *.log
