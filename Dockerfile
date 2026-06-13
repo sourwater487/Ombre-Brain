@@ -10,6 +10,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# hnswlib builds native extensions on slim images.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential g++ python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --upgrade pip setuptools wheel
+
 # Install dependencies first (leverage Docker cache)
 # 先装依赖（利用 Docker 缓存）
 COPY requirements.txt .
