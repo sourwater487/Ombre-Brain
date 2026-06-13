@@ -451,7 +451,12 @@ class GatewayService:
         )
         self.recall_timeout_seconds = max(
             0.0,
-            float(self.gateway_cfg.get("recall_timeout_seconds", 5.0)),
+            float(
+                self.gateway_cfg.get(
+                    "recall_selection_timeout_seconds",
+                    self.gateway_cfg.get("recall_timeout_seconds", 5.0),
+                )
+            ),
         )
         self.recall_selection_candidate_limit = self._positive_int_config_value(
             self.gateway_cfg.get("recall_selection_candidate_limit"),
@@ -617,6 +622,7 @@ class GatewayService:
             "long_input_chars": self.long_input_chars,
             "memory_search_query_max_chars": self.memory_search_query_max_chars,
             "query_planner_input_max_chars": self.query_planner_input_max_chars,
+            "recall_selection_timeout_seconds": self.recall_timeout_seconds,
             "recall_timeout_seconds": self.recall_timeout_seconds,
             "recall_selection_candidate_limit": self.recall_selection_candidate_limit,
             "memory_detail_recall_enabled": self.memory_detail_recall_enabled,
@@ -928,6 +934,10 @@ class GatewayService:
             self.query_planner_input_max_chars = max(80, int(payload["query_planner_input_max_chars"]))
             self.gateway_cfg["query_planner_input_max_chars"] = self.query_planner_input_max_chars
             updated.append("gateway.query_planner_input_max_chars")
+        if "recall_selection_timeout_seconds" in payload:
+            self.recall_timeout_seconds = max(0.0, float(payload["recall_selection_timeout_seconds"]))
+            self.gateway_cfg["recall_selection_timeout_seconds"] = self.recall_timeout_seconds
+            updated.append("gateway.recall_selection_timeout_seconds")
         if "recall_timeout_seconds" in payload:
             self.recall_timeout_seconds = max(0.0, float(payload["recall_timeout_seconds"]))
             self.gateway_cfg["recall_timeout_seconds"] = self.recall_timeout_seconds
