@@ -197,6 +197,7 @@ gateway:
   auto_recall_second_card_relative_score: 0.60
   recall_admission_semantic_score: 0.62
   recall_admission_rerank_score: 0.55
+  recall_timeout_seconds: 6.0
   edge_min_confidence: 0.55
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN
