@@ -16,7 +16,7 @@ from utils import bucket_text_for_embedding, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.reflection")
 
-DAILY_REFLECTION_MIN_BUCKETS = 5
+DAILY_IMPRESSION_SKIP_BUCKET_THRESHOLD = 5
 
 
 CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
@@ -384,7 +384,11 @@ class ReflectionEngine:
             }
 
         materials = await self._reflection_materials(period, now_local, bucket_mgr, persona_engine)
-        if period == "daily" and len(materials["buckets"]) < DAILY_REFLECTION_MIN_BUCKETS:
+        if (
+            period == "daily"
+            and len(materials["buckets"]) >= DAILY_IMPRESSION_SKIP_BUCKET_THRESHOLD
+            and not force
+        ):
             diary_memory = await self._maybe_extract_diary_memory(
                 period,
                 key,
@@ -395,7 +399,7 @@ class ReflectionEngine:
             )
             return {
                 "status": "skipped",
-                "reason": "insufficient_daily_memory",
+                "reason": "sufficient_ombre_buckets",
                 "period": period,
                 "id": bucket_id,
                 "date": key,
@@ -409,7 +413,7 @@ class ReflectionEngine:
                     "daily_impressions": len(materials["daily_impressions"]),
                     "persona_events": len(materials["persona_events"]),
                     "commitments": len(materials["commitments"]),
-                    "min_buckets": DAILY_REFLECTION_MIN_BUCKETS,
+                    "skip_bucket_threshold": DAILY_IMPRESSION_SKIP_BUCKET_THRESHOLD,
                 },
             }
         if not materials["buckets"] and not materials["daily_impressions"] and not materials["persona_events"] and not materials["diary"] and not force:

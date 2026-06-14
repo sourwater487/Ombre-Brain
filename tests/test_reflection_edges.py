@@ -599,7 +599,7 @@ async def test_reflect_daily_affect_anchor_can_be_disabled(test_config):
 
 
 @pytest.mark.asyncio
-async def test_run_due_daily_uses_complete_previous_day(test_config, monkeypatch):
+async def test_run_due_daily_uses_complete_previous_day_and_skips_when_enough_ombre_buckets(test_config, monkeypatch):
     cfg = _no_api_config(test_config)
     cfg["reflection"]["auto_enabled"] = True
     cfg["reflection"]["daily_hour"] = 4
@@ -664,31 +664,60 @@ async def test_run_due_daily_uses_complete_previous_day(test_config, monkeypatch
     bucket = await bucket_mgr.get("reflection_daily_2026-06-01")
 
     assert results[0]["date"] == "2026-06-01"
+    assert results[0]["status"] == "skipped"
+    assert results[0]["reason"] == "sufficient_ombre_buckets"
     assert results[0]["materials"]["buckets"] == 5
-    assert "昨天早上的记忆" in bucket["content"]
-    assert "昨天晚上的记忆" in bucket["content"]
-    assert "昨天更新的旧记忆" in bucket["content"]
+    assert bucket is None
 
 
 @pytest.mark.asyncio
-async def test_reflect_daily_requires_five_memory_or_update_items(test_config):
+async def test_reflect_daily_uses_diary_when_bucket_count_below_threshold(test_config, monkeypatch):
     cfg = _no_api_config(test_config)
     bucket_mgr = BucketManager(cfg)
     engine = ReflectionEngine(cfg)
     await _create_daily_memories(bucket_mgr, count=4)
     now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
-    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
+    async def fake_read_diary(date: str) -> dict:
+        return {"id": 21, "date": date, "title": "四条记忆的一天", "content": "今天关系天气很轻，但日记里还有一点温度。"}
+
+    monkeypatch.setattr(engine, "_read_diary_for_date", fake_read_diary)
+
+    result = await engine.reflect("daily", bucket_mgr, now=now)
+    bucket = await bucket_mgr.get("reflection_daily_2026-05-21")
+
+    assert result["status"] == "created"
+    assert result["materials"]["buckets"] == 4
+    assert result["diary"] == {"found": True, "diary_id": 21}
+    assert bucket is not None
+    assert "daily_impression" in bucket["metadata"]["tags"]
+
+
+@pytest.mark.asyncio
+async def test_reflect_daily_skips_when_bucket_count_reaches_threshold_even_with_diary(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    await _create_daily_memories(bucket_mgr, count=5)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    async def fake_read_diary(date: str) -> dict:
+        return {"id": 22, "date": date, "title": "五条记忆的一天", "content": "日记有内容，但 Ombre 当天材料已经足够。"}
+
+    monkeypatch.setattr(engine, "_read_diary_for_date", fake_read_diary)
+
+    result = await engine.reflect("daily", bucket_mgr, now=now)
 
     assert result["status"] == "skipped"
-    assert result["reason"] == "insufficient_daily_memory"
-    assert result["materials"]["buckets"] == 4
-    assert result["materials"]["min_buckets"] == 5
+    assert result["reason"] == "sufficient_ombre_buckets"
+    assert result["materials"]["buckets"] == 5
+    assert result["materials"]["skip_bucket_threshold"] == 5
+    assert result["diary"] == {"found": True, "diary_id": 22}
     assert await bucket_mgr.get("reflection_daily_2026-05-21") is None
 
 
 @pytest.mark.asyncio
-async def test_reflect_daily_persona_events_do_not_count_toward_minimum(test_config):
+async def test_reflect_daily_low_bucket_count_with_persona_events_generates(test_config):
     cfg = _no_api_config(test_config)
     cfg["reflection"]["persona_events_limit"] = 1
     bucket_mgr = BucketManager(cfg)
@@ -723,12 +752,32 @@ async def test_reflect_daily_persona_events_do_not_count_toward_minimum(test_con
                 },
             ]
 
-    result = await engine.reflect("daily", bucket_mgr, persona_engine=PersonaEvents(), force=True, now=now)
+    result = await engine.reflect("daily", bucket_mgr, persona_engine=PersonaEvents(), now=now)
+    bucket = await bucket_mgr.get("reflection_daily_2026-05-21")
 
-    assert result["status"] == "skipped"
-    assert result["reason"] == "insufficient_daily_memory"
+    assert result["status"] == "created"
     assert result["materials"]["buckets"] == 4
     assert result["materials"]["persona_events"] == 1
+    assert bucket is not None
+
+
+@pytest.mark.asyncio
+async def test_reflect_daily_empty_when_no_buckets_or_diary(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    async def fake_read_diary(date: str) -> None:
+        return None
+
+    monkeypatch.setattr(engine, "_read_diary_for_date", fake_read_diary)
+
+    result = await engine.reflect("daily", bucket_mgr, now=now)
+
+    assert result["status"] == "empty"
+    assert result["diary_memory"]["reason"] == "no_materials"
+    assert await bucket_mgr.get("reflection_daily_2026-05-21") is None
 
 
 @pytest.mark.asyncio
@@ -748,12 +797,16 @@ async def test_reflect_daily_extracts_diary_memory_when_no_ordinary_memory(test_
     monkeypatch.setattr(engine, "_read_diary_for_date", fake_read_diary)
     now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
-    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
+    result = await engine.reflect("daily", bucket_mgr, now=now)
     diary_result = result["diary_memory"]
+    reflection_bucket = await bucket_mgr.get(result["id"])
     bucket = await bucket_mgr.get(diary_result["id"])
 
+    assert result["status"] == "created"
     assert diary_result["status"] == "created"
     assert result["diary"] == {"found": True, "diary_id": 12}
+    assert reflection_bucket is not None
+    assert "daily_impression" in reflection_bucket["metadata"]["tags"]
     assert bucket["metadata"]["source"] == "from_diary"
     assert bucket["metadata"]["from_diary"] is True
     assert bucket["metadata"]["event_date"] == "2026-05-21"
