@@ -627,6 +627,33 @@ class RecallPolicy:
             or _safe_float(rerank_score, 0.0) >= self.rerank_threshold
         )
 
+    @staticmethod
+    def _explicit_query_reasons(query: str) -> list[str]:
+        text = str(query or "").strip()
+        if not text:
+            return []
+        reasons: list[str] = []
+        if query_has_technical_recall_marker(text):
+            reasons.append("technical_recall_marker")
+        if re.search(r"\b0x[0-9a-fA-F]+\b", text):
+            reasons.append("hex_id")
+        if re.search(r"\b[A-Za-z]+/[A-Za-z0-9._-]+\b", text):
+            reasons.append("repo_or_path_marker")
+        if re.search(r"\d", text):
+            reasons.append("contains_digit")
+        if re.search(r"\b[A-Z0-9][A-Z0-9._:/-]{2,}\b", text):
+            reasons.append("uppercase_identifier")
+        title_matches = list(re.finditer(r"\b[A-Z][a-z][A-Za-z0-9._:-]{1,}\b", text))
+        if title_matches:
+            words = re.findall(r"\b[A-Za-z0-9._:-]+\b", text)
+            if len(words) == 1:
+                reasons.append("single_title_case_entity")
+            elif len(title_matches) >= 2:
+                reasons.append("multiple_title_case_entities")
+            elif title_matches[0].start() > 0:
+                reasons.append("title_case_entity")
+        return reasons
+
     def assess(
         self,
         query: str,
@@ -642,13 +669,59 @@ class RecallPolicy:
         if has_topic_evidence is None:
             has_topic_evidence = self.node_has_topic_evidence(query, node)
         auto_too_vague = self.is_auto_query_too_vague(query) if auto else False
+        is_explicit_query = query_has_explicit_entity_marker(query)
+        is_technical_query = query_has_technical_recall_marker(query)
+        semantic_value = _maybe_float(semantic_score)
+        rerank_value = _maybe_float(rerank_score)
+        required_evidence_flags = (
+            [
+                "direct_query_evidence",
+                f"semantic_score>={self.semantic_threshold:.4f}",
+                f"rerank_score>={self.rerank_threshold:.4f}",
+                "high_confidence_direct_edge",
+            ]
+            if is_explicit_query
+            else []
+        )
+        available_evidence_flags: list[str] = []
+        missing_evidence_flags: list[str] = []
+        if has_topic_evidence:
+            available_evidence_flags.append("direct_query_evidence")
+        elif is_explicit_query:
+            missing_evidence_flags.append("direct_query_evidence")
+        if semantic_value is not None and semantic_value >= self.semantic_threshold:
+            available_evidence_flags.append("strong_semantic")
+        elif is_explicit_query:
+            missing_evidence_flags.append(f"semantic_score>={self.semantic_threshold:.4f}")
+        if rerank_value is not None and rerank_value >= self.rerank_threshold:
+            available_evidence_flags.append("strong_rerank")
+        elif is_explicit_query:
+            missing_evidence_flags.append(f"rerank_score>={self.rerank_threshold:.4f}")
+        if high_confidence_edge:
+            available_evidence_flags.append("high_confidence_direct_edge")
+        elif is_explicit_query:
+            missing_evidence_flags.append("high_confidence_direct_edge")
         debug = {
+            "is_explicit_query": bool(is_explicit_query),
+            "query_kind": (
+                "technical_recall"
+                if is_technical_query
+                else ("explicit_entity" if is_explicit_query else "non_explicit")
+            ),
+            "explicit_query_reason": self._explicit_query_reasons(query),
             "requires_topic_evidence": self.requires_topic_evidence(query),
             "has_topic_evidence": bool(has_topic_evidence),
+            "required_evidence_flags": required_evidence_flags,
+            "available_evidence_flags": available_evidence_flags,
+            "missing_evidence_flags": missing_evidence_flags,
             "specific_query_terms": self.specific_query_terms(query),
-            "semantic_score": _maybe_float(semantic_score),
-            "rerank_score": _maybe_float(rerank_score),
+            "semantic_score": semantic_value,
+            "rerank_score": rerank_value,
             "high_confidence_edge": bool(high_confidence_edge),
+            "admission_threshold": {
+                "semantic_score": self.semantic_threshold,
+                "rerank_score": self.rerank_threshold,
+            },
             "context_only": bool(context_only),
             "auto": bool(auto),
             "auto_too_vague": bool(auto_too_vague),
@@ -685,6 +758,11 @@ class RecallPolicy:
             rerank_threshold=self.rerank_threshold,
         )
         debug["base_reason"] = base.reason
+        if base.reason == "explicit_query_without_reliable_evidence":
+            debug["admission_reason_detail"] = (
+                "explicit query requires direct query evidence, strong semantic score, "
+                "strong rerank score, or a high-confidence direct edge"
+            )
 
         if not base.admit:
             return RecallPolicyDecision(
@@ -705,6 +783,10 @@ class RecallPolicy:
             )
             and not high_confidence_edge
         ):
+            debug["admission_reason_detail"] = (
+                "query requires topic evidence and candidate has no matching topic evidence "
+                "or strong score override"
+            )
             return RecallPolicyDecision(
                 admit_direct=False,
                 admit_diffused=False,

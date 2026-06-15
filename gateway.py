@@ -1694,6 +1694,8 @@ class GatewayService:
                                 explicit_memory_recall=explicit_memory_recall,
                                 include_query_planner_debug=True,
                                 planner_debug=query_planner_debug,
+                                session_id=session_id,
+                                selection_kind="moment_graph",
                             ),
                         )
                         query_planner_debug = self._merge_query_planner_debug(
@@ -5290,6 +5292,77 @@ class GatewayService:
                 seen_buckets.add(bucket_id)
         return seeds
 
+    @staticmethod
+    def _recall_selection_item_id(item: dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else None
+        source = bucket if bucket is not None else item
+        return str(
+            source.get("moment_id")
+            or source.get("bucket_id")
+            or source.get("id")
+            or ""
+        )
+
+    def _recall_selection_ids(self, items: list[dict], *, limit: int = 8) -> list[str]:
+        ids: list[str] = []
+        for item in items or []:
+            item_id = self._recall_selection_item_id(item)
+            if item_id and item_id not in ids:
+                ids.append(item_id)
+            if len(ids) >= limit:
+                break
+        return ids
+
+    def _update_recall_selection_snapshot(
+        self,
+        selection_state: dict[str, Any] | None,
+        *,
+        phase: str,
+        diagnostics: dict[str, Any] | None = None,
+        final_items: list[dict] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(selection_state, dict):
+            return {}
+        if isinstance(diagnostics, dict):
+            selection_state["diagnostics"] = dict(diagnostics)
+        else:
+            diagnostics = selection_state.get("diagnostics") if isinstance(selection_state.get("diagnostics"), dict) else {}
+        if final_items is not None:
+            selection_state["best_effort_final_items"] = list(final_items)
+        best_effort_final_items = list(
+            final_items
+            if final_items is not None
+            else (
+                selection_state.get("selected_moments")
+                or selection_state.get("best_effort_final_items")
+                or []
+            )
+        )
+        snapshot = {
+            "phase": phase,
+            "bucket_seed_count": len(selection_state.get("bucket_seed_moments") or []),
+            "raw_candidate_count": int(
+                selection_state.get("raw_candidate_count")
+                or diagnostics.get("raw_candidate_count")
+                or diagnostics.get("bucket_candidates_raw_count")
+                or 0
+            ),
+            "admitted_bucket_count": int(
+                selection_state.get("admitted_bucket_count")
+                or diagnostics.get("bucket_candidates_after_admission")
+                or len(selection_state.get("admitted_bucket_items") or [])
+            ),
+            "moment_candidate_count": len(selection_state.get("moment_candidates") or []),
+            "admitted_moment_count": len(selection_state.get("admitted_candidates") or []),
+            "best_effort_final_count": len(best_effort_final_items),
+            "best_effort_final_ids": self._recall_selection_ids(best_effort_final_items),
+        }
+        selection_state["phase"] = phase
+        selection_state["best_effort_snapshot"] = snapshot
+        return snapshot
+
     def _moment_selection_timeout_fallback(
         self,
         selection_state: dict[str, Any],
@@ -5298,6 +5371,8 @@ class GatewayService:
         explicit_memory_recall: bool = False,
         include_query_planner_debug: bool = False,
         planner_debug: dict[str, Any] | None = None,
+        session_id: str = "",
+        selection_kind: str = "moment_graph",
     ):
         explicit_lookup = bool(selection_state.get("explicit_lookup"))
         if not selection_state and planner_debug is not None:
@@ -5308,6 +5383,20 @@ class GatewayService:
 
         suppressed_buckets = list(selection_state.get("suppressed_buckets") or [])
         suppressed_moments = list(selection_state.get("suppressed_moments") or [])
+        selected_buckets = list(selection_state.get("selected_buckets") or [])
+        if not selected_buckets:
+            selected_buckets = [
+                item.get("bucket")
+                for item in selection_state.get("admitted_bucket_items") or []
+                if isinstance(item, dict) and isinstance(item.get("bucket"), dict)
+            ]
+            selection_state["selected_buckets"] = list(selected_buckets)
+        if not selection_state.get("bucket_seed_moments") and selected_buckets:
+            selection_state["bucket_seed_moments"] = self._bucket_seed_moments_from_selection(
+                selected_buckets,
+                grouped_moments,
+                explicit_lookup=explicit_lookup,
+            )
         candidates = list(
             selection_state.get("admitted_candidates")
             or selection_state.get("moment_candidates")
@@ -5316,7 +5405,6 @@ class GatewayService:
         )
         selected = list(selection_state.get("selected_moments") or [])
         if not selected:
-            selected_buckets = list(selection_state.get("selected_buckets") or [])
             selected_bucket_ids = [str(bucket.get("id") or "") for bucket in selected_buckets if bucket.get("id")]
             seen_buckets: set[str] = set()
             for bucket_id in selected_bucket_ids:
@@ -5352,7 +5440,14 @@ class GatewayService:
         if selected and not candidates:
             candidates = list(selected)
         selected = selected[: self.inject_max_cards]
+        selection_state["selected_moments"] = list(selected)
+        snapshot = self._update_recall_selection_snapshot(
+            selection_state,
+            phase=str(selection_state.get("phase") or "timeout_fallback"),
+            final_items=selected,
+        )
         debug["timeout_best_effort"] = True
+        debug["timeout_best_effort_snapshot"] = snapshot
         debug["final_count"] = len(selected)
         timing = selection_state.get("timing") if isinstance(selection_state.get("timing"), dict) else {}
         logger.info(
@@ -5363,6 +5458,22 @@ class GatewayService:
             int(timing.get("moment_rerank_ms") or 0),
             int(timing.get("admission_ms") or 0),
             len(selected),
+        )
+        logger.warning(
+            "Gateway recall timeout best-effort state | session=%s selection_kind=%s phase=%s "
+            "bucket_seed_count=%s raw_candidate_count=%s admitted_bucket_count=%s "
+            "moment_candidate_count=%s admitted_moment_count=%s best_effort_final_count=%s "
+            "best_effort_final_ids=%s",
+            session_id,
+            selection_kind,
+            snapshot.get("phase") or "",
+            snapshot.get("bucket_seed_count") or 0,
+            snapshot.get("raw_candidate_count") or 0,
+            snapshot.get("admitted_bucket_count") or 0,
+            snapshot.get("moment_candidate_count") or 0,
+            snapshot.get("admitted_moment_count") or 0,
+            snapshot.get("best_effort_final_count") or 0,
+            snapshot.get("best_effort_final_ids") or [],
         )
         logger.warning(
             "Gateway moment selection timeout fallback | reason=timeout_best_effort "
@@ -5416,6 +5527,11 @@ class GatewayService:
             "moment_rerank_ms": moment_rerank_ms,
             "admission_ms": admission_ms,
         }
+        self._update_recall_selection_snapshot(
+            selection_state,
+            phase="started",
+            diagnostics=diagnostics,
+        )
 
         def log_selection_timing(final_count: int) -> None:
             selection_state["timing"] = {
@@ -5508,6 +5624,7 @@ class GatewayService:
             search_query=search_query,
             explicit_memory_recall=explicit_memory_recall,
             include_query_planner_debug=True,
+            selection_state=selection_state,
         )
         bucket_diagnostics = query_planner_debug.get("recall_selection_diagnostics")
         if isinstance(bucket_diagnostics, dict):
@@ -5551,6 +5668,11 @@ class GatewayService:
                 "bucket_seed_moments": bucket_seed_moments,
             }
         )
+        self._update_recall_selection_snapshot(
+            selection_state,
+            phase="bucket_seed",
+            diagnostics=diagnostics,
+        )
         selected_bucket_ids = [bucket["id"] for bucket in selected_buckets if bucket.get("id")]
         bucket_boosts = {bucket_id: 1.0 for bucket_id in selected_bucket_ids}
         stage_started = time.perf_counter()
@@ -5583,11 +5705,21 @@ class GatewayService:
         moment_search_ms = int((time.perf_counter() - stage_started) * 1000)
         selection_state["timing"]["moment_search_ms"] = moment_search_ms
         selection_state["moment_candidates"] = list(candidates)
+        self._update_recall_selection_snapshot(
+            selection_state,
+            phase="moment_candidates",
+            diagnostics=diagnostics,
+        )
         stage_started = time.perf_counter()
         candidates = await self._rerank_moment_candidates(query, candidates)
         moment_rerank_ms = int((time.perf_counter() - stage_started) * 1000)
         selection_state["timing"]["moment_rerank_ms"] = moment_rerank_ms
         selection_state["moment_candidates"] = list(candidates)
+        self._update_recall_selection_snapshot(
+            selection_state,
+            phase="moment_rerank",
+            diagnostics=diagnostics,
+        )
         moment_candidate_count_before_admission = len(candidates)
         diagnostics["moment_candidates_before_admission"] = moment_candidate_count_before_admission
         admitted_bucket_ids = set(selected_bucket_ids)
@@ -5626,6 +5758,11 @@ class GatewayService:
         candidates = admitted_candidates
         selection_state["admitted_candidates"] = list(admitted_candidates)
         selection_state["suppressed_moments"] = list(suppressed_candidates)
+        self._update_recall_selection_snapshot(
+            selection_state,
+            phase="moment_admission",
+            diagnostics=diagnostics,
+        )
         query_planner_debug["moment_candidate_count_before_admission"] = moment_candidate_count_before_admission
         query_planner_debug["moment_candidate_count_after_admission"] = len(admitted_candidates)
         diagnostics["suppressed_by_admission_count"] = int(
@@ -5655,6 +5792,12 @@ class GatewayService:
 
         selected: list[dict] = []
         seen_buckets: set[str] = set()
+        self._update_recall_selection_snapshot(
+            selection_state,
+            phase="final_selection_before",
+            diagnostics=diagnostics,
+            final_items=[],
+        )
         for bucket_id in selected_bucket_ids:
             moment = next(
                 (
@@ -5677,6 +5820,12 @@ class GatewayService:
             admission_ms = int((time.perf_counter() - stage_started) * 1000)
             selection_state["timing"]["admission_ms"] = admission_ms
             selection_state["selected_moments"] = list(result[0])
+            self._update_recall_selection_snapshot(
+                selection_state,
+                phase="final_selection_after",
+                diagnostics=diagnostics,
+                final_items=list(result[0]),
+            )
             diagnostics["final_selected_count"] = len(result[0])
             diagnostics["final_injected_ids"] = [
                 str(moment.get("bucket_id") or "")
@@ -5748,6 +5897,12 @@ class GatewayService:
         admission_ms = int((time.perf_counter() - stage_started) * 1000)
         selection_state["timing"]["admission_ms"] = admission_ms
         selection_state["selected_moments"] = list(selected)
+        self._update_recall_selection_snapshot(
+            selection_state,
+            phase="final_selection_after",
+            diagnostics=diagnostics,
+            final_items=list(selected),
+        )
         diagnostics["final_selected_count"] = len(selected)
         diagnostics["final_injected_ids"] = [
             str(moment.get("bucket_id") or "")
@@ -7638,6 +7793,7 @@ class GatewayService:
         planner_query: dict[str, Any] | None = None,
         explicit_memory_recall: bool = False,
         diagnostics: dict[str, Any] | None = None,
+        selection_state: dict[str, Any] | None = None,
     ) -> tuple[list[dict], list[dict]]:
         if not query or self.inject_max_cards <= 0:
             return [], []
@@ -7676,6 +7832,14 @@ class GatewayService:
         if diagnostics is not None:
             diagnostics["raw_candidate_count"] = len(candidate_ids)
             diagnostics["bucket_candidates_raw_count"] = len(candidate_ids)
+        if isinstance(selection_state, dict):
+            selection_state["raw_candidate_count"] = len(candidate_ids)
+            selection_state["raw_bucket_candidate_ids"] = sorted(str(item) for item in candidate_ids if item)[:8]
+            self._update_recall_selection_snapshot(
+                selection_state,
+                phase="bucket_raw_candidates",
+                diagnostics=diagnostics,
+            )
         if not candidate_ids:
             return [], []
 
@@ -7771,7 +7935,21 @@ class GatewayService:
         if diagnostics is not None:
             diagnostics["bucket_candidates_before_admission"] = len(scored_candidates)
             diagnostics["suppressed_by_candidate_limit_count"] = max(0, before_limit - len(scored_candidates))
+        if isinstance(selection_state, dict):
+            selection_state["bucket_candidates"] = list(scored_candidates)
+            self._update_recall_selection_snapshot(
+                selection_state,
+                phase="bucket_candidates_scored",
+                diagnostics=diagnostics,
+            )
         scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
+        if isinstance(selection_state, dict):
+            selection_state["bucket_candidates"] = list(scored_candidates)
+            self._update_recall_selection_snapshot(
+                selection_state,
+                phase="bucket_rerank",
+                diagnostics=diagnostics,
+            )
         filtered = [item for item in scored_candidates if item["bucket"]["id"] not in recent_ids]
         if diagnostics is not None:
             recent_suppressed = [item for item in scored_candidates if item["bucket"]["id"] in recent_ids] if filtered else []
@@ -7804,6 +7982,18 @@ class GatewayService:
                 admitted_pool.append(item)
             else:
                 suppressed_candidates.append(item)
+        if isinstance(selection_state, dict):
+            selection_state["admitted_bucket_items"] = list(admitted_pool)
+            selection_state["admitted_bucket_count"] = len(admitted_pool)
+            selection_state["suppressed_buckets"] = list(suppressed_candidates)
+            if diagnostics is not None:
+                diagnostics["bucket_candidates_after_admission"] = len(admitted_pool)
+                diagnostics["suppressed_by_admission_count"] = len(suppressed_candidates)
+            self._update_recall_selection_snapshot(
+                selection_state,
+                phase="bucket_admission",
+                diagnostics=diagnostics,
+            )
         return admitted_pool, suppressed_candidates
 
     async def _select_dynamic_buckets(
@@ -7815,6 +8005,7 @@ class GatewayService:
         search_query: str = "",
         explicit_memory_recall: bool = False,
         include_query_planner_debug: bool = False,
+        selection_state: dict[str, Any] | None = None,
     ) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], dict[str, Any]]:
         planner_debug = self._query_planner_debug_base(query)
         if not query or self.inject_max_cards <= 0:
@@ -7848,7 +8039,17 @@ class GatewayService:
             search_query=search_query,
             explicit_memory_recall=explicit_memory_recall,
             diagnostics=bucket_diagnostics,
+            selection_state=selection_state,
         )
+        if isinstance(selection_state, dict):
+            selection_state["admitted_bucket_items"] = list(active_pool)
+            selection_state["admitted_bucket_count"] = len(active_pool)
+            selection_state["suppressed_buckets"] = list(suppressed_candidates)
+            self._update_recall_selection_snapshot(
+                selection_state,
+                phase="bucket_admission",
+                diagnostics=bucket_diagnostics,
+            )
         planner_debug["candidate_count_before_admission"] = len(active_pool) + len(suppressed_candidates)
         planner_debug["candidate_count_after_admission"] = len(active_pool)
         bucket_diagnostics["bucket_candidates_before_admission"] = int(
@@ -7944,6 +8145,7 @@ class GatewayService:
                             required_terms=must_terms,
                             planner_query=planner_query,
                             explicit_memory_recall=explicit_memory_recall,
+                            selection_state=selection_state,
                         )
                         planner_debug["candidate_count_before_admission"] += len(admitted) + len(suppressed)
                         planner_debug["candidate_count_after_admission"] += len(admitted)
@@ -8003,6 +8205,18 @@ class GatewayService:
             for item in selected_items
             if (item.get("bucket") or {}).get("id")
         ]
+        if isinstance(selection_state, dict):
+            selection_state["selected_bucket_items"] = list(selected_items)
+            selection_state["selected_buckets"] = [
+                item.get("bucket")
+                for item in selected_items
+                if isinstance(item, dict) and isinstance(item.get("bucket"), dict)
+            ]
+            self._update_recall_selection_snapshot(
+                selection_state,
+                phase="bucket_final_selection",
+                diagnostics=bucket_diagnostics,
+            )
         bucket_diagnostics["final_selected_count"] = len(selected_items)
         bucket_diagnostics["final_injected_ids"] = list(planner_debug["final_bucket_ids"])
         debug_admitted_items = list(active_pool)
@@ -8180,8 +8394,14 @@ class GatewayService:
             sample["rank"] = rank
         if item.get("score") is not None:
             sample["score"] = self._maybe_round(item.get("score"))
+        if item.get("semantic_score") is not None:
+            sample["semantic_score"] = self._maybe_round(item.get("semantic_score"))
         if item.get("rerank_score") is not None:
             sample["rerank_score"] = self._maybe_round(item.get("rerank_score"))
+        if item.get("lexical_overlap_score") is not None:
+            sample["lexical_overlap_score"] = self._maybe_round(item.get("lexical_overlap_score"))
+        elif item.get("keyword_score") is not None:
+            sample["keyword_score"] = self._maybe_round(item.get("keyword_score"))
         if threshold is not None:
             sample["threshold"] = round(float(threshold), 4)
         if reason:
@@ -8189,6 +8409,32 @@ class GatewayService:
         admission_reason = str(item.get("admission_reason") or "")
         if admission_reason:
             sample["admission_reason"] = admission_reason
+        policy_debug = item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}
+        if policy_debug:
+            for key in (
+                "is_explicit_query",
+                "query_intent",
+                "query_kind",
+                "explicit_query_reason",
+                "required_evidence_type",
+                "required_evidence_flags",
+                "available_evidence_flags",
+                "missing_evidence_flags",
+                "anchor_match",
+                "date_match",
+                "entity_match",
+                "admission_threshold",
+                "admission_reason_detail",
+                "requires_topic_evidence",
+                "has_topic_evidence",
+                "high_confidence_edge",
+                "base_reason",
+            ):
+                if key in policy_debug and policy_debug.get(key) not in (None, "", [], {}):
+                    sample[key] = policy_debug.get(key)
+        for key in ("anchor_match", "date_match", "entity_match"):
+            if key in item and item.get(key) not in (None, ""):
+                sample[key] = item.get(key)
         if item.get("cooldown_multiplier") is not None:
             sample["cooldown_multiplier"] = self._maybe_round(item.get("cooldown_multiplier"))
             last_injected = self.state_store.get_last_injected_at(session_id, bucket_id) if session_id and bucket_id else None
