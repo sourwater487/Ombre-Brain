@@ -1182,7 +1182,11 @@ class GatewayService:
                     status_code=503,
                 )
 
-        upstream_response = await self._forward_upstream(forward_payload)
+        upstream_response = await self._forward_upstream(
+            forward_payload,
+            session_id=session_id,
+            context_audit=injection_debug,
+        )
         if 200 <= upstream_response.status_code < 300:
             upstream_response, memory_detail_debug = await self._maybe_retry_with_memory_detail(
                 forward_payload=forward_payload,
@@ -1274,7 +1278,11 @@ class GatewayService:
                 injection_debug,
             )
 
-        upstream_response = await self._forward_upstream(forward_payload)
+        upstream_response = await self._forward_upstream(
+            forward_payload,
+            session_id=session_id,
+            context_audit=injection_debug,
+        )
         if 200 <= upstream_response.status_code < 300:
             upstream_response, memory_detail_debug = await self._maybe_retry_with_memory_detail(
                 forward_payload=forward_payload,
@@ -1444,6 +1452,7 @@ class GatewayService:
         context_mode = ""
         persona_state: dict[str, Any] | None = None
         injected_ids: list[str] | None = None
+        current_round: int | None = None
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
         recall_format_diagnostics: dict[str, Any] = {}
 
@@ -1904,6 +1913,25 @@ class GatewayService:
             handoff_tool_hint=handoff_tool_hint,
             context_mode=context_mode,
         )
+        self._log_dynamic_context_assembly_audit(
+            session_id=session_id,
+            round_id=(current_round + 1) if current_round is not None else None,
+            recalled_ids=recall_format_diagnostics.get("final_injected_ids") or [],
+            related_ids=list(
+                dict.fromkeys(
+                    [
+                        str(row.get("bucket_id") or "")
+                        for row in diffused_moment_debug
+                        if isinstance(row, dict) and row.get("bucket_id")
+                    ]
+                    + self._extract_bucket_ids_from_context(related_memory)
+                )
+            ),
+            recent_ids=recent_context_bucket_ids,
+            favorite_ids=favorite_ids,
+            dynamic_context=dynamic_context,
+            round_recalled_ids=injected_ids or [],
+        )
 
         forward_payload = deepcopy(payload)
         forward_payload["model"] = model
@@ -2023,11 +2051,22 @@ class GatewayService:
 
         return None
 
-    async def _forward_upstream(self, payload: dict) -> httpx.Response:
+    async def _forward_upstream(
+        self,
+        payload: dict,
+        *,
+        session_id: str = "",
+        context_audit: dict[str, Any] | None = None,
+    ) -> httpx.Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
         upstream = route["upstream"]
         upstream_payload = self._payload_for_upstream_model(payload, route["upstream_model"])
+        self._log_upstream_payload_context_audit(
+            session_id=session_id,
+            payload=upstream_payload,
+            context_audit=context_audit,
+        )
         url = f"{upstream['base_url']}/chat/completions"
         key_entries = self._available_upstream_api_keys(upstream)
         last_error: Exception | None = None
@@ -2094,10 +2133,18 @@ class GatewayService:
         self,
         route: dict[str, Any],
         payload: dict,
+        *,
+        session_id: str = "",
+        context_audit: dict[str, Any] | None = None,
     ) -> httpx.Response:
         upstream = route["upstream"]
         model = route["public_model"]
         upstream_payload = self._payload_for_upstream_model(payload, route["upstream_model"])
+        self._log_upstream_payload_context_audit(
+            session_id=session_id,
+            payload=upstream_payload,
+            context_audit=context_audit,
+        )
         url = f"{upstream['base_url']}/chat/completions"
         key_entries = self._available_upstream_api_keys(upstream)
         last_error: Exception | None = None
@@ -2180,7 +2227,12 @@ class GatewayService:
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
-        upstream_response = await self._open_upstream_stream(route, payload)
+        upstream_response = await self._open_upstream_stream(
+            route,
+            payload,
+            session_id=session_id,
+            context_audit=injection_debug,
+        )
         content_type = upstream_response.headers.get("content-type", "text/event-stream")
 
         if not 200 <= upstream_response.status_code < 300:
@@ -3578,7 +3630,12 @@ class GatewayService:
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
-        upstream_response = await self._open_upstream_stream(route, payload)
+        upstream_response = await self._open_upstream_stream(
+            route,
+            payload,
+            session_id=session_id,
+            context_audit=injection_debug,
+        )
 
         if not 200 <= upstream_response.status_code < 300:
             body = await upstream_response.aread()
@@ -8969,6 +9026,183 @@ class GatewayService:
             return self._trim_text(stable_context, self.inject_total_budget), ""
         remaining = max(0, self.inject_total_budget - stable_tokens)
         return stable_context, self._trim_text(dynamic_context, remaining)
+
+    def _dynamic_context_section_titles(self) -> set[str]:
+        return {
+            "Just Now Chat Context",
+            "Recent Context",
+            "Context Mode",
+            "Memory Detail Request",
+            "Date Boundary",
+            "Recalled Memory",
+            "Date Persona Trace",
+            "Targeted Memory Detail",
+            "Diffused Memory",
+            "New Window Handoff Hint",
+            "Relationship Weather",
+            f"{self.identity['ai_name']} Favorite Memory",
+            "Dream Context",
+        }
+
+    def _dynamic_context_section_names(self, dynamic_context: str) -> list[str]:
+        titles = self._dynamic_context_section_titles()
+        names: list[str] = []
+        for line in str(dynamic_context or "").splitlines():
+            title = line.strip()
+            if title in titles and title not in names:
+                names.append(title)
+        return names
+
+    def _dynamic_context_section_text(self, dynamic_context: str, section_name: str) -> str:
+        titles = self._dynamic_context_section_titles()
+        lines = str(dynamic_context or "").splitlines()
+        collecting = False
+        collected: list[str] = []
+        for line in lines:
+            title = line.strip()
+            if title == section_name:
+                collecting = True
+                continue
+            if collecting and title in titles:
+                break
+            if collecting:
+                collected.append(line)
+        return "\n".join(collected).strip()
+
+    @staticmethod
+    def _audit_id_list(ids: Any, *, limit: int | None = None) -> list[str]:
+        if not isinstance(ids, list):
+            ids = list(ids or []) if isinstance(ids, (tuple, set)) else []
+        cleaned = [
+            str(item)
+            for item in ids
+            if str(item or "").strip()
+        ]
+        deduped = list(dict.fromkeys(cleaned))
+        return deduped[:limit] if limit is not None else deduped
+
+    def _log_dynamic_context_assembly_audit(
+        self,
+        *,
+        session_id: str,
+        round_id: int | None,
+        recalled_ids: Any,
+        related_ids: Any,
+        recent_ids: Any,
+        favorite_ids: Any,
+        dynamic_context: str,
+        round_recalled_ids: Any,
+    ) -> None:
+        rendered_recalled_ids = self._audit_id_list(recalled_ids)
+        recalled_section = self._dynamic_context_section_text(dynamic_context, "Recalled Memory")
+        assembled_recalled_ids = self._audit_id_list(self._extract_bucket_ids_from_context(recalled_section))
+        missing_recalled_ids = [
+            bucket_id
+            for bucket_id in rendered_recalled_ids
+            if bucket_id not in set(assembled_recalled_ids)
+        ]
+        payload = {
+            "session": session_id,
+            "round": round_id,
+            "recalled_ids": rendered_recalled_ids,
+            "related_ids": self._audit_id_list(related_ids),
+            "recent_ids": self._audit_id_list(recent_ids),
+            "favorite_ids": self._audit_id_list(favorite_ids),
+            "rendered_recalled_ids": rendered_recalled_ids,
+            "assembled_recalled_ids": assembled_recalled_ids,
+            "rendered_recalled_count": len(rendered_recalled_ids),
+            "assembled_recalled_count": len(assembled_recalled_ids),
+            "assembled_section_names": self._dynamic_context_section_names(dynamic_context),
+            "assembled_context_chars": len(str(dynamic_context or "")),
+            "assembled_context_empty": not bool(str(dynamic_context or "").strip()),
+            "missing_recalled_ids": missing_recalled_ids[:10],
+            "round_recalled_ids": self._audit_id_list(round_recalled_ids),
+        }
+        logger.info(
+            "Gateway dynamic context assembly audit | %s",
+            json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str),
+        )
+
+    def _extract_dynamic_context_from_messages(self, messages: Any) -> tuple[int | None, str, bool]:
+        if not isinstance(messages, list):
+            return None, "", False
+        tag_open = "<ombre_live_context>"
+        tag_close = "</ombre_live_context>"
+        fallback: tuple[int | None, str, bool] = (None, "", False)
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+            text = self._coerce_message_text(message.get("content"))
+            if tag_open in text:
+                start = text.find(tag_open) + len(tag_open)
+                end = text.find(tag_close, start)
+                context = text[start:end] if end >= 0 else text[start:]
+                return index, context.strip(), True
+            if (
+                fallback[0] is None
+                and message.get("role") == "system"
+                and text.strip().startswith("Live private context for the current turn.")
+            ):
+                fallback = (index, text.strip(), False)
+        return fallback
+
+    def _log_upstream_payload_context_audit(
+        self,
+        *,
+        session_id: str,
+        payload: dict[str, Any],
+        context_audit: dict[str, Any] | None = None,
+    ) -> None:
+        if not session_id and not context_audit:
+            return
+        messages = payload.get("messages")
+        message_list = messages if isinstance(messages, list) else []
+        dynamic_index, dynamic_context, ombre_context_present = self._extract_dynamic_context_from_messages(messages)
+        recalled_section = self._dynamic_context_section_text(dynamic_context, "Recalled Memory")
+        assembled_recalled_ids = self._audit_id_list(self._extract_bucket_ids_from_context(recalled_section))
+        recalled_ids = assembled_recalled_ids
+        if isinstance(context_audit, dict):
+            recalled_ids = self._audit_id_list(context_audit.get("recalled_bucket_ids") or assembled_recalled_ids)
+        recalled_set = set(assembled_recalled_ids)
+        missing_recalled_ids = [
+            bucket_id
+            for bucket_id in recalled_ids
+            if bucket_id not in recalled_set
+        ]
+        text_messages = [
+            self._coerce_message_text(message.get("content"))
+            for message in message_list
+            if isinstance(message, dict)
+        ]
+        system_message_chars = sum(
+            len(self._coerce_message_text(message.get("content")))
+            for message in message_list
+            if isinstance(message, dict) and message.get("role") == "system"
+        )
+        last_user_message_chars = 0
+        for message in reversed(message_list):
+            if isinstance(message, dict) and message.get("role") == "user":
+                last_user_message_chars = len(self._coerce_message_text(message.get("content")))
+                break
+        payload = {
+            "session": session_id,
+            "model": str(payload.get("model") or ""),
+            "message_count": len(message_list),
+            "total_message_chars": sum(len(text) for text in text_messages),
+            "dynamic_context_present": bool(dynamic_context.strip()),
+            "ombre_context_present": bool(ombre_context_present or dynamic_context.strip()),
+            "recalled_ids": recalled_ids,
+            "assembled_recalled_ids": assembled_recalled_ids,
+            "missing_recalled_ids": missing_recalled_ids[:10],
+            "dynamic_context_chars": len(dynamic_context),
+            "dynamic_context_message_index": dynamic_index,
+            "system_message_chars": system_message_chars,
+            "last_user_message_chars": last_user_message_chars,
+        }
+        logger.info(
+            "Gateway upstream payload context audit | %s",
+            json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str),
+        )
 
     def _bucket_runtime_gate_payload(
         self,
