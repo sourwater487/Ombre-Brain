@@ -309,6 +309,8 @@ class GatewayService:
         self.memory_edge_store = MemoryEdgeStore(config)
         self.memory_node_store = memory_node_store or MemoryNodeStore(config)
         self.memory_moment_store = MemoryMomentStore(config)
+        self._moment_graph_cache_signature = ""
+        self._moment_graph_cache_value: tuple[list[dict], dict[str, list[dict]], list[dict]] | None = None
         self.relevance_options = memory_relevance_options_from_config(config)
         self.state_store = state_store or GatewayStateStore(
             os.path.join(config["buckets_dir"], "gateway_state.db")
@@ -6133,12 +6135,55 @@ class GatewayService:
         all_buckets: list[dict],
     ) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
         recallable_buckets = [bucket for bucket in all_buckets if not is_self_anchor_bucket(bucket)]
+        signature = self._moment_graph_signature(recallable_buckets)
+        if (
+            signature
+            and signature == self._moment_graph_cache_signature
+            and self._moment_graph_cache_value is not None
+        ):
+            return self._moment_graph_cache_value
         self.memory_moment_store.bulk_upsert(recallable_buckets)
         moments = self._recallable_moments(self.memory_moment_store.list_all())
         grouped = self._moments_by_bucket(moments)
         edges = self.memory_moment_store.list_edges()
         edges.extend(self._bucket_edges_as_moment_edges(self.memory_edge_store.list_edges(), grouped))
-        return moments, grouped, edges
+        value = (moments, grouped, edges)
+        self._moment_graph_cache_signature = signature
+        self._moment_graph_cache_value = value
+        return value
+
+    @staticmethod
+    def _moment_graph_signature(buckets: list[dict]) -> str:
+        digest = hashlib.sha1()
+        for bucket in sorted(buckets or [], key=lambda item: str(item.get("id") or "")):
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            structural_meta = {
+                key: meta.get(key)
+                for key in (
+                    "name",
+                    "tags",
+                    "domain",
+                    "importance",
+                    "type",
+                    "pinned",
+                    "protected",
+                    "resolved",
+                    "digested",
+                    "comments",
+                    "created",
+                    "date",
+                    "source_record",
+                )
+                if key in meta
+            }
+            payload = {
+                "id": bucket.get("id"),
+                "content": bucket.get("content"),
+                "metadata": structural_meta,
+            }
+            digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
 
     def _recallable_moments(self, moments: list[dict]) -> list[dict]:
         return [
