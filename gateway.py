@@ -4942,7 +4942,7 @@ class GatewayService:
             "以前", "过去", "remember", "recall", "memory", "look up",
         )
         intimate_terms = (
-            "今天是雨天", "亲亲", "抱抱", "抱我", "吻", "亲密", "想你", "爱你",
+            "亲亲", "抱抱", "抱我", "吻", "亲密", "想你", "爱你",
             "老婆", "宝宝", "亲爱的", "身体", "欲望", "intimate", "kiss",
             "hug", "miss you", "love you",
         )

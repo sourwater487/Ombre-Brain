@@ -8442,15 +8442,15 @@ def test_exact_anchor_phrase_candidate_when_keyword_and_embedding_miss(
     )
     target_id = _create_bucket(
         bucket_mgr,
-        content="### moment\n小雨说今天是雨天，这是只按原话记住的暗号。",
-        name="雨天暗号",
+        content="### moment\n用户说蓝色方块，这是只按原话记住的测试锚点。",
+        name="蓝色方块",
         hours_ago=12,
-        tags=["暗号"],
+        tags=["测试锚点"],
     )
     _create_bucket(
         bucket_mgr,
-        content="### moment\n今天普通下雨，天气预报说会转晴。",
-        name="普通天气",
+        content="### moment\n这是一条普通背景记录，不该被测试锚点误召回。",
+        name="普通背景",
         hours_ago=1,
         importance=10,
     )
@@ -8460,7 +8460,7 @@ def test_exact_anchor_phrase_candidate_when_keyword_and_embedding_miss(
     all_buckets = _run(bucket_mgr.list_all())
     selected, _suppressed, planner_debug = _run(
         service._select_dynamic_buckets(
-            "今天是雨天",
+            "蓝色方块",
             "sess-exact-anchor-phrase",
             all_buckets,
             include_query_planner_debug=True,
@@ -8469,7 +8469,7 @@ def test_exact_anchor_phrase_candidate_when_keyword_and_embedding_miss(
 
     assert [bucket["id"] for bucket in selected] == [target_id]
     assert planner_debug["exact_anchor_hints"]["bucket_ids"] == [target_id]
-    assert planner_debug["exact_anchor_hints"]["terms"] == ["今天是雨天"]
+    assert planner_debug["exact_anchor_hints"]["terms"] == ["蓝色方块"]
 
 
 def test_exact_anchor_short_code_candidate_without_keyword_or_embedding(
@@ -8486,10 +8486,10 @@ def test_exact_anchor_short_code_candidate_without_keyword_or_embedding(
     )
     target_id = _create_bucket(
         bucket_mgr,
-        content="### moment\n暗号 030 对应那次只适合原话命中的小记录。",
-        name="030 暗号",
+        content="### moment\n测试码 zxq-742 对应那次只适合原话命中的小记录。",
+        name="zxq-742 测试锚点",
         hours_ago=12,
-        tags=["暗号"],
+        tags=["测试锚点"],
     )
     _create_bucket(
         bucket_mgr,
@@ -8504,7 +8504,7 @@ def test_exact_anchor_short_code_candidate_without_keyword_or_embedding(
     all_buckets = _run(bucket_mgr.list_all())
     selected, _suppressed, planner_debug = _run(
         service._select_dynamic_buckets(
-            "030",
+            "zxq-742",
             "sess-exact-anchor-code",
             all_buckets,
             include_query_planner_debug=True,
@@ -8513,7 +8513,7 @@ def test_exact_anchor_short_code_candidate_without_keyword_or_embedding(
 
     assert [bucket["id"] for bucket in selected] == [target_id]
     assert planner_debug["exact_anchor_hints"]["bucket_ids"] == [target_id]
-    assert planner_debug["exact_anchor_hints"]["terms"] == ["030"]
+    assert planner_debug["exact_anchor_hints"]["terms"] == ["zxq-742"]
 
 
 def test_low_signal_gate_keeps_exact_short_code_recall(
@@ -8535,17 +8535,17 @@ def test_low_signal_gate_keeps_exact_short_code_recall(
     )
     target_id = _create_bucket(
         bucket_mgr,
-        content="### moment\n暗号 u3u 是一条必须按原话命中的小记录。",
-        name="u3u 暗号",
+        content="### moment\n测试码 k9alpha 是一条必须按原话命中的小记录。",
+        name="k9alpha 测试锚点",
         hours_ago=12,
-        tags=["暗号"],
+        tags=["测试锚点"],
     )
     _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
     monkeypatch.setattr(service, "_get_keyword_candidates", lambda query_text, eligible: {})
 
     payload, recalled_ids, debug = _run(
         service.prepare_payload(
-            {"messages": [{"role": "user", "content": "u3u"}]},
+            {"messages": [{"role": "user", "content": "k9alpha"}]},
             "sess-low-signal-exact-code",
             include_debug=True,
         )
@@ -8554,7 +8554,7 @@ def test_low_signal_gate_keeps_exact_short_code_recall(
 
     assert target_id in recalled_ids
     assert "Recalled Memory" in injected
-    assert "u3u 暗号" in injected
+    assert "k9alpha 测试锚点" in injected
     assert debug["prepare_timing_debug"]["low_signal_auto_recall"] is False
     assert debug["query_planner_debug"]["exact_anchor_hints"]["bucket_ids"] == [target_id]
 
@@ -8773,11 +8773,11 @@ def test_short_taste_query_keeps_real_food_opinion_only(monkeypatch, test_config
     metaphor = {"bucket": _run(bucket_mgr.get(metaphor_id)), "score": 0.2}
     taste = {"bucket": _run(bucket_mgr.get(taste_id)), "score": 0.2}
 
-    assert not service._admit_bucket_for_recall("好吃030", meal_plan)
+    assert not service._admit_bucket_for_recall("好吃042", meal_plan)
     assert meal_plan["admission_reason"] == "short_taste_query_without_taste_evidence"
-    assert not service._admit_bucket_for_recall("好吃030", metaphor)
+    assert not service._admit_bucket_for_recall("好吃042", metaphor)
     assert metaphor["admission_reason"] == "short_taste_query_without_taste_evidence"
-    assert service._admit_bucket_for_recall("好吃030", taste)
+    assert service._admit_bucket_for_recall("好吃042", taste)
 
 
 def test_non_explicit_low_score_moment_fallback_is_suppressed(monkeypatch, test_config, bucket_mgr):
