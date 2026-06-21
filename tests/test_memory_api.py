@@ -1454,6 +1454,51 @@ async def test_grow_structured_content_bypasses_digest_and_merge(monkeypatch, bu
 
 
 @pytest.mark.asyncio
+async def test_grow_digest_items_do_not_auto_merge_similar_buckets(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    old_content = (
+        "### moment\n"
+        "小雨和 Haven 在瑞森论坛测试 Ombre-Brain 的旧记录。\n\n"
+        "### reflection\n"
+        "我记得这是旧桶，不能被 grow 自动揉掉。"
+    )
+    old_id = await bucket_mgr.create(
+        content=old_content,
+        name="瑞森论坛旧记录",
+        tags=["project_event"],
+        domain=["记忆"],
+        importance=8,
+    )
+    old_bucket = await bucket_mgr.get(old_id)
+    old_bucket["score"] = 99
+
+    async def fake_search(*args, **kwargs):
+        return [old_bucket]
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(bucket_mgr, "search", fake_search)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", DigestDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
+
+    result = await server.grow(
+        "2026-06-21 小雨发现 grow 自动合并会揉写旧桶，决定以后 grow 默认只新建。"
+    )
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    old_after = await bucket_mgr.get(old_id)
+
+    assert "1条|新1合0" in result
+    assert len(buckets) == 2
+    assert old_after["content"] == old_content
+
+
+@pytest.mark.asyncio
 async def test_merge_or_create_never_merges_into_profile_fact(monkeypatch, bucket_mgr):
     import server
 

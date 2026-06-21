@@ -7427,8 +7427,8 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
     created = 0
     merged = 0
 
-    # --- Step 2: merge or create each item (with per-item error handling) ---
-    # --- 逐条合并或新建（单条失败不影响其他）---
+    # --- Step 2: create each item (with per-item error handling) ---
+    # --- 逐条新建（单条失败不影响其他）；grow 不自动揉写旧桶 ---
     for item in items:
         try:
             item_tags = item.get("tags", [])
@@ -7451,6 +7451,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
                 valence=item.get("valence", 0.5),
                 arousal=item.get("arousal", 0.3),
                 name=item.get("name", ""),
+                allow_merge=False,
                 memory_subject=item_classification["memory_subject"],
                 memory_layer=item_classification["memory_layer"],
                 memory_classification_source=item_classification["memory_classification_source"],
