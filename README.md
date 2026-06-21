@@ -464,7 +464,7 @@ gateway:
 
 Gateway 会按请求里的 `model` 找上游。遇到 `401/403/429/500/502/503/504` 或网络错误，会临时冷却当前 key，并尝试同上游的下一个 key。`400`、模型名错误、上下文太长这类请求本身的问题不会换 key。冷却时间由 `gateway.upstream_key_cooldown_seconds` 控制，默认 300 秒。
 
-Anthropic 原生上游示例：
+Anthropic 原生上游要同时注意 `protocol`、`base_url` 和缓存模式：
 
 ```yaml
 gateway:
@@ -476,7 +476,6 @@ gateway:
       api_key_env: "OMBRE_GATEWAY_ANTHROPIC_API_KEY"
       anthropic_version: "2023-06-01"
       prompt_cache: "anthropic"
-      # prompt_cache: "anthropic_explicit"  # 部分中转站不支持顶层 cache_control 时使用
       # prompt_cache_retention: "1h"  # 不写时走 Anthropic 默认 5 分钟 TTL
       default_model: "claude-sonnet"
       models:
@@ -486,15 +485,30 @@ gateway:
 
 `protocol: "anthropic"` 只影响 Anthropic-compatible 客户端打来的 `/v1/messages`：Gateway 仍会先注入记忆，再用 `x-api-key` 和 `anthropic-version` 转发到上游 `/messages`。这样 prompt cache、`cache_read_input_tokens` / `cache_creation_input_tokens` 这类 Anthropic 原生字段会保留下来。普通 OpenAI-compatible 客户端继续走 `/v1/chat/completions`。
 
-`prompt_cache: "openai"` 和 `prompt_cache_retention: "24h"` 是 OpenAI prompt cache 提示。Gateway 会给上游请求加 `prompt_cache_key` 和 `prompt_cache_retention`。`prompt_cache: "anthropic"` 只在 `protocol: "anthropic"` 上游生效，会给原生 Messages 请求加顶层 `cache_control: {"type": "ephemeral"}`；`prompt_cache_retention: "1h"` 会改成 1 小时 TTL。
+`base_url` 写到站点的 API 根路径即可，通常是 `.../v1`，不要写成 `.../v1/messages`。Gateway 会自己补 `/messages`。如果把 `/messages` 写进 `base_url`，最终请求会变成 `/v1/messages/messages`。如果漏掉 `protocol: "anthropic"`，Gateway 会按默认 OpenAI 协议去请求 `/chat/completions`，也不是 Claude 原生 Messages 接口。
 
-如果某个中转站只认旧式 Anthropic 显式缓存断点，把上游改成：
+缓存模式按上游能力选：
+
+- `prompt_cache: "openai"` 和 `prompt_cache_retention: "24h"`：OpenAI prompt cache 提示。Gateway 会给上游请求加 `prompt_cache_key` 和 `prompt_cache_retention`。
+- `prompt_cache: "anthropic"`：只在 `protocol: "anthropic"` 上游生效，会给原生 Messages 请求加顶层 `cache_control: {"type": "ephemeral"}`；`prompt_cache_retention: "1h"` 会改成 1 小时 TTL。官方 Anthropic 或支持顶层 `cache_control` 的中转站用这个。
+- `prompt_cache: "anthropic_explicit"`：给只认旧式显式缓存断点的中转站用。这个模式不会加顶层 `cache_control`，而是优先把 `cache_control` 挂到 `system` 的最后一个 content block 上；没有 `system` 时，挂到当前最新 user message 之前的最后一条历史消息上。这样缓存断点尽量落在稳定前缀末尾。
+
+中转站如果要求 Anthropic 原生协议、但只支持显式断点，可以这样写：
 
 ```yaml
-prompt_cache: "anthropic_explicit"
+gateway:
+  upstreams:
+    - name: provider-e
+      protocol: "anthropic"
+      base_url: "http://cc.v587xh.com/v1"
+      api_key_env: OMBRE_GATEWAY_PROVIDER_E_API_KEY
+      prompt_cache: "anthropic_explicit"
+      models:
+        - id: provider-e/claude-opus-4-6
+          upstream_model: claude-opus-4-6
 ```
 
-这个模式不会加顶层 `cache_control`，而是优先把 `cache_control` 挂到 `system` 的最后一个 content block 上；没有 `system` 时，才挂到当前最新 user message 之前的最后一条历史消息上。这样缓存断点尽量落在稳定前缀末尾。不确定上游是否支持时保持关闭：
+如果这个站点其实是 OpenAI-compatible，不要写 `protocol: "anthropic"`，保持默认 OpenAI 协议，`base_url` 同样写到 `/v1`。不确定上游是否支持 prompt cache 时保持关闭：
 
 ```yaml
 prompt_cache: ""
