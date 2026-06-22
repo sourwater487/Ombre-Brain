@@ -72,6 +72,7 @@ from persona_event_selection import (
     format_persona_event_trace_line,
     select_persona_events,
 )
+from raw_events import RawEventStore
 from reranker_engine import RerankerEngine
 from self_anchor import is_self_anchor_bucket, is_self_anchor_metadata
 from source_refs import source_ref_window
@@ -293,6 +294,7 @@ class GatewayService:
         embedding_engine: EmbeddingEngine | None = None,
         reranker_engine: RerankerEngine | None = None,
         state_store: GatewayStateStore | None = None,
+        raw_event_store: RawEventStore | None = None,
         persona_engine: PersonaStateEngine | None = None,
         dream_engine: DreamEngine | None = None,
         memory_node_store: MemoryNodeStore | None = None,
@@ -315,6 +317,7 @@ class GatewayService:
         self.state_store = state_store or GatewayStateStore(
             os.path.join(config["buckets_dir"], "gateway_state.db")
         )
+        self.raw_event_store = raw_event_store or RawEventStore(config)
         self.persona_engine = persona_engine or PersonaStateEngine(config)
         self.dream_engine = dream_engine or DreamEngine(config)
         self.dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
@@ -2571,6 +2574,83 @@ class GatewayService:
         except Exception as exc:
             logger.warning(
                 "Gateway conversation turn record failed | session=%s round=%s error=%s",
+                session_id,
+                round_id,
+                exc,
+            )
+        self._record_raw_event_turn(
+            session_id=session_id,
+            round_id=round_id,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            model=model,
+            client=client,
+            route=route,
+        )
+
+    def _record_raw_event_turn(
+        self,
+        *,
+        session_id: str,
+        round_id: int,
+        user_text: str,
+        assistant_text: str,
+        model: str,
+        client: str,
+        route: str,
+    ) -> None:
+        profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
+        created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        base = f"{profile_id}:{session_id}:{int(round_id)}"
+        metadata = {
+            "profile_id": profile_id,
+            "round_id": int(round_id),
+            "model": str(model or ""),
+            "route": str(route or ""),
+        }
+        events = []
+        if user_text:
+            events.append(
+                {
+                    "source": "gateway",
+                    "source_event_id": f"{base}:user",
+                    "role": "user",
+                    "text": user_text,
+                    "created_at": created_at,
+                    "conversation_id": session_id,
+                    "session_id": session_id,
+                    "client": client,
+                    "metadata": metadata,
+                }
+            )
+        if assistant_text:
+            events.append(
+                {
+                    "source": "gateway",
+                    "source_event_id": f"{base}:assistant",
+                    "role": "assistant",
+                    "text": assistant_text,
+                    "created_at": created_at,
+                    "conversation_id": session_id,
+                    "session_id": session_id,
+                    "client": client,
+                    "metadata": metadata,
+                }
+            )
+        if not events:
+            return
+        try:
+            result = self.raw_event_store.ingest(events, source="gateway")
+            if result.get("rejected"):
+                logger.info(
+                    "Gateway raw event mirror rejected entries | session=%s round=%s rejected=%s",
+                    session_id,
+                    round_id,
+                    result.get("rejected"),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Gateway raw event mirror failed | session=%s round=%s error=%s",
                 session_id,
                 round_id,
                 exc,

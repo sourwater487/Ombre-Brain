@@ -508,6 +508,85 @@ def test_gateway_state_store_cooldown_curve(tmp_path):
     assert sess_a_usage[0]["route"] == "/v1/messages"
 
 
+def test_gateway_mirrors_successful_turn_to_raw_events(monkeypatch, test_config, bucket_mgr):
+    _, service, state_store, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+
+    service._record_conversation_turn(
+        session_id="sess-raw-mirror",
+        round_id=7,
+        user_message="小雨这句原文要进保险箱",
+        assistant_message={"role": "assistant", "content": "Haven这句回复也要进保险箱"},
+        model="model-a",
+        client="test-client",
+        route="/v1/chat/completions",
+    )
+
+    turns = state_store.list_recent_conversation_turns(
+        profile_id="haven_xiaoyu",
+        session_id="sess-raw-mirror",
+        limit=5,
+        hours=1,
+    )
+    assert len(turns) == 1
+    assert turns[0]["user_text"] == "小雨这句原文要进保险箱"
+    assert turns[0]["assistant_text"] == "Haven这句回复也要进保险箱"
+
+    raw = service.raw_event_store.search(
+        "保险箱",
+        source="gateway",
+        conversation_id="sess-raw-mirror",
+    )
+    assert raw["count"] == 2
+    assert {item["role"] for item in raw["items"]} == {"user", "assistant"}
+    assert {item["source_event_id"] for item in raw["items"]} == {
+        "haven_xiaoyu:sess-raw-mirror:7:user",
+        "haven_xiaoyu:sess-raw-mirror:7:assistant",
+    }
+
+
+def test_gateway_skips_tool_only_assistant_turn_for_short_and_raw_tables(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    _, service, state_store, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+
+    service._record_conversation_turn(
+        session_id="sess-tool-only",
+        round_id=8,
+        user_message="查一下工具结果",
+        assistant_message={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        model="model-a",
+        client="test-client",
+        route="/v1/chat/completions",
+    )
+
+    assert (
+        state_store.list_recent_conversation_turns(
+            profile_id="haven_xiaoyu",
+            session_id="sess-tool-only",
+            limit=5,
+            hours=1,
+        )
+        == []
+    )
+    assert service.raw_event_store.search(
+        "工具结果",
+        source="gateway",
+        conversation_id="sess-tool-only",
+    )["count"] == 0
+
+
 def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_config, bucket_mgr):
     cfg = _gateway_config(
         test_config,
