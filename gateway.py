@@ -8694,11 +8694,19 @@ class GatewayService:
         return decision.admit_direct
 
     def _get_keyword_candidates(self, query: str, buckets: list[dict]) -> dict[str, float]:
-        scored = []
-        for bucket in buckets:
-            keyword_score = self._clamp(self.bucket_mgr._calc_topic_score(query, bucket))
-            if keyword_score > 0:
-                scored.append((bucket["id"], keyword_score))
+        if hasattr(self.bucket_mgr, "calc_topic_scores"):
+            raw_scores = self.bucket_mgr.calc_topic_scores(query, buckets)
+            scored = [
+                (bucket_id, self._clamp(score))
+                for bucket_id, score in raw_scores.items()
+                if self._clamp(score) > 0
+            ]
+        else:
+            scored = []
+            for bucket in buckets:
+                keyword_score = self._clamp(self.bucket_mgr._calc_topic_score(query, bucket))
+                if keyword_score > 0:
+                    scored.append((bucket["id"], keyword_score))
         scored.sort(key=lambda item: item[1], reverse=True)
         return {bucket_id: score for bucket_id, score in scored[: self.dynamic_top_k]}
 
