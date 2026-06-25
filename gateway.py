@@ -680,6 +680,17 @@ class GatewayService:
             "chain_max_frontier": options.chain_max_frontier,
         }
 
+    def _reranker_config_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(getattr(self.reranker_engine, "enabled", False)),
+            "model": getattr(self.reranker_engine, "model", ""),
+            "base_url": getattr(self.reranker_engine, "base_url", ""),
+            "api_ready": bool(getattr(self.reranker_engine, "api_key", "")),
+            "timeout_seconds": getattr(self.reranker_engine, "timeout", 12),
+            "candidate_limit": getattr(self.reranker_engine, "candidate_limit", 20),
+            "score_weight": getattr(self.reranker_engine, "score_weight", 0.65),
+        }
+
     def _persona_config_payload(self) -> dict[str, Any]:
         return {
             "enabled": bool(getattr(self.persona_engine, "enabled", False)),
@@ -1029,6 +1040,40 @@ class GatewayService:
             diffusion_cfg[key] = normalized[key]
         return [f"memory_diffusion.{key}" for key in requested]
 
+    def _apply_reranker_config(self, payload: dict[str, Any]) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        reranker_cfg = self.config.setdefault("reranker", {})
+        updated: list[str] = []
+        if "enabled" in payload:
+            reranker_cfg["enabled"] = self._bool_config_value(payload["enabled"], True)
+            os.environ["OMBRE_RERANKER_ENABLED"] = "true" if reranker_cfg["enabled"] else "false"
+            updated.append("reranker.enabled")
+        for key in ("model", "base_url"):
+            if key in payload:
+                reranker_cfg[key] = str(payload[key] or "").strip()
+                updated.append(f"reranker.{key}")
+        if "timeout_seconds" in payload:
+            reranker_cfg["timeout_seconds"] = max(1.0, min(120.0, float(payload["timeout_seconds"])))
+            updated.append("reranker.timeout_seconds")
+        if "candidate_limit" in payload:
+            reranker_cfg["candidate_limit"] = max(1, min(100, int(payload["candidate_limit"])))
+            updated.append("reranker.candidate_limit")
+        if "score_weight" in payload:
+            reranker_cfg["score_weight"] = self._clamp(float(payload["score_weight"]), 0.0, 1.0)
+            updated.append("reranker.score_weight")
+        if "api_key" in payload and payload["api_key"]:
+            reranker_cfg["api_key"] = str(payload["api_key"])
+            os.environ["OMBRE_RERANKER_API_KEY"] = reranker_cfg["api_key"]
+            updated.append("reranker.api_key")
+        if "base_url" in payload:
+            os.environ["OMBRE_RERANKER_BASE_URL"] = reranker_cfg.get("base_url", "")
+        if "model" in payload:
+            os.environ["OMBRE_RERANKER_MODEL"] = reranker_cfg.get("model", "")
+        if updated:
+            self.reranker_engine = RerankerEngine(self.config)
+        return updated
+
     def _apply_persona_config(self, payload: dict[str, Any]) -> list[str]:
         if not isinstance(payload, dict):
             return []
@@ -1097,6 +1142,7 @@ class GatewayService:
             return JSONResponse({
                 "gateway": self._gateway_memory_config_payload(),
                 "memory_diffusion": self._memory_diffusion_config_payload(),
+                "reranker": self._reranker_config_payload(),
                 "persona": self._persona_config_payload(),
                 "dream": self._dream_config_payload(),
             })
@@ -1110,14 +1156,23 @@ class GatewayService:
 
         gateway_payload = body.get("gateway")
         diffusion_payload = body.get("memory_diffusion")
+        reranker_payload = body.get("reranker")
         persona_payload = body.get("persona")
         dream_payload = body.get("dream")
-        if gateway_payload is None and diffusion_payload is None and persona_payload is None and dream_payload is None:
+        if (
+            gateway_payload is None
+            and diffusion_payload is None
+            and reranker_payload is None
+            and persona_payload is None
+            and dream_payload is None
+        ):
             gateway_payload = body
         if gateway_payload is not None and not isinstance(gateway_payload, dict):
             return JSONResponse({"error": "invalid gateway config"}, status_code=400)
         if diffusion_payload is not None and not isinstance(diffusion_payload, dict):
             return JSONResponse({"error": "invalid memory diffusion config"}, status_code=400)
+        if reranker_payload is not None and not isinstance(reranker_payload, dict):
+            return JSONResponse({"error": "invalid reranker config"}, status_code=400)
         if persona_payload is not None and not isinstance(persona_payload, dict):
             return JSONResponse({"error": "invalid persona config"}, status_code=400)
         if dream_payload is not None and not isinstance(dream_payload, dict):
@@ -1128,6 +1183,8 @@ class GatewayService:
             updated.extend(self._apply_gateway_memory_config(gateway_payload))
         if diffusion_payload is not None:
             updated.extend(self._apply_memory_diffusion_config(diffusion_payload))
+        if reranker_payload is not None:
+            updated.extend(self._apply_reranker_config(reranker_payload))
         if persona_payload is not None:
             updated.extend(self._apply_persona_config(persona_payload))
         if dream_payload is not None:
@@ -1137,6 +1194,7 @@ class GatewayService:
             "updated": updated,
             "gateway": self._gateway_memory_config_payload(),
             "memory_diffusion": self._memory_diffusion_config_payload(),
+            "reranker": self._reranker_config_payload(),
             "persona": self._persona_config_payload(),
             "dream": self._dream_config_payload(),
         })

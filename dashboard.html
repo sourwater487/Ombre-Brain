@@ -2663,6 +2663,41 @@
     </div>
 
     <div class="config-section">
+      <h3>重排序 Reranker</h3>
+      <div class="config-row">
+        <label>启用</label>
+        <select id="cfg-reranker-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 和 breath 不再等待重排序模型</div>
+      <div class="config-row">
+        <label>Model</label>
+        <input type="text" id="cfg-reranker-model" placeholder="Qwen/Qwen3-Reranker-4B" />
+      </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-reranker-url" placeholder="留空复用 Embedding Base URL" />
+      </div>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-reranker-key" placeholder="当前: 加载中…" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空时复用 Embedding API Key。API Key 不会持久化到 yaml（请用环境变量）</div>
+      <div class="config-row">
+        <label>Timeout</label>
+        <input type="number" id="cfg-reranker-timeout" min="1" max="120" step="0.5" />
+      </div>
+      <div class="config-row">
+        <label>候选上限</label>
+        <input type="number" id="cfg-reranker-candidates" min="1" max="100" />
+      </div>
+      <div class="config-row">
+        <label>重排权重</label>
+        <input type="number" id="cfg-reranker-weight" min="0" max="1" step="0.05" />
+      </div>
+      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 12 秒 / 20 个候选 / 0.65；旧配置没有 reranker 段时，保存会自动补上</div>
+    </div>
+
+    <div class="config-section">
       <h3>Persona State</h3>
       <div class="config-row">
         <label>启用</label>
@@ -2936,7 +2971,7 @@ function showAuthOverlay(setupNeeded) {
 }
 
 function clearAuthSensitiveFields(password) {
-  ['auth-login-pwd', 'auth-setup-pwd', 'auth-setup-pwd2', 'cfg-dehy-key', 'cfg-emb-key', 'cfg-persona-key', 'cfg-reflection-key', 'cfg-dream-key'].forEach(function(id) {
+  ['auth-login-pwd', 'auth-setup-pwd', 'auth-setup-pwd2', 'cfg-dehy-key', 'cfg-emb-key', 'cfg-reranker-key', 'cfg-persona-key', 'cfg-reflection-key', 'cfg-dream-key'].forEach(function(id) {
     var input = document.getElementById(id);
     if (input) input.value = '';
   });
@@ -5992,6 +6027,16 @@ async function loadConfig() {
     document.getElementById('cfg-emb-url').value = cfg.embedding.base_url || '';
     document.getElementById('cfg-emb-key').placeholder = '当前: ' + (cfg.embedding.api_key_masked || (cfg.embedding.has_own_api_key ? '***' : '复用脱水 API'));
     document.getElementById('cfg-emb-key').value = '';
+    var reranker = cfg.reranker || {};
+    document.getElementById('cfg-reranker-enabled').value = reranker.enabled ? 'true' : 'false';
+    document.getElementById('cfg-reranker-model').value = reranker.model || '';
+    document.getElementById('cfg-reranker-url').value = reranker.base_url || '';
+    document.getElementById('cfg-reranker-key').placeholder =
+      '当前: ' + (reranker.api_key_masked || (reranker.has_own_api_key ? '***' : (reranker.api_ready ? '复用向量 API' : '未设置')));
+    document.getElementById('cfg-reranker-key').value = '';
+    document.getElementById('cfg-reranker-timeout').value = reranker.timeout_seconds ?? 12;
+    document.getElementById('cfg-reranker-candidates').value = reranker.candidate_limit ?? 20;
+    document.getElementById('cfg-reranker-weight').value = reranker.score_weight ?? 0.65;
     document.getElementById('cfg-persona-enabled').value =
       (cfg.persona && cfg.persona.enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-persona-event-recording').value =
@@ -6094,7 +6139,8 @@ async function loadConfig() {
       'Portrait API: <strong>' + ((cfg.portrait && cfg.portrait.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
       'Portrait state: <strong>' + esc((cfg.portrait && cfg.portrait.state_path) || '默认') + '</strong><br>' +
       'Dream API: <strong>' + (cfg.dream.api_ready ? '已设置' : '未设置') + '</strong><br>' +
-      'Embedding effective URL: <strong>' + esc(cfg.embedding.effective_base_url || '未设置') + '</strong>';
+      'Embedding effective URL: <strong>' + esc(cfg.embedding.effective_base_url || '未设置') + '</strong><br>' +
+      'Reranker effective URL: <strong>' + esc(reranker.effective_base_url || reranker.base_url || '未设置') + '</strong>';
   } catch (e) {
     setConfigStatus('<span style="color:var(--negative)">加载失败: ' + esc(e.message) + '</span>');
   }
@@ -6160,6 +6206,14 @@ async function saveConfig(persist, persistEnv) {
       enabled: document.getElementById('cfg-emb-enabled').value === 'true',
       model: document.getElementById('cfg-emb-model').value,
       base_url: document.getElementById('cfg-emb-url').value,
+    };
+    candidate.reranker = {
+      enabled: document.getElementById('cfg-reranker-enabled').value === 'true',
+      model: document.getElementById('cfg-reranker-model').value,
+      base_url: document.getElementById('cfg-reranker-url').value,
+      timeout_seconds: floatValue('cfg-reranker-timeout', 12),
+      candidate_limit: numberValue('cfg-reranker-candidates', 20),
+      score_weight: floatValue('cfg-reranker-weight', 0.65),
     };
     candidate.persona = {
       enabled: document.getElementById('cfg-persona-enabled').value === 'true',
@@ -6248,6 +6302,7 @@ async function saveConfig(persist, persistEnv) {
   [
     'dehydration',
     'embedding',
+    'reranker',
     'persona',
     'dream',
     'gateway',
@@ -6276,6 +6331,11 @@ async function saveConfig(persist, persistEnv) {
   if (embKeyVal) {
     if (!body.embedding) body.embedding = {};
     body.embedding.api_key = embKeyVal;
+  }
+  var rerankerKeyVal = document.getElementById('cfg-reranker-key').value;
+  if (rerankerKeyVal) {
+    if (!body.reranker) body.reranker = {};
+    body.reranker.api_key = rerankerKeyVal;
   }
   var personaKeyVal = document.getElementById('cfg-persona-key').value;
   if (personaKeyVal) {

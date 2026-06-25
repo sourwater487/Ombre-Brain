@@ -6901,8 +6901,9 @@ async def hold(
     arousal: float = -1,
     title: str = "",
     date: str = "",
+    domain: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。title 可选，传了就用你给的标题，不传则自动生成。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；显式 domain 会覆盖自动领域；显式 valence/arousal 会覆盖自动情绪。title 可选，传了就用你给的标题，不传则自动生成。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -6911,6 +6912,7 @@ async def hold(
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
+    requested_domain = [d.strip() for d in str(domain or "").split(",") if d.strip()]
     raw_event_date = str(date or "").strip()
     event_date = _normalize_event_date_input(raw_event_date)
     if raw_event_date and not event_date:
@@ -6926,7 +6928,7 @@ async def hold(
             content=content,
             tags=whisper_tags,
             importance=5,
-            domain=[],
+            domain=requested_domain,
             valence=whisper_valence,
             arousal=whisper_arousal,
             name=None,
@@ -6985,7 +6987,7 @@ async def hold(
             "tags": [], "suggested_name": "",
         }
 
-    domain = analysis["domain"]
+    domain = requested_domain or analysis["domain"]
     valence = requested_valence if requested_valence is not None else analysis["valence"]
     arousal = requested_arousal if requested_arousal is not None else analysis["arousal"]
     auto_tags = analysis["tags"]
@@ -9541,7 +9543,9 @@ async def api_config_get(request):
             "model": getattr(reranker_engine, "model", reranker_cfg.get("model", "")),
             "base_url": getattr(reranker_engine, "base_url", reranker_cfg.get("base_url", "")),
             "api_key_masked": _mask_key(getattr(reranker_engine, "api_key", "") or reranker_cfg.get("api_key", "")),
+            "effective_base_url": getattr(reranker_engine, "base_url", ""),
             "api_ready": bool(getattr(reranker_engine, "api_key", "") or reranker_cfg.get("api_key", "")),
+            "has_own_api_key": bool(reranker_cfg.get("api_key", "")),
             "candidate_limit": getattr(reranker_engine, "candidate_limit", reranker_cfg.get("candidate_limit", 20)),
             "score_weight": getattr(reranker_engine, "score_weight", reranker_cfg.get("score_weight", 0.65)),
             "timeout_seconds": getattr(reranker_engine, "timeout", reranker_cfg.get("timeout_seconds", 12)),
@@ -10070,27 +10074,45 @@ async def api_config_update(request):
     if "reranker" in body and isinstance(body["reranker"], dict):
         r = body["reranker"]
         reranker_cfg = config.setdefault("reranker", {})
+        reranker_gateway_payload = {}
         if "enabled" in r:
             reranker_cfg["enabled"] = _bool_value(r["enabled"], True)
+            reranker_gateway_payload["enabled"] = reranker_cfg["enabled"]
+            os.environ["OMBRE_RERANKER_ENABLED"] = "true" if reranker_cfg["enabled"] else "false"
             updated.append("reranker.enabled")
         if "model" in r:
             reranker_cfg["model"] = str(r["model"] or "").strip()
+            reranker_gateway_payload["model"] = reranker_cfg["model"]
+            os.environ["OMBRE_RERANKER_MODEL"] = reranker_cfg["model"]
             updated.append("reranker.model")
         if "base_url" in r:
             reranker_cfg["base_url"] = str(r["base_url"] or "").strip()
+            reranker_gateway_payload["base_url"] = reranker_cfg["base_url"]
+            os.environ["OMBRE_RERANKER_BASE_URL"] = reranker_cfg["base_url"]
             updated.append("reranker.base_url")
         if "candidate_limit" in r:
             reranker_cfg["candidate_limit"] = _int_between(r["candidate_limit"], 15, 1, 100)
+            reranker_gateway_payload["candidate_limit"] = reranker_cfg["candidate_limit"]
             updated.append("reranker.candidate_limit")
         if "score_weight" in r:
             reranker_cfg["score_weight"] = _float_between(r["score_weight"], 0.65)
+            reranker_gateway_payload["score_weight"] = reranker_cfg["score_weight"]
             updated.append("reranker.score_weight")
         if "timeout_seconds" in r:
             reranker_cfg["timeout_seconds"] = _float_between(r["timeout_seconds"], 5, 1, 120)
+            reranker_gateway_payload["timeout_seconds"] = reranker_cfg["timeout_seconds"]
             updated.append("reranker.timeout_seconds")
+        if "api_key" in r and r["api_key"]:
+            reranker_cfg["api_key"] = str(r["api_key"])
+            os.environ["OMBRE_RERANKER_API_KEY"] = reranker_cfg["api_key"]
+            env_updates["OMBRE_RERANKER_API_KEY"] = reranker_cfg["api_key"]
+            reranker_gateway_payload["api_key"] = reranker_cfg["api_key"]
+            updated.append("reranker.api_key")
         reranker_engine = RerankerEngine(config)
         if _gateway_service is not None:
             _gateway_service.reranker_engine = reranker_engine
+        if reranker_gateway_payload:
+            gateway_hot_update_payload["reranker"] = reranker_gateway_payload
 
     # --- Memory diffusion config ---
     if "memory_diffusion" in body:
