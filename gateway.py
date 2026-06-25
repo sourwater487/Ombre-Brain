@@ -5182,7 +5182,8 @@ class GatewayService:
         all_buckets: list[dict],
     ) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
         all_buckets = [bucket for bucket in all_buckets if not is_self_anchor_bucket(bucket)]
-        signature = self._moment_graph_signature(all_buckets)
+        bucket_edges = self.memory_edge_store.list_edges()
+        signature = self._moment_graph_signature(all_buckets, bucket_edges)
         cached_signature = str(self._moment_graph_cache.get("signature") or "")
         if signature and signature == cached_signature:
             moments = list(self._moment_graph_cache.get("moments") or [])
@@ -5203,7 +5204,7 @@ class GatewayService:
         moments = self._recallable_moments(self.memory_moment_store.list_all())
         grouped = self._moments_by_bucket(moments)
         edges = self.memory_moment_store.list_edges()
-        edges.extend(self._bucket_edges_as_moment_edges(self.memory_edge_store.list_edges(), grouped))
+        edges.extend(self._bucket_edges_as_moment_edges(bucket_edges, grouped))
         self._moment_graph_cache = {
             "signature": signature,
             "moments": list(moments),
@@ -5220,7 +5221,11 @@ class GatewayService:
         )
         return moments, grouped, edges
 
-    def _moment_graph_signature(self, all_buckets: list[dict]) -> str:
+    def _moment_graph_signature(
+        self,
+        all_buckets: list[dict],
+        bucket_edges: list[dict] | None = None,
+    ) -> str:
         rows = []
         for bucket in all_buckets or []:
             if not isinstance(bucket, dict):
@@ -5254,7 +5259,39 @@ class GatewayService:
                 }
             )
         rows.sort(key=lambda item: item["id"])
-        payload = json.dumps(rows, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        edge_rows = []
+        for edge in bucket_edges or []:
+            if not isinstance(edge, dict):
+                continue
+            source = str(edge.get("source") or edge.get("source_memory_id") or "").strip()
+            target = str(edge.get("target") or edge.get("target_memory_id") or "").strip()
+            relation_type = str(edge.get("relation_type") or edge.get("type") or "").strip()
+            if not source or not target or not relation_type:
+                continue
+            edge_rows.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "relation_type": relation_type,
+                    "confidence": edge.get("confidence"),
+                    "reason": str(edge.get("reason") or ""),
+                }
+            )
+        edge_rows.sort(
+            key=lambda item: (
+                item["source"],
+                item["target"],
+                item["relation_type"],
+                str(item.get("confidence") or ""),
+                item["reason"],
+            )
+        )
+        payload = json.dumps(
+            {"buckets": rows, "edges": edge_rows},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _recallable_moments(self, moments: list[dict]) -> list[dict]:
@@ -9038,17 +9075,21 @@ class GatewayService:
         if not getattr(self.embedding_engine, "enabled", False):
             return {}
 
-        search = self.embedding_engine.search_similar(query, top_k=self.dynamic_top_k)
         try:
+            search = self.embedding_engine.search_similar(query, top_k=self.dynamic_top_k)
             if self.embedding_query_timeout_seconds > 0:
                 results = await asyncio.wait_for(search, timeout=self.embedding_query_timeout_seconds)
             else:
                 results = await search
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning(
-                "Embedding query timed out | timeout_seconds=%s",
+                "Gateway embedding semantic search timed out | query_chars=%s timeout_seconds=%.2f",
+                len(str(query or "")),
                 self.embedding_query_timeout_seconds,
             )
+            return {}
+        except Exception as exc:
+            logger.warning("Gateway embedding semantic search failed: %s", exc)
             return {}
         semantic_scores = {}
         for bucket_id, similarity in results:

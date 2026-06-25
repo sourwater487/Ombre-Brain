@@ -6126,7 +6126,11 @@ async function saveConfig(persist, persistEnv) {
     if (typeof left === 'number' && typeof right === 'number') return Math.abs(left - right) < 0.000001;
     return JSON.stringify(left) === JSON.stringify(right);
   }
-  function addChangedSection(target, sectionName, candidate) {
+  function addChangedSection(target, sectionName, candidate, force) {
+    if (force) {
+      target[sectionName] = candidate;
+      return;
+    }
     var original = (configSnapshot && configSnapshot[sectionName]) || {};
     var changed = {};
     Object.keys(candidate).forEach(function(key) {
@@ -6235,6 +6239,12 @@ async function saveConfig(persist, persistEnv) {
     persist: persist,
     persist_env: !!persistEnv,
   };
+  var forceSections = {};
+  if (activeTarget === 'memory-config') {
+    forceSections.gateway = true;
+    forceSections.recall = true;
+    forceSections.memory_diffusion = true;
+  }
   [
     'dehydration',
     'embedding',
@@ -6247,7 +6257,9 @@ async function saveConfig(persist, persistEnv) {
     'portrait',
     'self_anchor',
   ].forEach(function(sectionName) {
-    if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);
+    if (candidate[sectionName]) {
+      addChangedSection(body, sectionName, candidate[sectionName], !!forceSections[sectionName]);
+    }
   });
 
   var mergeVal = numberValue('cfg-merge', 75);
