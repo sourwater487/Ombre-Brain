@@ -9415,7 +9415,7 @@ async def api_config_get(request):
             "has_own_api_key": bool(emb.get("api_key", "")),
         },
         "gateway": {
-            "dynamic_top_k": gateway_cfg.get("dynamic_top_k", 10),
+            "dynamic_top_k": gateway_cfg.get("dynamic_top_k", 12),
             "inject_max_cards": gateway_cfg.get("inject_max_cards", 2),
             "cooldown_hours": gateway_cfg.get("cooldown_hours", 6),
             "cooldown_floor": gateway_cfg.get("cooldown_floor", 0.3),
@@ -9436,7 +9436,7 @@ async def api_config_get(request):
             "recalled_memory_interval_rounds": gateway_cfg.get("recalled_memory_interval_rounds", 1),
             "recall_selection_candidate_limit": _positive_int_or_default(
                 gateway_cfg.get("recall_selection_candidate_limit"),
-                25,
+                30,
             ),
             "related_memory_budget": gateway_cfg.get("related_memory_budget", 220),
             "related_memory_interval_rounds": gateway_cfg.get("related_memory_interval_rounds", 1),
@@ -9469,7 +9469,7 @@ async def api_config_get(request):
                 gateway_cfg.get("portrait_memory_include_anchors"),
                 True,
             ),
-            "query_planner_enabled": _bool_value(gateway_cfg.get("query_planner_enabled"), True),
+            "query_planner_enabled": _bool_value(gateway_cfg.get("query_planner_enabled"), False),
             "query_planner_model": gateway_cfg.get("query_planner_model", ""),
             "query_planner_min_chars": gateway_cfg.get("query_planner_min_chars", 16),
             "query_planner_max_queries": gateway_cfg.get("query_planner_max_queries", 3),
@@ -9762,7 +9762,7 @@ async def api_config_update(request):
         gateway_cfg = config.setdefault("gateway", {})
         gateway_hot_update_body = {}
         if "dynamic_top_k" in g:
-            gateway_cfg["dynamic_top_k"] = _int_between(g["dynamic_top_k"], 10, 1, 100)
+            gateway_cfg["dynamic_top_k"] = _int_between(g["dynamic_top_k"], 12, 1, 100)
             gateway_hot_update_body["dynamic_top_k"] = gateway_cfg["dynamic_top_k"]
             updated.append("gateway.dynamic_top_k")
         if "inject_max_cards" in g:
@@ -9858,7 +9858,7 @@ async def api_config_update(request):
         if "recall_selection_candidate_limit" in g:
             gateway_cfg["recall_selection_candidate_limit"] = _positive_int_or_default(
                 g["recall_selection_candidate_limit"],
-                25,
+                30,
             )
             gateway_hot_update_body["recall_selection_candidate_limit"] = gateway_cfg[
                 "recall_selection_candidate_limit"
@@ -9965,7 +9965,7 @@ async def api_config_update(request):
             ]
             updated.append("gateway.portrait_memory_include_anchors")
         if "query_planner_enabled" in g:
-            gateway_cfg["query_planner_enabled"] = _bool_value(g["query_planner_enabled"], True)
+            gateway_cfg["query_planner_enabled"] = _bool_value(g["query_planner_enabled"], False)
             gateway_hot_update_body["query_planner_enabled"] = gateway_cfg["query_planner_enabled"]
             updated.append("gateway.query_planner_enabled")
         if "query_planner_model" in g:
@@ -10270,7 +10270,7 @@ async def api_config_update(request):
             if "gateway" in body:
                 sc_gateway = save_config.setdefault("gateway", {})
                 if "dynamic_top_k" in body["gateway"]:
-                    sc_gateway["dynamic_top_k"] = _int_between(body["gateway"]["dynamic_top_k"], 10, 1, 100)
+                    sc_gateway["dynamic_top_k"] = _int_between(body["gateway"]["dynamic_top_k"], 12, 1, 100)
                 if "inject_max_cards" in body["gateway"]:
                     sc_gateway["inject_max_cards"] = _int_between(body["gateway"]["inject_max_cards"], 2, 0, 2)
                 if "cooldown_hours" in body["gateway"]:
@@ -10341,7 +10341,7 @@ async def api_config_update(request):
                 if "recall_selection_candidate_limit" in body["gateway"]:
                     sc_gateway["recall_selection_candidate_limit"] = _positive_int_or_default(
                         body["gateway"]["recall_selection_candidate_limit"],
-                        25,
+                        30,
                     )
                 if "recalled_memory_interval_rounds" in body["gateway"]:
                     sc_gateway["recalled_memory_interval_rounds"] = max(
@@ -10423,7 +10423,7 @@ async def api_config_update(request):
                 if "query_planner_enabled" in body["gateway"]:
                     sc_gateway["query_planner_enabled"] = _bool_value(
                         body["gateway"]["query_planner_enabled"],
-                        True,
+                        False,
                     )
                 if "query_planner_model" in body["gateway"]:
                     sc_gateway["query_planner_model"] = str(body["gateway"]["query_planner_model"] or "").strip()

@@ -62,7 +62,7 @@ from memory_layers import (
     moment_layer_debug,
     moment_runtime_gate_debug,
 )
-from recall_policy import RecallPolicy
+from recall_policy import QueryAnchorPlan, RecallPolicy
 from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
@@ -86,7 +86,7 @@ from word_map import WordMapStore
 
 logger = logging.getLogger("ombre_brain.gateway")
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
-DEFAULT_RECALL_SELECTION_CANDIDATE_LIMIT = 25
+DEFAULT_RECALL_SELECTION_CANDIDATE_LIMIT = 30
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
 QUERY_PLANNER_GENERIC_TERMS = {
     "recent",
@@ -125,6 +125,25 @@ EXPLICIT_MOMENT_ID_RE = re.compile(
     r"\[moment_id:(?P<bracket>[^\]\s]+)\]"
     r"|(?:moment_id|moment id|moment-id|片段id|片段ID)\s*[:=：]\s*(?P<plain>[A-Za-z0-9_.:-]+)",
     re.IGNORECASE,
+)
+EXACT_ANCHOR_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+EXACT_ANCHOR_QUOTED_RE = re.compile(r"[“\"'「『]([^”\"'」』]{2,64})[”\"'」』]")
+EXACT_ANCHOR_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.:-])"
+    r"(?:"
+    r"[A-Za-z]+[A-Za-z0-9_.:-]*\d[A-Za-z0-9_.:-]*"
+    r"|\d[A-Za-z0-9_.:-]*[A-Za-z][A-Za-z0-9_.:-]*"
+    r"|0\d{1,5}"
+    r"|(?<![年月日])\d{2,3}(?![年月日])"
+    r")"
+    r"(?![A-Za-z0-9_.:-])"
+)
+EXACT_ANCHOR_COMPOUND_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"[A-Za-z][A-Za-z0-9]+(?:[-_:./][A-Za-z0-9]+)+"
+    r"(?![A-Za-z0-9])"
 )
 QUERY_PLANNER_SYSTEM_PROMPT = """You are Ombre Memory Query Planner.
 Return only strict JSON. Do not write memory. Do not choose final memories.
@@ -274,7 +293,7 @@ class GatewayService:
             0,
             int(self.gateway_cfg.get("conversation_turns_max_entries", 500)),
         )
-        self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 10))
+        self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 12))
         self.inject_max_cards = max(0, min(2, int(self.gateway_cfg.get("inject_max_cards", 2))))
         self.skip_recent_rounds = max(0, int(self.gateway_cfg.get("skip_recent_rounds", 5)))
         self.cooldown_hours = float(self.gateway_cfg.get("cooldown_hours", 6))
@@ -7523,6 +7542,10 @@ class GatewayService:
                 "terms": [],
                 "neighbor_terms": [],
             },
+            "exact_anchor_hints": {
+                "bucket_ids": [],
+                "terms": [],
+            },
             "errors": [],
         }
 
@@ -7577,6 +7600,38 @@ class GatewayService:
             merged["query_planner_used"] = True
         merged["planner_queries_count"] = len(merged.get("queries") or [])
         return merged
+
+    def _query_anchor_plan(self, query: str) -> QueryAnchorPlan:
+        return self.recall_policy.build_query_anchor_plan(query)
+
+    @staticmethod
+    def _query_anchor_plan_debug(plan: QueryAnchorPlan) -> dict[str, Any]:
+        return {
+            "route": plan.route,
+            "focus_query": plan.focus_query,
+            "strong_terms": list(plan.strong_terms),
+            "weak_terms": list(plan.weak_terms),
+            "must_groups": [list(group) for group in plan.must_groups],
+            "allow_direct": plan.allow_direct,
+            "allow_diffusion_seed": plan.allow_diffusion_seed,
+            "debug": dict(plan.debug or {}),
+        }
+
+    def _anchor_plan_direct_rejection(
+        self,
+        node: dict,
+        plan: QueryAnchorPlan,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if not plan.has_direct_constraints:
+            return None
+        if self.recall_policy.direct_candidate_satisfies_anchor_plan(node, plan):
+            return None
+        reason = "anchor_direct_disallowed" if not plan.allow_direct else "anchor_must_group_missing"
+        return reason, {
+            "query_anchor_plan": self._query_anchor_plan_debug(plan),
+            "must_groups_matched": False,
+            "auto": True,
+        }
 
     def _query_planner_trigger_reason(
         self,
@@ -7806,6 +7861,218 @@ class GatewayService:
             terms.append(cleaned)
         return terms
 
+    def _extract_exact_anchor_terms(self, raw_query: str, normalized_query: str = "") -> list[str]:
+        terms: list[str] = []
+
+        def add(value: object) -> None:
+            cleaned = str(value or "").strip().strip("\"'`“”‘’「」『』")
+            cleaned = re.sub(r"\s+", " ", cleaned)
+            if not self._exact_anchor_term_allowed(cleaned):
+                return
+            key = self._compact_exact_anchor_text(cleaned)
+            if any(self._compact_exact_anchor_text(existing) == key for existing in terms):
+                return
+            terms.append(cleaned)
+
+        raw = str(raw_query or "").strip()
+        normalized = str(normalized_query or "").strip()
+        for text in (normalized, raw):
+            if not text:
+                continue
+            for match in EXACT_ANCHOR_UUID_RE.finditer(text):
+                add(match.group(0))
+            for match in EXACT_ANCHOR_QUOTED_RE.finditer(text):
+                add(match.group(1))
+            for match in EXACT_ANCHOR_CODE_RE.finditer(text):
+                add(match.group(0))
+            for match in EXACT_ANCHOR_COMPOUND_RE.finditer(text):
+                add(match.group(0))
+        add(self._clean_exact_anchor_phrase(raw))
+        return terms[:6]
+
+    @staticmethod
+    def _clean_exact_anchor_phrase(query: str) -> str:
+        text = str(query or "").strip()
+        text = re.sub(r"^(?:还记得|记不记得|记得|如果我说|假如我说|我说|提到|说起|讲到)\s*", "", text)
+        text = re.sub(r"\s*(?:吗|么|嘛|呀|啊|呢|吧|？|\?)+\s*$", "", text)
+        return text.strip()
+
+    def _exact_anchor_term_allowed(self, term: str) -> bool:
+        text = str(term or "").strip()
+        if not text:
+            return False
+        compact = self._compact_exact_anchor_text(text)
+        if len(compact) < 2 or len(compact) > 64:
+            return False
+        if self._is_exact_anchor_denied(compact):
+            return False
+        if EXACT_ANCHOR_UUID_RE.fullmatch(text):
+            return True
+        if EXACT_ANCHOR_CODE_RE.fullmatch(text):
+            return True
+        if EXACT_ANCHOR_COMPOUND_RE.fullmatch(text):
+            return True
+        question_markers = (
+            "为什么",
+            "怎么",
+            "为何",
+            "原因",
+            "相关",
+            "什么",
+            "啥",
+            "哪",
+            "哪里",
+            "哪个",
+            "哪段",
+            "哪次",
+            "谁",
+            "多少",
+            "几个",
+            "是否",
+            "是不是",
+            "有没有",
+        )
+        if re.fullmatch(r"[\u4e00-\u9fff]{3,18}", compact):
+            if any(marker in compact for marker in question_markers):
+                return False
+            return True
+        if (
+            3 <= len(compact) <= 48
+            and re.search(r"[\u4e00-\u9fff]", compact)
+            and re.search(r"[a-z0-9]", compact)
+        ):
+            if any(marker in compact for marker in question_markers):
+                return False
+            return True
+        return False
+
+    def _is_exact_anchor_denied(self, compact_term: str) -> bool:
+        key = str(compact_term or "").strip().lower()
+        if not key:
+            return True
+        deny_terms = set(QUERY_PLANNER_GENERIC_TERMS)
+        deny_terms.update(str(term or "") for term in getattr(self.relevance_options, "context_terms", []) or [])
+        for value in (
+            self.identity.get("ai_name"),
+            self.identity.get("user_name"),
+            self.identity.get("user_display_name"),
+        ):
+            if value:
+                deny_terms.add(str(value))
+        for value in self.identity.get("user_aliases") or []:
+            deny_terms.add(str(value))
+        compact_deny = {
+            self._compact_exact_anchor_text(term)
+            for term in deny_terms
+            if self._compact_exact_anchor_text(term)
+        }
+        return key in compact_deny
+
+    def _get_exact_anchor_candidates(
+        self,
+        raw_query: str,
+        normalized_query: str,
+        buckets: list[dict],
+    ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+        terms = self._extract_exact_anchor_terms(raw_query, normalized_query)
+        if not terms or not buckets:
+            return {}, {}
+
+        per_term: dict[str, list[tuple[str, float, str]]] = {term: [] for term in terms}
+        for bucket in buckets:
+            bucket_id = str(bucket.get("id") or "") if isinstance(bucket, dict) else ""
+            if not bucket_id:
+                continue
+            for term in terms:
+                score, field = self._bucket_exact_anchor_score(bucket, term)
+                if score > 0:
+                    per_term[term].append((bucket_id, score, field))
+
+        max_per_term = max(1, min(3, self.inject_max_cards + 1))
+        scores: dict[str, float] = {}
+        debug: dict[str, dict[str, Any]] = {}
+        for term in terms:
+            matches = sorted(per_term.get(term) or [], key=lambda item: (-item[1], item[0]))[:max_per_term]
+            for bucket_id, score, field in matches:
+                if score > scores.get(bucket_id, 0.0):
+                    scores[bucket_id] = score
+                bucket_debug = debug.setdefault(
+                    bucket_id,
+                    {
+                        "terms": [],
+                        "fields": [],
+                    },
+                )
+                if term not in bucket_debug["terms"]:
+                    bucket_debug["terms"].append(term)
+                if field not in bucket_debug["fields"]:
+                    bucket_debug["fields"].append(field)
+
+        ranked_ids = sorted(scores, key=lambda bucket_id: (-scores[bucket_id], bucket_id))
+        limit = max(self.dynamic_top_k, len(terms) * max_per_term)
+        kept_ids = set(ranked_ids[:limit])
+        return (
+            {bucket_id: round(scores[bucket_id], 4) for bucket_id in ranked_ids if bucket_id in kept_ids},
+            {bucket_id: debug[bucket_id] for bucket_id in ranked_ids if bucket_id in kept_ids},
+        )
+
+    def _bucket_exact_anchor_score(self, bucket: dict, term: str) -> tuple[float, str]:
+        anchor = self._compact_exact_anchor_text(term)
+        if not anchor:
+            return 0.0, ""
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        fields = (
+            ("id", bucket.get("id"), 1.0),
+            ("name", meta.get("name"), 0.98),
+            ("tags", " ".join(str(item) for item in meta.get("tags", []) or []), 0.96),
+            ("domain", " ".join(str(item) for item in meta.get("domain", []) or []), 0.90),
+            (
+                "content",
+                strip_display_temperature_sections(strip_wikilinks(str(bucket.get("content") or ""))),
+                0.88,
+            ),
+        )
+        best_score = 0.0
+        best_field = ""
+        for field, value, score in fields:
+            haystack = self._compact_exact_anchor_text(value)
+            if haystack and anchor in haystack and score > best_score:
+                best_score = score
+                best_field = field
+        return best_score, best_field
+
+    @staticmethod
+    def _compact_exact_anchor_text(value: object) -> str:
+        return re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            str(value or "").strip().lower(),
+        )
+
+    def _query_anchor_terms_for_diversity(self, query: str) -> list[str]:
+        terms = self._planner_lexical_match_terms(self.recall_policy.specific_query_terms(query))
+        output = []
+        seen = set()
+        for term in terms:
+            compact = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", term)
+            if len(compact) < 2 or len(compact) > 24:
+                continue
+            if re.search(r"[.。！？!?,，…]", term):
+                continue
+            key = compact.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(term)
+        return output[:6]
+
+    def _bucket_matched_query_terms(self, bucket: dict, terms: list[str]) -> list[str]:
+        return [
+            term
+            for term in terms
+            if self._bucket_matches_any_planner_term(bucket, [term])
+        ]
+
     def _bucket_matches_any_planner_term(self, bucket: dict, terms: list[str]) -> bool:
         if not terms:
             return True
@@ -7920,6 +8187,7 @@ class GatewayService:
         candidate_query = self._memory_search_query_text(search_query or query)
         keyword_scores = self._get_keyword_candidates(candidate_query, eligible)
         semantic_scores = await self._get_semantic_candidates(candidate_query, set(bucket_map))
+        exact_scores, exact_debug = self._get_exact_anchor_candidates(query, candidate_query, eligible)
         word_map_scores, word_map_debug = self._get_word_map_hint_scores(
             candidate_query,
             eligible,
@@ -7931,7 +8199,8 @@ class GatewayService:
             for bucket in eligible
             if lexical_terms and bucket.get("id") and self._bucket_matches_any_planner_term(bucket, lexical_terms)
         }
-        candidate_ids = set(keyword_scores) | set(semantic_scores) | lexical_ids | set(word_map_scores)
+        diversity_terms = self._query_anchor_terms_for_diversity(candidate_query or query)
+        candidate_ids = set(keyword_scores) | set(semantic_scores) | set(exact_scores) | lexical_ids | set(word_map_scores)
         if diagnostics is not None:
             diagnostics["raw_candidate_count"] = len(candidate_ids)
             diagnostics["bucket_candidates_raw_count"] = len(candidate_ids)
@@ -7958,13 +8227,25 @@ class GatewayService:
             importance_score = self._clamp(float(meta.get("importance", 5)) / 10.0)
             semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
+            exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
             word_map_score = self._clamp(word_map_scores.get(bucket_id, 0.0))
             lexical_match = bucket_id in lexical_ids
+            exact_match = bucket_id in exact_scores
             if lexical_match:
                 keyword_score = max(keyword_score, 1.0)
+            if exact_match:
+                keyword_score = max(keyword_score, exact_score)
             relevance_score = relevance_multiplier(query, self._bucket_relevance_node(bucket), self.relevance_options)
             if relevance_score <= 0:
                 continue
+            matched_query_terms = self._bucket_matched_query_terms(bucket, diversity_terms)
+            if exact_match:
+                matched_query_terms = list(
+                    dict.fromkeys(
+                        matched_query_terms
+                        + list((exact_debug.get(bucket_id) or {}).get("terms") or [])
+                    )
+                )
             base_score = (
                 semantic_score * self.semantic_weight
                 + keyword_score * self.keyword_weight
@@ -7987,7 +8268,7 @@ class GatewayService:
                     self.high_confidence_cooldown_floor,
                 )
             final_score = round(base_score * cooldown_multiplier, 4)
-            if lexical_match:
+            if lexical_match or exact_match:
                 first_threshold, _, _ = self._dynamic_card_thresholds(explicit_memory_recall)
                 final_score = max(final_score, first_threshold)
             scored_candidates.append(
@@ -7998,6 +8279,10 @@ class GatewayService:
                     "pre_rerank_score": final_score,
                     "semantic_score": semantic_score,
                     "keyword_score": keyword_score,
+                    "exact_anchor_score": exact_score,
+                    "exact_anchor_match": exact_match,
+                    "exact_anchor_terms": list((exact_debug.get(bucket_id) or {}).get("terms") or []),
+                    "exact_anchor_fields": list((exact_debug.get(bucket_id) or {}).get("fields") or []),
                     "word_map_score": word_map_score,
                     "word_map_hint": bucket_id in word_map_scores,
                     "word_map_terms": list((word_map_debug.get(bucket_id) or {}).get("direct_terms") or []),
@@ -8009,6 +8294,7 @@ class GatewayService:
                     "cooldown_multiplier": cooldown_multiplier,
                     "planner_lexical_match": lexical_match,
                     "planner_queries": [planner_query] if planner_query else [],
+                    "matched_query_terms": matched_query_terms,
                 }
             )
 
@@ -8019,6 +8305,7 @@ class GatewayService:
                 item["score"],
             )
         )
+        scored_candidates.sort(key=lambda item: 0 if item.get("exact_anchor_match") else 1)
         before_limit = len(scored_candidates)
         if diagnostics is not None:
             diagnostics["bucket_candidates_before_limit"] = before_limit
@@ -8171,6 +8458,7 @@ class GatewayService:
             for index, item in enumerate(suppressed_candidates[:5])
         ]
         self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
+        self._merge_exact_anchor_debug(planner_debug, active_pool + suppressed_candidates)
         before_cooldown_items = [
             {
                 **item,
@@ -8255,6 +8543,7 @@ class GatewayService:
                         supplemental_items.extend(admitted)
                         suppressed_candidates.extend(suppressed)
                         self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)
+                        self._merge_exact_anchor_debug(planner_debug, admitted + suppressed)
                         suppressed_must = [
                             self._format_suppressed_bucket_debug(item, query=short_query)
                             for item in suppressed
@@ -8452,6 +8741,10 @@ class GatewayService:
                 "combined_score": self._maybe_round(item.get("combined_score")),
                 "semantic_score": self._maybe_round(item.get("semantic_score")),
                 "keyword_score": self._maybe_round(item.get("keyword_score")),
+                "exact_anchor_score": self._maybe_round(item.get("exact_anchor_score")),
+                "exact_anchor_match": bool(item.get("exact_anchor_match")),
+                "exact_anchor_terms": list(item.get("exact_anchor_terms") or []),
+                "exact_anchor_fields": list(item.get("exact_anchor_fields") or []),
                 "rerank_score": self._maybe_round(item.get("rerank_score")),
                 "word_map_score": self._maybe_round(item.get("word_map_score")),
                 "importance_score": self._maybe_round(item.get("importance_score")),
@@ -8499,6 +8792,12 @@ class GatewayService:
             sample["score"] = self._maybe_round(item.get("score"))
         if item.get("semantic_score") is not None:
             sample["semantic_score"] = self._maybe_round(item.get("semantic_score"))
+        if item.get("exact_anchor_score") is not None:
+            sample["exact_anchor_score"] = self._maybe_round(item.get("exact_anchor_score"))
+        if item.get("exact_anchor_match"):
+            sample["exact_anchor_match"] = True
+            sample["exact_anchor_terms"] = list(item.get("exact_anchor_terms") or [])
+            sample["exact_anchor_fields"] = list(item.get("exact_anchor_fields") or [])
         if item.get("rerank_score") is not None:
             sample["rerank_score"] = self._maybe_round(item.get("rerank_score"))
         if item.get("lexical_overlap_score") is not None:
@@ -8532,6 +8831,8 @@ class GatewayService:
                 "has_topic_evidence",
                 "high_confidence_edge",
                 "base_reason",
+                "query_anchor_plan",
+                "must_groups_matched",
             ):
                 if key in policy_debug and policy_debug.get(key) not in (None, "", [], {}):
                     sample[key] = policy_debug.get(key)
@@ -8657,13 +8958,19 @@ class GatewayService:
         bucket = item.get("bucket") if isinstance(item, dict) else None
         if not isinstance(bucket, dict):
             return False
+        rejection = self._anchor_plan_direct_rejection(bucket, self._query_anchor_plan(query))
+        if rejection:
+            reason, debug = rejection
+            item["admission_reason"] = reason
+            item["recall_policy_debug"] = debug
+            return False
         decision = self.recall_policy.assess(
             query,
             self._bucket_relevance_node(bucket),
             has_topic_evidence=self._bucket_has_query_topic_evidence(query, bucket),
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
-            high_confidence_edge=bool(item.get("planner_lexical_match")),
+            high_confidence_edge=bool(item.get("planner_lexical_match") or item.get("exact_anchor_match")),
             auto=True,
         )
         item["admission_reason"] = decision.reason
@@ -8678,6 +8985,12 @@ class GatewayService:
         admitted_bucket_ids: set[str] | None = None,
     ) -> bool:
         bucket_id = str(moment.get("bucket_id") or "")
+        rejection = self._anchor_plan_direct_rejection(moment, self._query_anchor_plan(query))
+        if rejection:
+            reason, debug = rejection
+            moment["admission_reason"] = reason
+            moment["recall_policy_debug"] = debug
+            return False
         if admitted_bucket_ids and bucket_id in admitted_bucket_ids:
             moment["admission_reason"] = "admitted_bucket"
             return True
@@ -8812,6 +9125,41 @@ class GatewayService:
         incoming = self._word_map_hint_debug_from_items(items)
         current["enabled"] = bool(current.get("enabled") or incoming.get("enabled"))
         for key in ("bucket_ids", "terms", "neighbor_terms"):
+            values = current.setdefault(key, [])
+            for value in incoming.get(key) or []:
+                if value not in values:
+                    values.append(value)
+
+    @staticmethod
+    def _exact_anchor_debug_from_items(items: list[dict]) -> dict[str, Any]:
+        payload = {
+            "bucket_ids": [],
+            "terms": [],
+        }
+        for item in items or []:
+            if not isinstance(item, dict) or not item.get("exact_anchor_match"):
+                continue
+            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+            bucket_id = str(bucket.get("id") or "")
+            if bucket_id and bucket_id not in payload["bucket_ids"]:
+                payload["bucket_ids"].append(bucket_id)
+            for term in item.get("exact_anchor_terms") or []:
+                if term not in payload["terms"]:
+                    payload["terms"].append(term)
+        return payload
+
+    def _merge_exact_anchor_debug(self, target: dict[str, Any], items: list[dict]) -> None:
+        if not isinstance(target, dict):
+            return
+        current = target.setdefault(
+            "exact_anchor_hints",
+            {
+                "bucket_ids": [],
+                "terms": [],
+            },
+        )
+        incoming = self._exact_anchor_debug_from_items(items)
+        for key in ("bucket_ids", "terms"):
             values = current.setdefault(key, [])
             for value in incoming.get(key) or []:
                 if value not in values:

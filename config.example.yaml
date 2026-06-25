@@ -293,7 +293,7 @@ gateway:
   head_recent_hours: 72
   recent_context_reentry_idle_hours: 24
   recent_context_cooldown_hours: 6
-  dynamic_top_k: 10
+  dynamic_top_k: 12
   inject_max_cards: 2
   skip_recent_rounds: 5
   cooldown_hours: 12
@@ -318,12 +318,12 @@ gateway:
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: true # false = profile_fact only; never includes pinned/protected by default
-  query_planner_enabled: true  # explicit memory lookup only; passive recall uses one local query
+  query_planner_enabled: false # explicit memory lookup only; passive recall uses one local query
   query_planner_model: ""      # empty = gateway upstream_default_model
   query_planner_min_chars: 24
   query_planner_max_queries: 3
   query_planner_max_tokens: 360
-  recall_selection_candidate_limit: 25 # hard cap after scoring, before rerank/admission/debug
+  recall_selection_candidate_limit: 30 # hard cap after scoring, before rerank/admission/debug
   memory_detail_recall_enabled: false # optional internal [memory_detail ids="..."] retry for admitted bucket ids
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
