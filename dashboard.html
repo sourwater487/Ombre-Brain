@@ -3968,6 +3968,7 @@ function renderProfileFactCard(fact) {
         confirmButton +
         '<button type="button" onclick="editProfileFact(\'' + jsString(id) + '\')">编辑</button>' +
         '<button type="button" class="danger" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'deprecate\')">废弃</button>' +
+        '<button type="button" class="danger" onclick="deleteProfileFact(\'' + jsString(id) + '\')">删除</button>' +
         '<button type="button" onclick="showDetail(\'' + jsString(id) + '\')">打开</button>' +
       '</div>' +
     '</div>' +
@@ -3998,6 +3999,29 @@ async function runProfileFactAction(id, action, payload) {
     await loadBuckets();
   } catch (e) {
     alert('画像事实操作失败: ' + e.message);
+  }
+}
+
+async function deleteProfileFact(id) {
+  var fact = profileFactById(id);
+  if (!fact) return;
+  if (!confirm('彻底删除这条画像事实？\n\n' + (fact.fact || id))) return;
+  try {
+    var res = await authFetch(BASE + '/api/profile-facts/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ confirm: 'DELETE' })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '删除失败');
+    profileFacts = profileFacts.filter(function(item) {
+      return String(item.id || '') !== String(id || '');
+    });
+    renderProfileFacts();
+    await loadBuckets();
+  } catch (e) {
+    alert('画像事实删除失败: ' + e.message);
   }
 }
 

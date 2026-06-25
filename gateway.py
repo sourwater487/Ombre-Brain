@@ -418,6 +418,17 @@ class GatewayService:
         self.keyword_weight = float(self.gateway_cfg.get("keyword_weight", 0.35))
         self.importance_weight = float(self.gateway_cfg.get("importance_weight", 0.10))
         self.freshness_weight = float(self.gateway_cfg.get("freshness_weight", 0.10))
+        embedding_cfg = config.get("embedding", {}) if isinstance(config.get("embedding", {}), dict) else {}
+        try:
+            embedding_timeout = float(
+                self.gateway_cfg.get(
+                    "embedding_query_timeout_seconds",
+                    embedding_cfg.get("query_timeout_seconds", 3),
+                )
+            )
+        except (TypeError, ValueError):
+            embedding_timeout = 3.0
+        self.embedding_query_timeout_seconds = max(0.0, min(30.0, embedding_timeout))
         self.first_card_min_score = float(self.gateway_cfg.get("first_card_min_score", 0.55))
         self.second_card_min_score = float(self.gateway_cfg.get("second_card_min_score", 0.50))
         self.second_card_relative_score = float(
@@ -9027,7 +9038,18 @@ class GatewayService:
         if not getattr(self.embedding_engine, "enabled", False):
             return {}
 
-        results = await self.embedding_engine.search_similar(query, top_k=self.dynamic_top_k)
+        search = self.embedding_engine.search_similar(query, top_k=self.dynamic_top_k)
+        try:
+            if self.embedding_query_timeout_seconds > 0:
+                results = await asyncio.wait_for(search, timeout=self.embedding_query_timeout_seconds)
+            else:
+                results = await search
+        except TimeoutError:
+            logger.warning(
+                "Embedding query timed out | timeout_seconds=%s",
+                self.embedding_query_timeout_seconds,
+            )
+            return {}
         semantic_scores = {}
         for bucket_id, similarity in results:
             if bucket_id not in eligible_ids:

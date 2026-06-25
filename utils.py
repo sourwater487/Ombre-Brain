@@ -165,6 +165,7 @@ def load_config(config_path: str = None) -> dict:
             "base_url": "https://api.siliconflow.cn/v1",
             "api_key": "",
             "max_chars": 6000,
+            "query_timeout_seconds": 3,
             "query_instruction": "Given a memory search query, retrieve relevant long-term memory passages.",
             "document_instruction": "",
             "vector_index": {

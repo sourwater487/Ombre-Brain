@@ -130,6 +130,7 @@ embedding:
   model: "Qwen/Qwen3-Embedding-4B"  # Embedding model / 向量化模型
   base_url: "https://api.siliconflow.cn/v1"
   max_chars: 6000                 # Max chars sent per embedding request / 单次向量化最多字符数
+  query_timeout_seconds: 3         # Gateway semantic recall query timeout / Gateway 语义召回查询超时秒数
   query_instruction: "Given a memory search query, retrieve relevant long-term memory passages."
   document_instruction: ""
   vector_index:
