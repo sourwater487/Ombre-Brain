@@ -304,6 +304,9 @@ def load_config(config_path: str = None) -> dict:
             "high_confidence_keyword_score": 0.65,
             "high_confidence_cooldown_floor": 0.8,
         },
+        "self_anchor": {
+            "entry_bucket_id": "",
+        },
         "persona": {
             "enabled": True,
             "profile_id": "haven_xiaoyu",

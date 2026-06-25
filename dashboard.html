@@ -2825,6 +2825,11 @@
         <input type="number" id="cfg-portrait-first-limit" min="1" max="500" />
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">第一次画像初始化可适当调大；之后每天只看当天新增/更新的记忆材料</div>
+      <div class="config-row">
+        <label>自我入口</label>
+        <input type="text" id="cfg-self-anchor-entry" placeholder="bucket_id" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空时自动选择最高优先级的自我 anchor；指定后 handoff 与 Portrait 面板使用该 bucket</div>
     </div>
 
     <div class="config-section">
@@ -3139,8 +3144,21 @@ function getBucketDate(bucket) {
   return String(bucket.created || '').slice(0, 10);
 }
 
+function bucketTags(bucket) {
+  return (bucket && bucket.tags || []).map(function(tag) {
+    return String(tag || '').trim();
+  }).filter(Boolean);
+}
+
+function isSelfAnchorBucket(bucket) {
+  if (!bucket) return false;
+  if (bucket.self_anchor) return true;
+  var tags = bucketTags(bucket);
+  return tags.includes('自我') || tags.includes('self_anchor') || tags.includes('first_person_anchor');
+}
+
 function isDailyImpressionBucket(bucket) {
-  var tags = (bucket.tags || []).map(function(tag) { return String(tag); });
+  var tags = bucketTags(bucket);
   return bucket.type === 'feel'
     && tags.includes('relationship_weather')
     && tags.includes('daily_impression');
@@ -3420,6 +3438,7 @@ function renderPortraitState(data) {
     '<span class="profile-chip">state ' + esc(state.state_path || '—') + '</span>' +
   '</div>';
   content.innerHTML =
+    renderPortraitSelfAnchor(state.self_anchor_entry) +
     renderPortraitTimeline(state.recent_timeline, state.recent_activities) +
     '<div class="portrait-state-grid">' +
       renderPortraitScope('user', portrait.user || {}) +
@@ -3430,6 +3449,19 @@ function renderPortraitState(data) {
       renderPortraitCandidates('Stable Candidates', state.stable_candidates) +
       renderPortraitCandidates('Profile Fact Candidates', state.profile_fact_candidates) +
     '</div>';
+}
+
+function renderPortraitSelfAnchor(entry) {
+  var rows = entry && entry.bucket_id ? [{
+    text: entry.text || entry.name || entry.bucket_id || '',
+    scope: entry.configured ? '自我总入口' : '自我总入口 fallback',
+    updated_at: entry.updated_at || '',
+    evidence: [{ bucket_id: entry.bucket_id }]
+  }] : [];
+  return '<section class="portrait-scope portrait-self-anchor">' +
+    '<div class="portrait-layer-title">自我总入口</div>' +
+    renderPortraitRows(rows, '还没有自我总入口。') +
+  '</section>';
 }
 
 function renderPortraitScope(scope, scopeState) {
@@ -4186,6 +4218,7 @@ function buildFilters() {
     { key: 'digested', label: '🌿 已消化' },
     { key: 'archived', label: '📦 归档' },
   ];
+  if (allBuckets.some(isSelfAnchorBucket)) types.push({ key: 'tag:self_anchor', label: '自我' });
   filters.innerHTML = types.map(function(t) {
     return '<button class="filter-btn ' + (t.key === 'all' ? 'active' : '') + '" data-filter="' + escAttr(t.key) + '">' + esc(t.label) + '</button>';
   }).join('') + Array.from(domains).slice(0, 10).map(function(d) {
@@ -4210,6 +4243,7 @@ function filterBuckets(buckets) {
   if (currentFilter === 'unresolved') return buckets.filter(function(b) { return !b.resolved && b.type !== 'permanent' && !b.pinned; });
   if (currentFilter === 'digested') return buckets.filter(function(b) { return b.digested; });
   if (currentFilter === 'archived') return buckets.filter(function(b) { return b.type === 'archived' || b.score < 0.3; });
+  if (currentFilter === 'tag:self_anchor') return buckets.filter(isSelfAnchorBucket);
   if (currentFilter.startsWith('domain:')) {
     var d = currentFilter.slice(7);
     return buckets.filter(function(b) { return (b.domain || []).includes(d); });
@@ -6011,6 +6045,8 @@ async function loadConfig() {
       (cfg.portrait && cfg.portrait.material_limit) ?? 18;
     document.getElementById('cfg-portrait-first-limit').value =
       (cfg.portrait && cfg.portrait.first_run_material_limit) ?? 160;
+    document.getElementById('cfg-self-anchor-entry').value =
+      (cfg.self_anchor && cfg.self_anchor.entry_bucket_id) || '';
     document.getElementById('cfg-merge').value = cfg.merge_threshold ?? 75;
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + esc(cfg.transport) + '</strong><br>' +
@@ -6120,6 +6156,9 @@ async function saveConfig(persist, persistEnv) {
       material_limit: numberValue('cfg-portrait-material-limit', 18),
       first_run_material_limit: numberValue('cfg-portrait-first-limit', 160),
     };
+    candidate.self_anchor = {
+      entry_bucket_id: document.getElementById('cfg-self-anchor-entry').value.trim(),
+    };
   }
   if (activeTarget === 'memory-config') {
     candidate.gateway = {
@@ -6166,6 +6205,7 @@ async function saveConfig(persist, persistEnv) {
     'memory_diffusion',
     'reflection',
     'portrait',
+    'self_anchor',
   ].forEach(function(sectionName) {
     if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);
   });
