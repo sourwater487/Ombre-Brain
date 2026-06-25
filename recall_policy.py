@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from identity import identity_names
 from memory_relevance import (
     MemoryRelevanceOptions,
     content_terms_for_query,
@@ -12,6 +13,7 @@ from memory_relevance import (
     query_has_explicit_entity_marker,
     query_has_technical_recall_marker,
     recall_admission_decision,
+    recall_topic_query,
 )
 
 
@@ -68,6 +70,22 @@ WEAK_RECALL_TOPIC_TERMS = frozenset(
         "thing",
         "things",
         "topic",
+    }
+)
+GENERIC_RECALL_CONTEXT_TERMS = frozenset(
+    {
+        "ai_name",
+        "assistant",
+        "display_name",
+        "human_name",
+        "user",
+        "user_alias",
+        "user_aliases",
+        "user_display_name",
+        "user_name",
+        "username",
+        "对方",
+        "用户",
     }
 )
 OLD_OR_RESOLVED_QUERY_MARKERS = frozenset(
@@ -274,6 +292,9 @@ AFFECT_ONLY_QUERY_TERMS = frozenset(
         "崩溃",
         "累",
         "疲惫",
+        "哭",
+        "哭哭",
+        "大哭",
         "想哭",
         "不开心",
         "不高兴",
@@ -295,10 +316,12 @@ AFFECT_ONLY_QUERY_FILLERS = frozenset(
         "我",
         "你",
         "他",
+        "她",
         "它",
         "我们",
         "你们",
         "他们",
+        "她们",
         "今天",
         "昨天",
         "刚才",
@@ -336,6 +359,90 @@ AFFECT_ONLY_QUERY_FILLERS = frozenset(
         "little",
         "today",
         "now",
+    }
+)
+SHORT_CASUAL_ONLY_TERMS = frozenset(
+    {
+        "好耶",
+        "可恶",
+        "笑死",
+        "不玩了",
+        "不准",
+        "笨",
+        "笨笨",
+        "失败",
+        "成功",
+        "配好了",
+        "重来",
+        "太短",
+        "写一个",
+        "嘿嘿",
+    }
+)
+SHORT_TASTE_QUERY_TERMS = ("不好吃", "不好喝", "难吃", "难喝", "好吃", "好喝")
+TASTE_OBJECT_TERMS = frozenset(
+    {
+        "饭",
+        "菜",
+        "餐",
+        "食堂",
+        "店",
+        "馆",
+        "面",
+        "粉",
+        "丸",
+        "肉",
+        "汤",
+        "奶茶",
+        "咖啡",
+        "饮料",
+        "甜品",
+        "蛋糕",
+        "水果",
+        "口味",
+        "味道",
+        "瘦肉丸",
+    }
+)
+TASTE_METADATA_TERMS = frozenset({"饮食", "食物", "美食", "吃饭", "口味", "餐厅", "饭店", "午饭", "晚饭"})
+SHORT_CASUAL_FILLER_TERMS = frozenset(
+    {
+        "我",
+        "你",
+        "他",
+        "她",
+        "它",
+        "我们",
+        "你们",
+        "他们",
+        "她们",
+        "宝宝",
+        "宝贝",
+        "亲爱的",
+        "让",
+        "叫",
+        "把",
+        "给",
+        "这",
+        "那",
+        "这个",
+        "那个",
+        "一个",
+        "一下",
+        "端",
+        "chat",
+        "chat端",
+        "的",
+        "了",
+        "啦",
+        "呢",
+        "啊",
+        "呀",
+        "嘛",
+        "吗",
+        "吧",
+        "欸",
+        "诶",
     }
 )
 
@@ -390,10 +497,17 @@ class RecallPolicy:
         *,
         semantic_threshold: float = 0.72,
         rerank_threshold: float = 0.65,
+        ai_reaction_names: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.options = options or memory_relevance_options_from_config()
         self.semantic_threshold = _safe_float(semantic_threshold, 0.72)
         self.rerank_threshold = _safe_float(rerank_threshold, 0.65)
+        self.ai_reaction_names = self._normalize_reaction_names(
+            ai_reaction_names if ai_reaction_names is not None else [identity_names().get("ai_name")]
+        )
+        self.recall_context_terms = self._normalize_recall_context_terms(
+            [*self.options.context_terms, *GENERIC_RECALL_CONTEXT_TERMS]
+        )
 
     def requires_topic_evidence(self, query: str) -> bool:
         return query_has_explicit_entity_marker(query) or query_has_technical_recall_marker(query)
@@ -432,8 +546,16 @@ class RecallPolicy:
         text = str(query or "").strip()
         if not text:
             return False
+        if self._is_reaction_only_query(text):
+            return True
+        if self._is_probe_only_query(text):
+            return True
+        if self._is_short_casual_only_query(text):
+            return True
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
+        if self._is_affect_only_query(text):
+            return True
         if self._is_context_free_response_action_query(text):
             return True
         lowered = text.lower()
@@ -465,7 +587,8 @@ class RecallPolicy:
             "我",
             "你",
             "他",
-                "它",
+            "她",
+            "它",
             "这",
             "那",
             "什么",
@@ -491,7 +614,7 @@ class RecallPolicy:
             cleaned = re.sub(r"\s+", "", str(term or "").lower())
             if cleaned:
                 stripped = stripped.replace(cleaned, "")
-        stripped = re.sub(r"[我你它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+", "", stripped)
+        stripped = re.sub(r"[我你他她它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+", "", stripped)
         return len(stripped) >= 2
 
     def _is_context_free_response_action_query(self, query: str) -> bool:
@@ -510,11 +633,105 @@ class RecallPolicy:
             if cleaned:
                 stripped = stripped.replace(cleaned, "")
         stripped = re.sub(
-            r"[我你它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+",
+            r"[我你他她它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+",
             "",
             stripped,
         )
         return len(stripped) < 2
+
+    def _is_reaction_only_query(self, query: str) -> bool:
+        compact = re.sub(r"\s+", "", str(query or "").lower())
+        if not compact:
+            return False
+        alnum_or_cjk = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", compact)
+        if not alnum_or_cjk:
+            return True
+        reaction_terms = {
+            "tt",
+            "qwq",
+            "qaq",
+            "orz",
+            "xswl",
+            "lol",
+            "lmao",
+            "哈哈",
+            "哈哈哈",
+            "哈哈哈哈",
+            "嘿嘿",
+            "呜呜",
+            "呜呜呜",
+            "哇",
+            "哇啊",
+            "啊啊",
+            "啊啊啊",
+            "嗯嗯",
+            "嗯",
+            "宝宝",
+            "宝贝",
+            "亲爱的",
+        }
+        return alnum_or_cjk in reaction_terms or alnum_or_cjk in self.ai_reaction_names
+
+    @staticmethod
+    def _normalize_reaction_names(values: list[str] | tuple[str, ...] | None) -> set[str]:
+        names: set[str] = set()
+        for value in values or []:
+            compact = re.sub(r"\s+", "", str(value or "").lower())
+            key = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", compact)
+            if key:
+                names.add(key)
+        return names
+
+    @staticmethod
+    def _normalize_recall_context_terms(values) -> set[str]:
+        terms: set[str] = set()
+        for value in values or []:
+            key = re.sub(r"\s+", " ", str(value or "").strip().lower())
+            if key:
+                terms.add(key)
+            compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key)
+            if compact:
+                terms.add(compact)
+        return terms
+
+    def _is_recall_context_term(self, term: str) -> bool:
+        key = re.sub(r"\s+", " ", str(term or "").strip().lower())
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key)
+        return key in self.recall_context_terms or compact in self.recall_context_terms
+
+    def _is_probe_only_query(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        probe_markers = (
+            "试一下",
+            "试试",
+            "测试一下",
+            "测试",
+            "test",
+            "try",
+        )
+        if not any(marker in text for marker in probe_markers):
+            return False
+        recall_intent_markers = (
+            "记得",
+            "记忆",
+            "想起",
+            "回忆",
+            "召回",
+            "检索",
+            "查一下",
+            "找一下",
+            "为什么",
+            "原因",
+            "remember",
+            "recall",
+            "memory",
+            "search",
+            "look up",
+            "why",
+        )
+        return not any(marker in text for marker in recall_intent_markers)
 
     def _is_affect_only_query(self, query: str) -> bool:
         compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").lower())
@@ -527,9 +744,92 @@ class RecallPolicy:
             return False
         return stripped in AFFECT_ONLY_QUERY_TERMS
 
+    def _is_short_casual_only_query(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        if any(marker in text for marker in AUTO_VAGUE_RECALL_MARKERS):
+            return False
+        if query_has_technical_recall_marker(text):
+            return False
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+        if not compact or len(compact) > 24:
+            return False
+        compact = re.sub(r"\d{1,4}$", "", compact)
+        if not compact:
+            return False
+        if compact in SHORT_CASUAL_ONLY_TERMS:
+            return True
+        has_casual_signal = any(term in compact for term in SHORT_CASUAL_ONLY_TERMS)
+        if not has_casual_signal:
+            return False
+        stripped = compact
+        removable = (
+            SHORT_CASUAL_ONLY_TERMS
+            | SHORT_CASUAL_FILLER_TERMS
+            | AFFECT_ONLY_QUERY_FILLERS
+            | set(self.options.context_terms)
+        )
+        for term in sorted(removable, key=len, reverse=True):
+            cleaned = re.sub(r"\s+", "", str(term or "").lower())
+            if cleaned:
+                stripped = stripped.replace(cleaned, "")
+        return len(stripped) < 2
+
+    def _short_taste_query_terms(self, query: str) -> list[str]:
+        text = str(query or "").strip().lower()
+        if not text:
+            return []
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+        compact = re.sub(r"\d{1,4}$", "", compact)
+        if not compact or len(compact) > 12:
+            return []
+        stripped = compact
+        removable = SHORT_CASUAL_FILLER_TERMS | (AFFECT_ONLY_QUERY_FILLERS - {"好"}) | set(self.options.context_terms)
+        for term in sorted(removable, key=len, reverse=True):
+            cleaned = re.sub(r"\s+", "", str(term or "").lower())
+            if cleaned:
+                stripped = stripped.replace(cleaned, "")
+        return [term for term in SHORT_TASTE_QUERY_TERMS if stripped == term]
+
+    def _fields_have_taste_evidence(
+        self,
+        taste_terms: list[str],
+        fields: str,
+        metadata_text: str,
+    ) -> bool:
+        text = str(fields or "").lower()
+        meta = str(metadata_text or "").lower()
+        has_food_metadata = any(term in meta for term in TASTE_METADATA_TERMS | TASTE_OBJECT_TERMS)
+        for term in taste_terms:
+            if term == "好吃":
+                pattern = r"(?<!好)好吃"
+            elif term == "好喝":
+                pattern = r"(?<!好)好喝"
+            else:
+                pattern = re.escape(term)
+            for match in re.finditer(pattern, text):
+                start, end = match.span()
+                window = text[max(0, start - 18): min(len(text), end + 18)]
+                if "隔壁好吃" in window or "隔壁好喝" in window:
+                    continue
+                if has_food_metadata and any(obj in window for obj in TASTE_OBJECT_TERMS | TASTE_METADATA_TERMS):
+                    return True
+                if any(obj in window for obj in TASTE_OBJECT_TERMS):
+                    return True
+                if re.search(r"觉得.{1,16}" + pattern, window):
+                    return True
+        return False
+
     def specific_query_terms(self, query: str) -> list[str]:
         raw = str(query or "")
         terms = list(content_terms_for_query(raw, self.options))
+        topic_key = recall_topic_query(raw, self.options)
+        allow_single_cjk_terms = {
+            str(term or "").strip()
+            for term in content_terms_for_query(topic_key, self.options)
+            if re.fullmatch(r"[\u4e00-\u9fff]", str(term or "").strip())
+        }
         terms.extend(re.findall(r"\d+(?:\.\d+)+", raw))
         terms.extend(re.findall(r"[A-Za-z]+[A-Za-z0-9_.:-]*\d[A-Za-z0-9_.:-]*", raw))
         kept = []
@@ -543,9 +843,15 @@ class RecallPolicy:
                 continue
             if key in WEAK_RECALL_TOPIC_TERMS:
                 continue
+            if self._is_recall_context_term(cleaned):
+                continue
             if re.fullmatch(r"[a-z0-9_.:-]+", key) and len(key) < 3 and not re.fullmatch(r"\d+(?:\.\d+)+", key):
                 continue
-            if re.fullmatch(r"[\u4e00-\u9fff]+", cleaned) and len(cleaned) < 2:
+            if (
+                re.fullmatch(r"[\u4e00-\u9fff]+", cleaned)
+                and len(cleaned) < 2
+                and cleaned not in allow_single_cjk_terms
+            ):
                 continue
             if any(_term_subsumes(existing.lower(), key) for existing in kept):
                 continue
@@ -556,6 +862,7 @@ class RecallPolicy:
         return kept
 
     def moment_has_topic_evidence(self, query: str, moment: dict) -> bool:
+        taste_terms = self._short_taste_query_terms(query)
         terms = self.specific_query_terms(query)
         if not terms:
             return False
@@ -570,9 +877,19 @@ class RecallPolicy:
                 " ".join(str(item) for item in (meta.get("bucket_domain") or []) if str(item).strip()),
             ]
         ).lower()
+        if taste_terms:
+            metadata_text = " ".join(
+                [
+                    str(meta.get("bucket_name") or ""),
+                    " ".join(str(tag) for tag in (meta.get("bucket_tags") or []) if str(tag).strip()),
+                    " ".join(str(item) for item in (meta.get("bucket_domain") or []) if str(item).strip()),
+                ]
+            ).lower()
+            return self._fields_have_taste_evidence(taste_terms, fields, metadata_text)
         return any(term.lower() in fields for term in terms)
 
     def bucket_has_topic_evidence(self, query: str, bucket: dict) -> bool:
+        taste_terms = self._short_taste_query_terms(query)
         terms = self.specific_query_terms(query)
         if not terms:
             return False
@@ -587,6 +904,15 @@ class RecallPolicy:
                 " ".join(str(item) for item in (meta.get("domain") or []) if str(item).strip()),
             ]
         ).lower()
+        if taste_terms:
+            metadata_text = " ".join(
+                [
+                    str(meta.get("name") or ""),
+                    " ".join(str(tag) for tag in (meta.get("tags") or []) if str(tag).strip()),
+                    " ".join(str(item) for item in (meta.get("domain") or []) if str(item).strip()),
+                ]
+            ).lower()
+            return self._fields_have_taste_evidence(taste_terms, fields, metadata_text)
         return any(term.lower() in fields for term in terms)
 
     def node_has_topic_evidence(self, query: str, node: dict) -> bool:
@@ -715,6 +1041,7 @@ class RecallPolicy:
             "available_evidence_flags": available_evidence_flags,
             "missing_evidence_flags": missing_evidence_flags,
             "specific_query_terms": self.specific_query_terms(query),
+            "short_taste_query_terms": self._short_taste_query_terms(query),
             "semantic_score": semantic_value,
             "rerank_score": rerank_value,
             "high_confidence_edge": bool(high_confidence_edge),
@@ -770,6 +1097,23 @@ class RecallPolicy:
                 admit_diffused=False,
                 seed_allowed=False,
                 reason=base.reason,
+                suppressed=True,
+                debug=debug,
+            )
+
+        if (
+            debug["short_taste_query_terms"]
+            and not has_topic_evidence
+            and not self.has_strong_score(
+                semantic_score=semantic_score,
+                rerank_score=rerank_score,
+            )
+        ):
+            return RecallPolicyDecision(
+                admit_direct=False,
+                admit_diffused=False,
+                seed_allowed=False,
+                reason="short_taste_query_without_taste_evidence",
                 suppressed=True,
                 debug=debug,
             )

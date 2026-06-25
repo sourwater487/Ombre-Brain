@@ -431,6 +431,7 @@ class GatewayService:
             self.relevance_options,
             semantic_threshold=self.recall_admission_semantic_score,
             rerank_threshold=self.recall_admission_rerank_score,
+            ai_reaction_names=[self.identity.get("ai_name", "")],
         )
         self.query_planner_enabled = self._bool_config_value(
             self.gateway_cfg.get("query_planner_enabled"),
@@ -865,6 +866,7 @@ class GatewayService:
                 self.relevance_options,
                 semantic_threshold=self.recall_admission_semantic_score,
                 rerank_threshold=self.recall_admission_rerank_score,
+                ai_reaction_names=[self.identity.get("ai_name", "")],
             )
         if "edge_min_confidence" in payload:
             self.edge_min_confidence = self._clamp(float(payload["edge_min_confidence"]))
