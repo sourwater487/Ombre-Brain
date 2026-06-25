@@ -41,6 +41,7 @@ from memory_edges import MemoryEdgeStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
+    emotional_recall_plan,
     facets_for_node,
     facets_for_text,
     memory_relevance_options_from_config,
@@ -61,7 +62,7 @@ from memory_layers import (
     moment_layer_debug,
     moment_runtime_gate_debug,
 )
-from recall_policy import RecallPolicy
+from recall_policy import QueryAnchorPlan, RecallPolicy
 from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
@@ -69,11 +70,13 @@ from persona_event_selection import (
     select_persona_events,
 )
 from reranker_engine import RerankerEngine
+from self_anchor import is_self_anchor_bucket
 from source_refs import source_ref_window
 from utils import (
     count_tokens_approx,
     bucket_text_for_embedding,
     load_config,
+    parse_human_date_reference,
     setup_logging,
     strip_display_temperature_sections,
     strip_temperature_meaning_lines,
@@ -83,7 +86,7 @@ from word_map import WordMapStore
 
 logger = logging.getLogger("ombre_brain.gateway")
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
-DEFAULT_RECALL_SELECTION_CANDIDATE_LIMIT = 25
+DEFAULT_RECALL_SELECTION_CANDIDATE_LIMIT = 30
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
 QUERY_PLANNER_GENERIC_TERMS = {
     "recent",
@@ -122,6 +125,25 @@ EXPLICIT_MOMENT_ID_RE = re.compile(
     r"\[moment_id:(?P<bracket>[^\]\s]+)\]"
     r"|(?:moment_id|moment id|moment-id|片段id|片段ID)\s*[:=：]\s*(?P<plain>[A-Za-z0-9_.:-]+)",
     re.IGNORECASE,
+)
+EXACT_ANCHOR_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+EXACT_ANCHOR_QUOTED_RE = re.compile(r"[“\"'「『]([^”\"'」』]{2,64})[”\"'」』]")
+EXACT_ANCHOR_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.:-])"
+    r"(?:"
+    r"[A-Za-z]+[A-Za-z0-9_.:-]*\d[A-Za-z0-9_.:-]*"
+    r"|\d[A-Za-z0-9_.:-]*[A-Za-z][A-Za-z0-9_.:-]*"
+    r"|0\d{1,5}"
+    r"|(?<![年月日])\d{2,3}(?![年月日])"
+    r")"
+    r"(?![A-Za-z0-9_.:-])"
+)
+EXACT_ANCHOR_COMPOUND_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"[A-Za-z][A-Za-z0-9]+(?:[-_:./][A-Za-z0-9]+)+"
+    r"(?![A-Za-z0-9])"
 )
 QUERY_PLANNER_SYSTEM_PROMPT = """You are Ombre Memory Query Planner.
 Return only strict JSON. Do not write memory. Do not choose final memories.
@@ -271,7 +293,7 @@ class GatewayService:
             0,
             int(self.gateway_cfg.get("conversation_turns_max_entries", 500)),
         )
-        self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 10))
+        self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 12))
         self.inject_max_cards = max(0, min(2, int(self.gateway_cfg.get("inject_max_cards", 2))))
         self.skip_recent_rounds = max(0, int(self.gateway_cfg.get("skip_recent_rounds", 5)))
         self.cooldown_hours = float(self.gateway_cfg.get("cooldown_hours", 6))
@@ -396,6 +418,17 @@ class GatewayService:
         self.keyword_weight = float(self.gateway_cfg.get("keyword_weight", 0.35))
         self.importance_weight = float(self.gateway_cfg.get("importance_weight", 0.10))
         self.freshness_weight = float(self.gateway_cfg.get("freshness_weight", 0.10))
+        embedding_cfg = config.get("embedding", {}) if isinstance(config.get("embedding", {}), dict) else {}
+        try:
+            embedding_timeout = float(
+                self.gateway_cfg.get(
+                    "embedding_query_timeout_seconds",
+                    embedding_cfg.get("query_timeout_seconds", 3),
+                )
+            )
+        except (TypeError, ValueError):
+            embedding_timeout = 3.0
+        self.embedding_query_timeout_seconds = max(0.0, min(30.0, embedding_timeout))
         self.first_card_min_score = float(self.gateway_cfg.get("first_card_min_score", 0.55))
         self.second_card_min_score = float(self.gateway_cfg.get("second_card_min_score", 0.50))
         self.second_card_relative_score = float(
@@ -429,6 +462,7 @@ class GatewayService:
             self.relevance_options,
             semantic_threshold=self.recall_admission_semantic_score,
             rerank_threshold=self.recall_admission_rerank_score,
+            ai_reaction_names=[self.identity.get("ai_name", "")],
         )
         self.query_planner_enabled = self._bool_config_value(
             self.gateway_cfg.get("query_planner_enabled"),
@@ -646,6 +680,17 @@ class GatewayService:
             "chain_max_frontier": options.chain_max_frontier,
         }
 
+    def _reranker_config_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(getattr(self.reranker_engine, "enabled", False)),
+            "model": getattr(self.reranker_engine, "model", ""),
+            "base_url": getattr(self.reranker_engine, "base_url", ""),
+            "api_ready": bool(getattr(self.reranker_engine, "api_key", "")),
+            "timeout_seconds": getattr(self.reranker_engine, "timeout", 12),
+            "candidate_limit": getattr(self.reranker_engine, "candidate_limit", 20),
+            "score_weight": getattr(self.reranker_engine, "score_weight", 0.65),
+        }
+
     def _persona_config_payload(self) -> dict[str, Any]:
         return {
             "enabled": bool(getattr(self.persona_engine, "enabled", False)),
@@ -654,6 +699,7 @@ class GatewayService:
             "event_recording_enabled": bool(
                 getattr(self.persona_engine, "event_recording_enabled", True)
             ),
+            "evaluation_context_turns": getattr(self.persona_engine, "evaluation_context_turns", 3),
             "api_ready": bool(getattr(self.persona_engine, "api_key", "")),
         }
 
@@ -863,6 +909,7 @@ class GatewayService:
                 self.relevance_options,
                 semantic_threshold=self.recall_admission_semantic_score,
                 rerank_threshold=self.recall_admission_rerank_score,
+                ai_reaction_names=[self.identity.get("ai_name", "")],
             )
         if "edge_min_confidence" in payload:
             self.edge_min_confidence = self._clamp(float(payload["edge_min_confidence"]))
@@ -994,6 +1041,40 @@ class GatewayService:
             diffusion_cfg[key] = normalized[key]
         return [f"memory_diffusion.{key}" for key in requested]
 
+    def _apply_reranker_config(self, payload: dict[str, Any]) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        reranker_cfg = self.config.setdefault("reranker", {})
+        updated: list[str] = []
+        if "enabled" in payload:
+            reranker_cfg["enabled"] = self._bool_config_value(payload["enabled"], True)
+            os.environ["OMBRE_RERANKER_ENABLED"] = "true" if reranker_cfg["enabled"] else "false"
+            updated.append("reranker.enabled")
+        for key in ("model", "base_url"):
+            if key in payload:
+                reranker_cfg[key] = str(payload[key] or "").strip()
+                updated.append(f"reranker.{key}")
+        if "timeout_seconds" in payload:
+            reranker_cfg["timeout_seconds"] = max(1.0, min(120.0, float(payload["timeout_seconds"])))
+            updated.append("reranker.timeout_seconds")
+        if "candidate_limit" in payload:
+            reranker_cfg["candidate_limit"] = max(1, min(100, int(payload["candidate_limit"])))
+            updated.append("reranker.candidate_limit")
+        if "score_weight" in payload:
+            reranker_cfg["score_weight"] = self._clamp(float(payload["score_weight"]), 0.0, 1.0)
+            updated.append("reranker.score_weight")
+        if "api_key" in payload and payload["api_key"]:
+            reranker_cfg["api_key"] = str(payload["api_key"])
+            os.environ["OMBRE_RERANKER_API_KEY"] = reranker_cfg["api_key"]
+            updated.append("reranker.api_key")
+        if "base_url" in payload:
+            os.environ["OMBRE_RERANKER_BASE_URL"] = reranker_cfg.get("base_url", "")
+        if "model" in payload:
+            os.environ["OMBRE_RERANKER_MODEL"] = reranker_cfg.get("model", "")
+        if updated:
+            self.reranker_engine = RerankerEngine(self.config)
+        return updated
+
     def _apply_persona_config(self, payload: dict[str, Any]) -> list[str]:
         if not isinstance(payload, dict):
             return []
@@ -1005,6 +1086,16 @@ class GatewayService:
         if "event_recording_enabled" in payload:
             persona_cfg["event_recording_enabled"] = bool(payload["event_recording_enabled"])
             updated.append("persona.event_recording_enabled")
+        if "evaluation_context_turns" in payload:
+            try:
+                context_turns = int(payload["evaluation_context_turns"])
+            except (TypeError, ValueError):
+                context_turns = 3
+            persona_cfg["evaluation_context_turns"] = max(
+                0,
+                min(8, context_turns),
+            )
+            updated.append("persona.evaluation_context_turns")
         for key in ("model", "base_url"):
             if key in payload:
                 persona_cfg[key] = str(payload[key] or "").strip()
@@ -1062,6 +1153,7 @@ class GatewayService:
             return JSONResponse({
                 "gateway": self._gateway_memory_config_payload(),
                 "memory_diffusion": self._memory_diffusion_config_payload(),
+                "reranker": self._reranker_config_payload(),
                 "persona": self._persona_config_payload(),
                 "dream": self._dream_config_payload(),
             })
@@ -1075,14 +1167,23 @@ class GatewayService:
 
         gateway_payload = body.get("gateway")
         diffusion_payload = body.get("memory_diffusion")
+        reranker_payload = body.get("reranker")
         persona_payload = body.get("persona")
         dream_payload = body.get("dream")
-        if gateway_payload is None and diffusion_payload is None and persona_payload is None and dream_payload is None:
+        if (
+            gateway_payload is None
+            and diffusion_payload is None
+            and reranker_payload is None
+            and persona_payload is None
+            and dream_payload is None
+        ):
             gateway_payload = body
         if gateway_payload is not None and not isinstance(gateway_payload, dict):
             return JSONResponse({"error": "invalid gateway config"}, status_code=400)
         if diffusion_payload is not None and not isinstance(diffusion_payload, dict):
             return JSONResponse({"error": "invalid memory diffusion config"}, status_code=400)
+        if reranker_payload is not None and not isinstance(reranker_payload, dict):
+            return JSONResponse({"error": "invalid reranker config"}, status_code=400)
         if persona_payload is not None and not isinstance(persona_payload, dict):
             return JSONResponse({"error": "invalid persona config"}, status_code=400)
         if dream_payload is not None and not isinstance(dream_payload, dict):
@@ -1093,6 +1194,8 @@ class GatewayService:
             updated.extend(self._apply_gateway_memory_config(gateway_payload))
         if diffusion_payload is not None:
             updated.extend(self._apply_memory_diffusion_config(diffusion_payload))
+        if reranker_payload is not None:
+            updated.extend(self._apply_reranker_config(reranker_payload))
         if persona_payload is not None:
             updated.extend(self._apply_persona_config(persona_payload))
         if dream_payload is not None:
@@ -1102,6 +1205,7 @@ class GatewayService:
             "updated": updated,
             "gateway": self._gateway_memory_config_payload(),
             "memory_diffusion": self._memory_diffusion_config_payload(),
+            "reranker": self._reranker_config_payload(),
             "persona": self._persona_config_payload(),
             "dream": self._dream_config_payload(),
         })
@@ -1401,7 +1505,11 @@ class GatewayService:
             raise ValueError("model is required when gateway.upstream_default_model is empty")
         self._get_upstream_for_model(model)
 
-        all_buckets = await self.bucket_mgr.list_all(include_archive=False)
+        all_buckets = [
+            bucket
+            for bucket in await self.bucket_mgr.list_all(include_archive=False)
+            if not is_self_anchor_bucket(bucket)
+        ]
         current_user_query = self._extract_current_turn_user_query(messages)
         is_new_user_turn = bool(current_user_query)
         has_handoff_context = self._messages_contain_handoff_context(messages)
@@ -1472,6 +1580,10 @@ class GatewayService:
                 current_user_query,
                 session_id,
             )
+            low_signal_auto_recall = (
+                not is_explicit_memory_intent
+                and self._auto_recall_low_signal_query(current_user_query)
+            )
             allow_query_planner = bool(is_explicit_memory_intent)
             allow_passive_recall = bool(
                 not is_explicit_memory_intent
@@ -1480,6 +1592,7 @@ class GatewayService:
                 and not skip_for_targeted_detail
                 and not needs_handoff_first
                 and not just_now_context_requested
+                and not low_signal_auto_recall
             )
             passive_query = self._passive_recall_query(current_user_query) if allow_passive_recall else ""
             if allow_passive_recall and not passive_query:
@@ -1513,6 +1626,7 @@ class GatewayService:
             query_planner_debug["passive_query"] = passive_query
             query_planner_debug["explicit_memory_recall"] = explicit_memory_recall
             query_planner_debug["memory_control_plane_query"] = memory_control_plane_query
+            query_planner_debug["low_signal_auto_recall"] = low_signal_auto_recall
             query_planner_debug["long_input_without_memory_intent"] = long_input_without_memory_intent
             query_planner_debug["direct_recall_allowed"] = direct_recall_allowed
             query_planner_debug["related_recall_allowed"] = related_recall_allowed
@@ -1533,6 +1647,7 @@ class GatewayService:
                 or needs_handoff_first
                 or just_now_context_requested
                 or memory_control_plane_query
+                or low_signal_auto_recall
                 or (is_large_pasted_content and not is_explicit_memory_intent)
             )
             if needs_handoff_first:
@@ -1607,6 +1722,8 @@ class GatewayService:
                         )
                     elif just_now_context_requested:
                         query_planner_debug["skip_reason"] = "just_now_context"
+                    elif low_signal_auto_recall:
+                        query_planner_debug["skip_reason"] = "low_signal_auto_recall"
                     elif skip_for_targeted_detail:
                         query_planner_debug["skip_reason"] = "targeted_memory_detail_query"
                     elif not allow_dynamic_seed_search:
@@ -1751,6 +1868,12 @@ class GatewayService:
                     "just_now_context"
                     if just_now_context_requested and not needs_handoff_first
                     else ("handoff_trigger" if is_handoff_trigger_query else "session_start_handoff")
+                )
+            elif not self._query_requests_date_persona_trace(current_user_query):
+                date_persona_trace_debug["skip_reason"] = (
+                    "no_date_hint"
+                    if not self._query_date_hint(current_user_query)
+                    else "date_trace_not_requested"
                 )
             else:
                 date_persona_trace, date_persona_trace_debug = self._build_date_persona_trace_block(
@@ -2829,6 +2952,7 @@ class GatewayService:
             str(bucket.get("id") or ""): bucket
             for bucket in all_buckets
             if isinstance(bucket, dict) and bucket.get("id")
+            and not is_self_anchor_bucket(bucket)
         }
         moment_map: dict[str, dict[str, Any]] = {}
         moments_by_bucket: dict[str, list[dict[str, Any]]] = {}
@@ -3077,6 +3201,7 @@ class GatewayService:
             str(bucket.get("id") or ""): bucket
             for bucket in all_buckets
             if isinstance(bucket, dict) and bucket.get("id")
+            and not is_self_anchor_bucket(bucket)
         }
         requested = [bucket_id for bucket_id in bucket_ids if bucket_id]
         if not requested:
@@ -3170,6 +3295,11 @@ class GatewayService:
             )
             return
         tool_summary = self._summarize_assistant_tool_calls(assistant_message)
+        recent_conversation_turns = self._recent_persona_conversation_turns(
+            session_id,
+            user_message,
+            assistant_response,
+        )
         try:
             await self.persona_engine.update_from_exchange(
                 session_id=session_id,
@@ -3177,9 +3307,52 @@ class GatewayService:
                 assistant_response=assistant_response,
                 recalled_memory_ids=recalled_ids,
                 tool_summary=tool_summary,
+                recent_conversation_turns=recent_conversation_turns,
             )
         except Exception as exc:
             logger.warning("Persona post-reply update failed | session=%s error=%s", session_id, exc)
+
+    def _recent_persona_conversation_turns(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_response: str,
+    ) -> list[dict[str, Any]]:
+        try:
+            max_turns = int(getattr(self.persona_engine, "evaluation_context_turns", 3))
+        except (TypeError, ValueError):
+            max_turns = 3
+        max_turns = max(0, min(8, max_turns))
+        if max_turns <= 0:
+            return []
+
+        profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
+        turns = self.state_store.list_recent_conversation_turns(
+            profile_id=profile_id,
+            session_id=session_id,
+            limit=max_turns + 4,
+            hours=12,
+        )
+        current_user = self._clean_conversation_turn_text(user_message)
+        current_assistant = self._clean_conversation_turn_text(assistant_response)
+        selected: list[dict[str, Any]] = []
+        for turn in turns:
+            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""))
+            assistant_text = self._clean_conversation_turn_text(turn.get("assistant_text", ""))
+            if user_text == current_user and assistant_text == current_assistant:
+                continue
+            if not user_text and not assistant_text:
+                continue
+            selected.append(
+                {
+                    "created_at": turn.get("created_at", ""),
+                    "user_text": user_text,
+                    "assistant_text": assistant_text,
+                }
+            )
+            if len(selected) >= max_turns:
+                break
+        return list(reversed(selected))
 
     async def _finalize_stream_turn(
         self,
@@ -4297,7 +4470,8 @@ class GatewayService:
     async def _build_core_memory_block(self, all_buckets: list[dict]) -> str:
         core_buckets = [
             bucket for bucket in all_buckets
-            if bucket.get("metadata", {}).get("pinned") or bucket.get("metadata", {}).get("protected")
+            if not is_self_anchor_bucket(bucket)
+            and (bucket.get("metadata", {}).get("pinned") or bucket.get("metadata", {}).get("protected"))
         ]
         core_buckets.sort(
             key=lambda bucket: (
@@ -4398,6 +4572,8 @@ class GatewayService:
         return sources[: self.portrait_memory_max_sources]
 
     def _portrait_memory_source_role(self, bucket: dict) -> str:
+        if is_self_anchor_bucket(bucket):
+            return ""
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         if meta.get("pinned") or meta.get("protected"):
             return ""
@@ -4523,6 +4699,8 @@ class GatewayService:
         if self._query_requests_recent_context(query_text):
             return True
         if has_handoff_context:
+            return False
+        if self._auto_recall_low_signal_query(query_text):
             return False
         if self._auto_query_too_vague(query_text):
             return False
@@ -4711,30 +4889,7 @@ class GatewayService:
         text = str(query or "").strip()
         if not text:
             return None
-        now = datetime.now(self.gateway_tz)
-        explicit = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?", text)
-        if explicit:
-            year, month, day = (int(part) for part in explicit.groups())
-            try:
-                target = datetime(year, month, day, tzinfo=self.gateway_tz).date()
-            except ValueError:
-                return None
-            return {"date": target.isoformat(), "label": target.isoformat()}
-        relative_days = [
-            ("前天", -2),
-            ("昨晚", -1),
-            ("昨天", -1),
-            ("昨日", -1),
-        ]
-        for label, offset in relative_days:
-            if label in text:
-                return {
-                    "date": (now + timedelta(days=offset)).date().isoformat(),
-                    "label": label,
-                }
-        if "今天" in text and self._today_query_requests_date_trace(text):
-            return {"date": now.date().isoformat(), "label": "今天"}
-        return None
+        return parse_human_date_reference(text, now=datetime.now(self.gateway_tz), tz=self.gateway_tz)
 
     @staticmethod
     def _today_query_requests_date_trace(query: str) -> bool:
@@ -4753,6 +4908,38 @@ class GatewayService:
             "这次",
         )
         return any(marker in text for marker in detail_markers)
+
+    def _query_requests_date_persona_trace(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text or not self._query_date_hint(text):
+            return False
+        if self._query_requests_just_now_context(text):
+            return False
+        trace_markers = (
+            "记得",
+            "记不记得",
+            "还记得",
+            "想起",
+            "想起来",
+            "为什么",
+            "怎么说",
+            "怎么回事",
+            "怎么了",
+            "确认",
+            "当时",
+            "那次",
+            "这次",
+            "的事",
+            "什么事",
+            "发生",
+            "聊",
+            "说",
+            "提",
+            "讲",
+            "讨论",
+            "做了什么",
+        )
+        return any(marker in text for marker in trace_markers)
 
     def _build_date_persona_trace_block(
         self,
@@ -5122,7 +5309,9 @@ class GatewayService:
         self,
         all_buckets: list[dict],
     ) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
-        signature = self._moment_graph_signature(all_buckets)
+        all_buckets = [bucket for bucket in all_buckets if not is_self_anchor_bucket(bucket)]
+        bucket_edges = self.memory_edge_store.list_edges()
+        signature = self._moment_graph_signature(all_buckets, bucket_edges)
         cached_signature = str(self._moment_graph_cache.get("signature") or "")
         if signature and signature == cached_signature:
             moments = list(self._moment_graph_cache.get("moments") or [])
@@ -5143,7 +5332,7 @@ class GatewayService:
         moments = self._recallable_moments(self.memory_moment_store.list_all())
         grouped = self._moments_by_bucket(moments)
         edges = self.memory_moment_store.list_edges()
-        edges.extend(self._bucket_edges_as_moment_edges(self.memory_edge_store.list_edges(), grouped))
+        edges.extend(self._bucket_edges_as_moment_edges(bucket_edges, grouped))
         self._moment_graph_cache = {
             "signature": signature,
             "moments": list(moments),
@@ -5160,10 +5349,16 @@ class GatewayService:
         )
         return moments, grouped, edges
 
-    def _moment_graph_signature(self, all_buckets: list[dict]) -> str:
+    def _moment_graph_signature(
+        self,
+        all_buckets: list[dict],
+        bucket_edges: list[dict] | None = None,
+    ) -> str:
         rows = []
         for bucket in all_buckets or []:
             if not isinstance(bucket, dict):
+                continue
+            if is_self_anchor_bucket(bucket):
                 continue
             bucket_id = str(bucket.get("id") or "").strip()
             if not bucket_id:
@@ -5192,7 +5387,39 @@ class GatewayService:
                 }
             )
         rows.sort(key=lambda item: item["id"])
-        payload = json.dumps(rows, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        edge_rows = []
+        for edge in bucket_edges or []:
+            if not isinstance(edge, dict):
+                continue
+            source = str(edge.get("source") or edge.get("source_memory_id") or "").strip()
+            target = str(edge.get("target") or edge.get("target_memory_id") or "").strip()
+            relation_type = str(edge.get("relation_type") or edge.get("type") or "").strip()
+            if not source or not target or not relation_type:
+                continue
+            edge_rows.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "relation_type": relation_type,
+                    "confidence": edge.get("confidence"),
+                    "reason": str(edge.get("reason") or ""),
+                }
+            )
+        edge_rows.sort(
+            key=lambda item: (
+                item["source"],
+                item["target"],
+                item["relation_type"],
+                str(item.get("confidence") or ""),
+                item["reason"],
+            )
+        )
+        payload = json.dumps(
+            {"buckets": rows, "edges": edge_rows},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _recallable_moments(self, moments: list[dict]) -> list[dict]:
@@ -5243,6 +5470,8 @@ class GatewayService:
         )
 
     def _direct_moments_for_bucket(self, bucket: dict, query: str = "") -> list[dict]:
+        if is_self_anchor_bucket(bucket):
+            return []
         explicit_lookup = self._query_explicitly_requests_caution_memory(query)
         return [
             moment for moment in parse_bucket_moments(bucket, self.relevance_options)
@@ -6098,7 +6327,11 @@ class GatewayService:
             return ""
         remaining = budget
         parts = []
-        bucket_map = {str(bucket.get("id") or ""): bucket for bucket in all_buckets if bucket.get("id")}
+        bucket_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in all_buckets
+            if bucket.get("id") and not is_self_anchor_bucket(bucket)
+        }
         seen_buckets: set[str] = set()
         for index, moment in enumerate(moments):
             bucket_id = str(moment.get("bucket_id") or "")
@@ -6397,6 +6630,13 @@ class GatewayService:
         moment = moment or {}
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        event_date = self._date_yyyy_mm_dd(
+            meta.get("date")
+            or moment_meta.get("bucket_date")
+            or moment_meta.get("date")
+        )
+        if event_date:
+            return [f"[date:{event_date}]"]
         created = self._date_yyyy_mm_dd(
             meta.get("created")
             or moment_meta.get("bucket_created")
@@ -6767,6 +7007,43 @@ class GatewayService:
 
     def _auto_query_too_vague(self, query: str) -> bool:
         return self.recall_policy.is_auto_query_too_vague(query)
+
+    def _auto_recall_low_signal_query(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text:
+            return True
+        if self._query_requests_recent_context(text) or self._query_requests_just_now_context(text):
+            return False
+        if self._query_requests_date_persona_trace(text):
+            return False
+        if self._auto_query_too_vague(text):
+            return True
+        normalized = self._memory_search_query_text(text)
+        if self._extract_exact_anchor_terms(text, normalized):
+            return False
+        if self.recall_policy.requires_topic_evidence(text):
+            return False
+        if self._query_has_relevance_facet(text):
+            return False
+        if self.recall_policy.is_auto_concrete_topic_query(text):
+            return False
+
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text.lower())
+        if not compact:
+            return True
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", compact)
+        latin_words = re.findall(r"[a-z][a-z0-9_.:-]*", text.lower())
+        if not cjk_chars and latin_words and len(latin_words) <= 2 and len(compact) <= 16:
+            return True
+        if cjk_chars and len(cjk_chars) <= 4:
+            terms = [
+                term
+                for term in self._specific_query_terms(text)
+                if re.search(r"[\u4e00-\u9fffA-Za-z0-9]", str(term or ""))
+            ]
+            if not terms:
+                return True
+        return False
 
     def _recent_context_requires_topic_evidence(self, query: str) -> bool:
         return self._recall_query_plan(query).recent_context_requires_topic_evidence
@@ -7151,8 +7428,15 @@ class GatewayService:
             or self.diffusion_options.top_k <= 0
         ):
             return ""
+        recalled_buckets = [bucket for bucket in recalled_buckets if not is_self_anchor_bucket(bucket)]
+        if not recalled_buckets:
+            return ""
         recalled_ids = [bucket["id"] for bucket in recalled_buckets if bucket.get("id")]
-        bucket_map = {bucket["id"]: bucket for bucket in all_buckets}
+        bucket_map = {
+            bucket["id"]: bucket
+            for bucket in all_buckets
+            if bucket.get("id") and not is_self_anchor_bucket(bucket)
+        }
         recalled_set = set(recalled_ids)
         node_salience = None
         node_resonance = None
@@ -7471,6 +7755,10 @@ class GatewayService:
                 "terms": [],
                 "neighbor_terms": [],
             },
+            "exact_anchor_hints": {
+                "bucket_ids": [],
+                "terms": [],
+            },
             "errors": [],
         }
 
@@ -7526,6 +7814,38 @@ class GatewayService:
         merged["planner_queries_count"] = len(merged.get("queries") or [])
         return merged
 
+    def _query_anchor_plan(self, query: str) -> QueryAnchorPlan:
+        return self.recall_policy.build_query_anchor_plan(query)
+
+    @staticmethod
+    def _query_anchor_plan_debug(plan: QueryAnchorPlan) -> dict[str, Any]:
+        return {
+            "route": plan.route,
+            "focus_query": plan.focus_query,
+            "strong_terms": list(plan.strong_terms),
+            "weak_terms": list(plan.weak_terms),
+            "must_groups": [list(group) for group in plan.must_groups],
+            "allow_direct": plan.allow_direct,
+            "allow_diffusion_seed": plan.allow_diffusion_seed,
+            "debug": dict(plan.debug or {}),
+        }
+
+    def _anchor_plan_direct_rejection(
+        self,
+        node: dict,
+        plan: QueryAnchorPlan,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if not plan.has_direct_constraints:
+            return None
+        if self.recall_policy.direct_candidate_satisfies_anchor_plan(node, plan):
+            return None
+        reason = "anchor_direct_disallowed" if not plan.allow_direct else "anchor_must_group_missing"
+        return reason, {
+            "query_anchor_plan": self._query_anchor_plan_debug(plan),
+            "must_groups_matched": False,
+            "auto": True,
+        }
+
     def _query_planner_trigger_reason(
         self,
         query: str,
@@ -7552,60 +7872,53 @@ class GatewayService:
                 return "explicit_recall_empty_or_low_confidence"
         return ""
 
-    @staticmethod
-    def _query_looks_emotional_reason_lookup(query: str) -> bool:
-        text = str(query or "").strip().lower()
-        if not text:
-            return False
-        temporal_terms = (
-            "今天", "刚才", "刚刚", "这次", "现在", "今晚", "昨晚",
-            "today", "just now", "tonight",
-        )
-        reason_terms = (
-            "为什么", "知道", "记得", "想起", "想起来", "原因", "因为", "怎么",
-            "why", "know", "remember", "reason",
-        )
-        emotion_terms = (
-            "激动哭", "感动哭", "高兴哭", "开心哭", "难过哭", "委屈哭",
-            "哭了", "哭吗", "哭呢", "想哭", "激动", "感动", "难过", "委屈",
-            "崩溃", "破防",
-        )
-        has_temporal = any(term and term in text for term in temporal_terms)
-        has_reason = any(term and term in text for term in reason_terms)
-        has_emotion = any(term and term in text for term in emotion_terms)
-        return has_emotion and (has_temporal or has_reason)
+    def _query_looks_emotional_reason_lookup(self, query: str) -> bool:
+        return emotional_recall_plan(query, self.relevance_options).triggered
 
     def _emotional_reason_lookup_fallback_plan(self, query: str) -> dict[str, Any] | None:
-        terms = self._emotional_reason_lookup_terms(query)
+        plan = emotional_recall_plan(query, self.relevance_options)
+        if not plan.triggered:
+            return None
+        if plan.strong_terms:
+            terms = [plan.strong_terms[0]]
+        elif plan.event_terms and plan.weak_terms:
+            weak_keys = {str(term).strip() for term in plan.weak_terms}
+            event_term = next(
+                (
+                    term for term in plan.event_terms
+                    if not any(weak and weak in str(term) for weak in weak_keys)
+                ),
+                plan.event_terms[0],
+            )
+            terms = [event_term, plan.weak_terms[0]]
+        else:
+            terms = list(plan.search_terms[:2])
+        terms = [
+            str(term or "").strip()
+            for term in terms
+            if term
+        ]
         if not terms:
             return None
-        anchor = terms[0]
+        anchor = " ".join(terms[:3])
         return {
             "should_search": True,
             "too_vague": False,
             "queries": [
                 {
                     "query": anchor,
-                    "must_terms": [anchor],
+                    "must_terms": terms[:3],
                     "intent": "deterministic emotional reason lookup",
                     "risk": "medium",
                 }
             ],
         }
 
-    @staticmethod
-    def _emotional_reason_lookup_terms(query: str) -> list[str]:
-        text = str(query or "").strip().lower()
-        compound_terms = (
-            "激动哭", "感动哭", "高兴哭", "开心哭", "难过哭", "委屈哭",
-            "哭了", "想哭",
-        )
-        fallback_terms = ("激动", "感动", "难过", "委屈", "崩溃", "破防")
-        terms: list[str] = []
-        for term in compound_terms + fallback_terms:
-            if term in text and term not in terms:
-                terms.append(term)
-        return terms[:2]
+    def _emotional_reason_lookup_terms(self, query: str) -> list[str]:
+        plan = emotional_recall_plan(query, self.relevance_options)
+        if not plan.triggered:
+            return []
+        return list(plan.search_terms[:4])
 
     def _query_looks_multi_topic(self, query: str) -> bool:
         text = str(query or "").strip()
@@ -7761,6 +8074,218 @@ class GatewayService:
             terms.append(cleaned)
         return terms
 
+    def _extract_exact_anchor_terms(self, raw_query: str, normalized_query: str = "") -> list[str]:
+        terms: list[str] = []
+
+        def add(value: object) -> None:
+            cleaned = str(value or "").strip().strip("\"'`“”‘’「」『』")
+            cleaned = re.sub(r"\s+", " ", cleaned)
+            if not self._exact_anchor_term_allowed(cleaned):
+                return
+            key = self._compact_exact_anchor_text(cleaned)
+            if any(self._compact_exact_anchor_text(existing) == key for existing in terms):
+                return
+            terms.append(cleaned)
+
+        raw = str(raw_query or "").strip()
+        normalized = str(normalized_query or "").strip()
+        for text in (normalized, raw):
+            if not text:
+                continue
+            for match in EXACT_ANCHOR_UUID_RE.finditer(text):
+                add(match.group(0))
+            for match in EXACT_ANCHOR_QUOTED_RE.finditer(text):
+                add(match.group(1))
+            for match in EXACT_ANCHOR_CODE_RE.finditer(text):
+                add(match.group(0))
+            for match in EXACT_ANCHOR_COMPOUND_RE.finditer(text):
+                add(match.group(0))
+        add(self._clean_exact_anchor_phrase(raw))
+        return terms[:6]
+
+    @staticmethod
+    def _clean_exact_anchor_phrase(query: str) -> str:
+        text = str(query or "").strip()
+        text = re.sub(r"^(?:还记得|记不记得|记得|如果我说|假如我说|我说|提到|说起|讲到)\s*", "", text)
+        text = re.sub(r"\s*(?:吗|么|嘛|呀|啊|呢|吧|？|\?)+\s*$", "", text)
+        return text.strip()
+
+    def _exact_anchor_term_allowed(self, term: str) -> bool:
+        text = str(term or "").strip()
+        if not text:
+            return False
+        compact = self._compact_exact_anchor_text(text)
+        if len(compact) < 2 or len(compact) > 64:
+            return False
+        if self._is_exact_anchor_denied(compact):
+            return False
+        if EXACT_ANCHOR_UUID_RE.fullmatch(text):
+            return True
+        if EXACT_ANCHOR_CODE_RE.fullmatch(text):
+            return True
+        if EXACT_ANCHOR_COMPOUND_RE.fullmatch(text):
+            return True
+        question_markers = (
+            "为什么",
+            "怎么",
+            "为何",
+            "原因",
+            "相关",
+            "什么",
+            "啥",
+            "哪",
+            "哪里",
+            "哪个",
+            "哪段",
+            "哪次",
+            "谁",
+            "多少",
+            "几个",
+            "是否",
+            "是不是",
+            "有没有",
+        )
+        if re.fullmatch(r"[\u4e00-\u9fff]{3,18}", compact):
+            if any(marker in compact for marker in question_markers):
+                return False
+            return True
+        if (
+            3 <= len(compact) <= 48
+            and re.search(r"[\u4e00-\u9fff]", compact)
+            and re.search(r"[a-z0-9]", compact)
+        ):
+            if any(marker in compact for marker in question_markers):
+                return False
+            return True
+        return False
+
+    def _is_exact_anchor_denied(self, compact_term: str) -> bool:
+        key = str(compact_term or "").strip().lower()
+        if not key:
+            return True
+        deny_terms = set(QUERY_PLANNER_GENERIC_TERMS)
+        deny_terms.update(str(term or "") for term in getattr(self.relevance_options, "context_terms", []) or [])
+        for value in (
+            self.identity.get("ai_name"),
+            self.identity.get("user_name"),
+            self.identity.get("user_display_name"),
+        ):
+            if value:
+                deny_terms.add(str(value))
+        for value in self.identity.get("user_aliases") or []:
+            deny_terms.add(str(value))
+        compact_deny = {
+            self._compact_exact_anchor_text(term)
+            for term in deny_terms
+            if self._compact_exact_anchor_text(term)
+        }
+        return key in compact_deny
+
+    def _get_exact_anchor_candidates(
+        self,
+        raw_query: str,
+        normalized_query: str,
+        buckets: list[dict],
+    ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+        terms = self._extract_exact_anchor_terms(raw_query, normalized_query)
+        if not terms or not buckets:
+            return {}, {}
+
+        per_term: dict[str, list[tuple[str, float, str]]] = {term: [] for term in terms}
+        for bucket in buckets:
+            bucket_id = str(bucket.get("id") or "") if isinstance(bucket, dict) else ""
+            if not bucket_id:
+                continue
+            for term in terms:
+                score, field = self._bucket_exact_anchor_score(bucket, term)
+                if score > 0:
+                    per_term[term].append((bucket_id, score, field))
+
+        max_per_term = max(1, min(3, self.inject_max_cards + 1))
+        scores: dict[str, float] = {}
+        debug: dict[str, dict[str, Any]] = {}
+        for term in terms:
+            matches = sorted(per_term.get(term) or [], key=lambda item: (-item[1], item[0]))[:max_per_term]
+            for bucket_id, score, field in matches:
+                if score > scores.get(bucket_id, 0.0):
+                    scores[bucket_id] = score
+                bucket_debug = debug.setdefault(
+                    bucket_id,
+                    {
+                        "terms": [],
+                        "fields": [],
+                    },
+                )
+                if term not in bucket_debug["terms"]:
+                    bucket_debug["terms"].append(term)
+                if field not in bucket_debug["fields"]:
+                    bucket_debug["fields"].append(field)
+
+        ranked_ids = sorted(scores, key=lambda bucket_id: (-scores[bucket_id], bucket_id))
+        limit = max(self.dynamic_top_k, len(terms) * max_per_term)
+        kept_ids = set(ranked_ids[:limit])
+        return (
+            {bucket_id: round(scores[bucket_id], 4) for bucket_id in ranked_ids if bucket_id in kept_ids},
+            {bucket_id: debug[bucket_id] for bucket_id in ranked_ids if bucket_id in kept_ids},
+        )
+
+    def _bucket_exact_anchor_score(self, bucket: dict, term: str) -> tuple[float, str]:
+        anchor = self._compact_exact_anchor_text(term)
+        if not anchor:
+            return 0.0, ""
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        fields = (
+            ("id", bucket.get("id"), 1.0),
+            ("name", meta.get("name"), 0.98),
+            ("tags", " ".join(str(item) for item in meta.get("tags", []) or []), 0.96),
+            ("domain", " ".join(str(item) for item in meta.get("domain", []) or []), 0.90),
+            (
+                "content",
+                strip_display_temperature_sections(strip_wikilinks(str(bucket.get("content") or ""))),
+                0.88,
+            ),
+        )
+        best_score = 0.0
+        best_field = ""
+        for field, value, score in fields:
+            haystack = self._compact_exact_anchor_text(value)
+            if haystack and anchor in haystack and score > best_score:
+                best_score = score
+                best_field = field
+        return best_score, best_field
+
+    @staticmethod
+    def _compact_exact_anchor_text(value: object) -> str:
+        return re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            str(value or "").strip().lower(),
+        )
+
+    def _query_anchor_terms_for_diversity(self, query: str) -> list[str]:
+        terms = self._planner_lexical_match_terms(self.recall_policy.specific_query_terms(query))
+        output = []
+        seen = set()
+        for term in terms:
+            compact = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", term)
+            if len(compact) < 2 or len(compact) > 24:
+                continue
+            if re.search(r"[.。！？!?,，…]", term):
+                continue
+            key = compact.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(term)
+        return output[:6]
+
+    def _bucket_matched_query_terms(self, bucket: dict, terms: list[str]) -> list[str]:
+        return [
+            term
+            for term in terms
+            if self._bucket_matches_any_planner_term(bucket, [term])
+        ]
+
     def _bucket_matches_any_planner_term(self, bucket: dict, terms: list[str]) -> bool:
         if not terms:
             return True
@@ -7861,7 +8386,8 @@ class GatewayService:
         relevance_query = self._query_has_relevance_facet(query)
         eligible = [
             bucket for bucket in all_buckets
-            if (
+            if not is_self_anchor_bucket(bucket)
+            and (
                 self._is_dynamic_candidate(bucket)
                 and not self._is_relevance_suppressed(query, bucket)
             )
@@ -7874,6 +8400,7 @@ class GatewayService:
         candidate_query = self._memory_search_query_text(search_query or query)
         keyword_scores = self._get_keyword_candidates(candidate_query, eligible)
         semantic_scores = await self._get_semantic_candidates(candidate_query, set(bucket_map))
+        exact_scores, exact_debug = self._get_exact_anchor_candidates(query, candidate_query, eligible)
         word_map_scores, word_map_debug = self._get_word_map_hint_scores(
             candidate_query,
             eligible,
@@ -7885,7 +8412,8 @@ class GatewayService:
             for bucket in eligible
             if lexical_terms and bucket.get("id") and self._bucket_matches_any_planner_term(bucket, lexical_terms)
         }
-        candidate_ids = set(keyword_scores) | set(semantic_scores) | lexical_ids | set(word_map_scores)
+        diversity_terms = self._query_anchor_terms_for_diversity(candidate_query or query)
+        candidate_ids = set(keyword_scores) | set(semantic_scores) | set(exact_scores) | lexical_ids | set(word_map_scores)
         if diagnostics is not None:
             diagnostics["raw_candidate_count"] = len(candidate_ids)
             diagnostics["bucket_candidates_raw_count"] = len(candidate_ids)
@@ -7912,13 +8440,25 @@ class GatewayService:
             importance_score = self._clamp(float(meta.get("importance", 5)) / 10.0)
             semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
+            exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
             word_map_score = self._clamp(word_map_scores.get(bucket_id, 0.0))
             lexical_match = bucket_id in lexical_ids
+            exact_match = bucket_id in exact_scores
             if lexical_match:
                 keyword_score = max(keyword_score, 1.0)
+            if exact_match:
+                keyword_score = max(keyword_score, exact_score)
             relevance_score = relevance_multiplier(query, self._bucket_relevance_node(bucket), self.relevance_options)
             if relevance_score <= 0:
                 continue
+            matched_query_terms = self._bucket_matched_query_terms(bucket, diversity_terms)
+            if exact_match:
+                matched_query_terms = list(
+                    dict.fromkeys(
+                        matched_query_terms
+                        + list((exact_debug.get(bucket_id) or {}).get("terms") or [])
+                    )
+                )
             base_score = (
                 semantic_score * self.semantic_weight
                 + keyword_score * self.keyword_weight
@@ -7941,7 +8481,7 @@ class GatewayService:
                     self.high_confidence_cooldown_floor,
                 )
             final_score = round(base_score * cooldown_multiplier, 4)
-            if lexical_match:
+            if lexical_match or exact_match:
                 first_threshold, _, _ = self._dynamic_card_thresholds(explicit_memory_recall)
                 final_score = max(final_score, first_threshold)
             scored_candidates.append(
@@ -7952,6 +8492,10 @@ class GatewayService:
                     "pre_rerank_score": final_score,
                     "semantic_score": semantic_score,
                     "keyword_score": keyword_score,
+                    "exact_anchor_score": exact_score,
+                    "exact_anchor_match": exact_match,
+                    "exact_anchor_terms": list((exact_debug.get(bucket_id) or {}).get("terms") or []),
+                    "exact_anchor_fields": list((exact_debug.get(bucket_id) or {}).get("fields") or []),
                     "word_map_score": word_map_score,
                     "word_map_hint": bucket_id in word_map_scores,
                     "word_map_terms": list((word_map_debug.get(bucket_id) or {}).get("direct_terms") or []),
@@ -7963,6 +8507,7 @@ class GatewayService:
                     "cooldown_multiplier": cooldown_multiplier,
                     "planner_lexical_match": lexical_match,
                     "planner_queries": [planner_query] if planner_query else [],
+                    "matched_query_terms": matched_query_terms,
                 }
             )
 
@@ -7973,6 +8518,7 @@ class GatewayService:
                 item["score"],
             )
         )
+        scored_candidates.sort(key=lambda item: 0 if item.get("exact_anchor_match") else 1)
         before_limit = len(scored_candidates)
         if diagnostics is not None:
             diagnostics["bucket_candidates_before_limit"] = before_limit
@@ -8125,6 +8671,7 @@ class GatewayService:
             for index, item in enumerate(suppressed_candidates[:5])
         ]
         self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
+        self._merge_exact_anchor_debug(planner_debug, active_pool + suppressed_candidates)
         before_cooldown_items = [
             {
                 **item,
@@ -8209,6 +8756,7 @@ class GatewayService:
                         supplemental_items.extend(admitted)
                         suppressed_candidates.extend(suppressed)
                         self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)
+                        self._merge_exact_anchor_debug(planner_debug, admitted + suppressed)
                         suppressed_must = [
                             self._format_suppressed_bucket_debug(item, query=short_query)
                             for item in suppressed
@@ -8406,6 +8954,10 @@ class GatewayService:
                 "combined_score": self._maybe_round(item.get("combined_score")),
                 "semantic_score": self._maybe_round(item.get("semantic_score")),
                 "keyword_score": self._maybe_round(item.get("keyword_score")),
+                "exact_anchor_score": self._maybe_round(item.get("exact_anchor_score")),
+                "exact_anchor_match": bool(item.get("exact_anchor_match")),
+                "exact_anchor_terms": list(item.get("exact_anchor_terms") or []),
+                "exact_anchor_fields": list(item.get("exact_anchor_fields") or []),
                 "rerank_score": self._maybe_round(item.get("rerank_score")),
                 "word_map_score": self._maybe_round(item.get("word_map_score")),
                 "importance_score": self._maybe_round(item.get("importance_score")),
@@ -8453,6 +9005,12 @@ class GatewayService:
             sample["score"] = self._maybe_round(item.get("score"))
         if item.get("semantic_score") is not None:
             sample["semantic_score"] = self._maybe_round(item.get("semantic_score"))
+        if item.get("exact_anchor_score") is not None:
+            sample["exact_anchor_score"] = self._maybe_round(item.get("exact_anchor_score"))
+        if item.get("exact_anchor_match"):
+            sample["exact_anchor_match"] = True
+            sample["exact_anchor_terms"] = list(item.get("exact_anchor_terms") or [])
+            sample["exact_anchor_fields"] = list(item.get("exact_anchor_fields") or [])
         if item.get("rerank_score") is not None:
             sample["rerank_score"] = self._maybe_round(item.get("rerank_score"))
         if item.get("lexical_overlap_score") is not None:
@@ -8486,6 +9044,8 @@ class GatewayService:
                 "has_topic_evidence",
                 "high_confidence_edge",
                 "base_reason",
+                "query_anchor_plan",
+                "must_groups_matched",
             ):
                 if key in policy_debug and policy_debug.get(key) not in (None, "", [], {}):
                     sample[key] = policy_debug.get(key)
@@ -8611,13 +9171,19 @@ class GatewayService:
         bucket = item.get("bucket") if isinstance(item, dict) else None
         if not isinstance(bucket, dict):
             return False
+        rejection = self._anchor_plan_direct_rejection(bucket, self._query_anchor_plan(query))
+        if rejection:
+            reason, debug = rejection
+            item["admission_reason"] = reason
+            item["recall_policy_debug"] = debug
+            return False
         decision = self.recall_policy.assess(
             query,
             self._bucket_relevance_node(bucket),
             has_topic_evidence=self._bucket_has_query_topic_evidence(query, bucket),
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
-            high_confidence_edge=bool(item.get("planner_lexical_match")),
+            high_confidence_edge=bool(item.get("planner_lexical_match") or item.get("exact_anchor_match")),
             auto=True,
         )
         item["admission_reason"] = decision.reason
@@ -8632,6 +9198,12 @@ class GatewayService:
         admitted_bucket_ids: set[str] | None = None,
     ) -> bool:
         bucket_id = str(moment.get("bucket_id") or "")
+        rejection = self._anchor_plan_direct_rejection(moment, self._query_anchor_plan(query))
+        if rejection:
+            reason, debug = rejection
+            moment["admission_reason"] = reason
+            moment["recall_policy_debug"] = debug
+            return False
         if admitted_bucket_ids and bucket_id in admitted_bucket_ids:
             moment["admission_reason"] = "admitted_bucket"
             return True
@@ -8648,11 +9220,19 @@ class GatewayService:
         return decision.admit_direct
 
     def _get_keyword_candidates(self, query: str, buckets: list[dict]) -> dict[str, float]:
-        scored = []
-        for bucket in buckets:
-            keyword_score = self._clamp(self.bucket_mgr._calc_topic_score(query, bucket))
-            if keyword_score > 0:
-                scored.append((bucket["id"], keyword_score))
+        if hasattr(self.bucket_mgr, "calc_topic_scores"):
+            raw_scores = self.bucket_mgr.calc_topic_scores(query, buckets)
+            scored = [
+                (bucket_id, self._clamp(score))
+                for bucket_id, score in raw_scores.items()
+                if self._clamp(score) > 0
+            ]
+        else:
+            scored = []
+            for bucket in buckets:
+                keyword_score = self._clamp(self.bucket_mgr._calc_topic_score(query, bucket))
+                if keyword_score > 0:
+                    scored.append((bucket["id"], keyword_score))
         scored.sort(key=lambda item: item[1], reverse=True)
         return {bucket_id: score for bucket_id, score in scored[: self.dynamic_top_k]}
 
@@ -8660,7 +9240,22 @@ class GatewayService:
         if not getattr(self.embedding_engine, "enabled", False):
             return {}
 
-        results = await self.embedding_engine.search_similar(query, top_k=self.dynamic_top_k)
+        try:
+            search = self.embedding_engine.search_similar(query, top_k=self.dynamic_top_k)
+            if self.embedding_query_timeout_seconds > 0:
+                results = await asyncio.wait_for(search, timeout=self.embedding_query_timeout_seconds)
+            else:
+                results = await search
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Gateway embedding semantic search timed out | query_chars=%s timeout_seconds=%.2f",
+                len(str(query or "")),
+                self.embedding_query_timeout_seconds,
+            )
+            return {}
+        except Exception as exc:
+            logger.warning("Gateway embedding semantic search failed: %s", exc)
+            return {}
         semantic_scores = {}
         for bucket_id, similarity in results:
             if bucket_id not in eligible_ids:
@@ -8758,6 +9353,41 @@ class GatewayService:
         incoming = self._word_map_hint_debug_from_items(items)
         current["enabled"] = bool(current.get("enabled") or incoming.get("enabled"))
         for key in ("bucket_ids", "terms", "neighbor_terms"):
+            values = current.setdefault(key, [])
+            for value in incoming.get(key) or []:
+                if value not in values:
+                    values.append(value)
+
+    @staticmethod
+    def _exact_anchor_debug_from_items(items: list[dict]) -> dict[str, Any]:
+        payload = {
+            "bucket_ids": [],
+            "terms": [],
+        }
+        for item in items or []:
+            if not isinstance(item, dict) or not item.get("exact_anchor_match"):
+                continue
+            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+            bucket_id = str(bucket.get("id") or "")
+            if bucket_id and bucket_id not in payload["bucket_ids"]:
+                payload["bucket_ids"].append(bucket_id)
+            for term in item.get("exact_anchor_terms") or []:
+                if term not in payload["terms"]:
+                    payload["terms"].append(term)
+        return payload
+
+    def _merge_exact_anchor_debug(self, target: dict[str, Any], items: list[dict]) -> None:
+        if not isinstance(target, dict):
+            return
+        current = target.setdefault(
+            "exact_anchor_hints",
+            {
+                "bucket_ids": [],
+                "terms": [],
+            },
+        )
+        incoming = self._exact_anchor_debug_from_items(items)
+        for key in ("bucket_ids", "terms"):
             values = current.setdefault(key, [])
             for value in incoming.get(key) or []:
                 if value not in values:
@@ -9545,6 +10175,7 @@ class GatewayService:
             str(bucket.get("id") or ""): bucket
             for bucket in all_buckets
             if isinstance(bucket, dict) and bucket.get("id")
+            and not is_self_anchor_bucket(bucket)
         }
         return {
             "model": model,

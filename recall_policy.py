@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import product
 from typing import Any
 
+from identity import identity_names
 from memory_relevance import (
+    EMOTIONAL_RECALL_STATE_TERMS,
     MemoryRelevanceOptions,
     content_terms_for_query,
+    emotional_recall_plan,
     memory_relevance_options_from_config,
     query_has_facet,
     query_has_explicit_entity_marker,
     query_has_technical_recall_marker,
     recall_admission_decision,
+    recall_topic_query,
 )
 
 
@@ -68,6 +73,22 @@ WEAK_RECALL_TOPIC_TERMS = frozenset(
         "thing",
         "things",
         "topic",
+    }
+)
+GENERIC_RECALL_CONTEXT_TERMS = frozenset(
+    {
+        "ai_name",
+        "assistant",
+        "display_name",
+        "human_name",
+        "user",
+        "user_alias",
+        "user_aliases",
+        "user_display_name",
+        "user_name",
+        "username",
+        "对方",
+        "用户",
     }
 )
 OLD_OR_RESOLVED_QUERY_MARKERS = frozenset(
@@ -274,6 +295,9 @@ AFFECT_ONLY_QUERY_TERMS = frozenset(
         "崩溃",
         "累",
         "疲惫",
+        "哭",
+        "哭哭",
+        "大哭",
         "想哭",
         "不开心",
         "不高兴",
@@ -295,10 +319,12 @@ AFFECT_ONLY_QUERY_FILLERS = frozenset(
         "我",
         "你",
         "他",
+        "她",
         "它",
         "我们",
         "你们",
         "他们",
+        "她们",
         "今天",
         "昨天",
         "刚才",
@@ -336,6 +362,90 @@ AFFECT_ONLY_QUERY_FILLERS = frozenset(
         "little",
         "today",
         "now",
+    }
+)
+SHORT_CASUAL_ONLY_TERMS = frozenset(
+    {
+        "好耶",
+        "可恶",
+        "笑死",
+        "不玩了",
+        "不准",
+        "笨",
+        "笨笨",
+        "失败",
+        "成功",
+        "配好了",
+        "重来",
+        "太短",
+        "写一个",
+        "嘿嘿",
+    }
+)
+SHORT_TASTE_QUERY_TERMS = ("不好吃", "不好喝", "难吃", "难喝", "好吃", "好喝")
+TASTE_OBJECT_TERMS = frozenset(
+    {
+        "饭",
+        "菜",
+        "餐",
+        "食堂",
+        "店",
+        "馆",
+        "面",
+        "粉",
+        "丸",
+        "肉",
+        "汤",
+        "奶茶",
+        "咖啡",
+        "饮料",
+        "甜品",
+        "蛋糕",
+        "水果",
+        "口味",
+        "味道",
+        "瘦肉丸",
+    }
+)
+TASTE_METADATA_TERMS = frozenset({"饮食", "食物", "美食", "吃饭", "口味", "餐厅", "饭店", "午饭", "晚饭"})
+SHORT_CASUAL_FILLER_TERMS = frozenset(
+    {
+        "我",
+        "你",
+        "他",
+        "她",
+        "它",
+        "我们",
+        "你们",
+        "他们",
+        "她们",
+        "宝宝",
+        "宝贝",
+        "亲爱的",
+        "让",
+        "叫",
+        "把",
+        "给",
+        "这",
+        "那",
+        "这个",
+        "那个",
+        "一个",
+        "一下",
+        "端",
+        "chat",
+        "chat端",
+        "的",
+        "了",
+        "啦",
+        "呢",
+        "啊",
+        "呀",
+        "嘛",
+        "吗",
+        "吧",
+        "欸",
+        "诶",
     }
 )
 
@@ -383,6 +493,304 @@ class RecallQueryPlan:
         return not self.wants_body_chain
 
 
+@dataclass(frozen=True)
+class QueryAnchorPlan:
+    route: str
+    focus_query: str
+    strong_terms: tuple[str, ...] = ()
+    weak_terms: tuple[str, ...] = ()
+    must_groups: tuple[tuple[str, ...], ...] = ()
+    allow_direct: bool = True
+    allow_diffusion_seed: bool = True
+    debug: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_direct_constraints(self) -> bool:
+        return bool(self.must_groups) or not self.allow_direct
+
+
+ANCHOR_MUST_GROUP_MAX_SPAN = 24
+
+
+def build_query_anchor_plan(
+    query: str,
+    options: MemoryRelevanceOptions | None = None,
+) -> QueryAnchorPlan:
+    options = options or memory_relevance_options_from_config()
+    text = str(query or "").strip()
+    if not text:
+        return QueryAnchorPlan(
+            route="empty",
+            focus_query="",
+            allow_direct=False,
+            allow_diffusion_seed=False,
+            debug={"reason": "empty_query"},
+        )
+
+    if _is_affect_only_query_text(text):
+        return QueryAnchorPlan(
+            route="affect_only",
+            focus_query=text,
+            weak_terms=(_affect_only_residue(text),),
+            allow_direct=False,
+            allow_diffusion_seed=False,
+            debug={"reason": "affect_only"},
+        )
+
+    emotional_plan = emotional_recall_plan(text, options)
+    if emotional_plan.triggered:
+        must_groups = _emotional_must_groups(emotional_plan)
+        focus_terms = list(
+            dict.fromkeys(
+                [
+                    *emotional_plan.strong_terms,
+                    *emotional_plan.event_terms,
+                    *emotional_plan.weak_terms,
+                ]
+            )
+        )
+        return QueryAnchorPlan(
+            route="emotional_reason",
+            focus_query=" ".join(focus_terms) or text,
+            strong_terms=tuple(emotional_plan.strong_terms),
+            weak_terms=tuple(emotional_plan.weak_terms),
+            must_groups=must_groups,
+            allow_direct=bool(must_groups),
+            allow_diffusion_seed=bool(must_groups),
+            debug={
+                "reason": "emotional_recall_plan",
+                "event_terms": list(emotional_plan.event_terms),
+                "max_group_span": ANCHOR_MUST_GROUP_MAX_SPAN,
+            },
+        )
+
+    return QueryAnchorPlan(
+        route="topic_search",
+        focus_query=text,
+        debug={"reason": "default"},
+    )
+
+
+def direct_candidate_satisfies_anchor_plan(node: dict, plan: QueryAnchorPlan) -> bool:
+    if not plan.allow_direct:
+        return False
+    if not plan.must_groups:
+        return True
+    text = _candidate_anchor_text(node)
+    return any(
+        _anchor_group_matches(text, group)
+        or (
+            plan.route == "emotional_reason"
+            and _candidate_has_reason_context(node)
+            and _anchor_group_terms_present(text, group)
+        )
+        for group in plan.must_groups
+    )
+
+
+def _emotional_must_groups(emotional_plan: Any) -> tuple[tuple[str, ...], ...]:
+    groups: list[tuple[str, ...]] = []
+    weak_terms = tuple(
+        str(term or "").strip()
+        for term in emotional_plan.weak_terms
+        if str(term or "").strip()
+    )
+    event_terms = tuple(
+        str(term or "").strip()
+        for term in emotional_plan.event_terms
+        if str(term or "").strip()
+    )
+    state_terms = tuple(
+        str(term or "").strip()
+        for term in sorted(EMOTIONAL_RECALL_STATE_TERMS, key=len, reverse=True)
+        if str(term or "").strip()
+    )
+
+    for strong in emotional_plan.strong_terms:
+        strong_text = str(strong or "").strip()
+        if not strong_text:
+            continue
+        strong_key = _compact_anchor_term(strong_text)
+        pieces: list[str] = []
+        for term in weak_terms:
+            if _compact_anchor_term(term) in strong_key:
+                pieces.append(term)
+        for term in state_terms:
+            term_key = _compact_anchor_term(term)
+            if term_key and term_key in strong_key:
+                pieces.append(_canonical_anchor_state(term))
+        groups.append(_dedupe_group(pieces or [strong_text]))
+
+    event_anchor = _primary_emotional_event_term(event_terms)
+    if event_anchor and weak_terms:
+        groups.append(_dedupe_group([event_anchor, weak_terms[0]]))
+    elif not groups and weak_terms:
+        groups.append(_dedupe_group([weak_terms[0]]))
+
+    return tuple(dict.fromkeys(group for group in groups if group))
+
+
+def _primary_emotional_event_term(event_terms: tuple[str, ...]) -> str:
+    terms = [
+        str(term or "").strip()
+        for term in event_terms
+        if str(term or "").strip()
+    ]
+    if not terms:
+        return ""
+    keyed = [
+        (term, _compact_anchor_term(term))
+        for term in terms
+        if _compact_anchor_term(term)
+    ]
+    compact_terms = [key for _term, key in keyed]
+    candidates = [
+        term
+        for term, key in keyed
+        if not any(other != key and other in key for other in compact_terms)
+    ]
+    candidates = candidates or [term for term, _key in keyed]
+    return sorted(candidates, key=lambda item: (len(_compact_anchor_term(item)), len(item)))[0]
+
+
+def _candidate_anchor_text(node: dict) -> str:
+    if not isinstance(node, dict):
+        return ""
+    meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+    if "bucket_id" in node or node.get("moment_id"):
+        return " ".join(
+            [
+                str(node.get("text") or ""),
+                str(node.get("content") or ""),
+                str(meta.get("annotation_summary") or ""),
+                _evidence_spans_text(meta.get("evidence_spans")),
+                str(meta.get("bucket_name") or ""),
+                _join_terms(meta.get("bucket_tags")),
+                _join_terms(meta.get("bucket_domain")),
+            ]
+        )
+    return " ".join(
+        [
+            _content_without_context_only_sections(str(node.get("content") or "")),
+            str(node.get("text") or ""),
+            str(node.get("name") or ""),
+            str(meta.get("name") or ""),
+            str(meta.get("annotation_summary") or meta.get("summary") or ""),
+            _evidence_spans_text(meta.get("evidence_spans")),
+            _join_terms(meta.get("tags")),
+            _join_terms(meta.get("domain")),
+        ]
+    )
+
+
+def _anchor_group_matches(text: str, group: tuple[str, ...]) -> bool:
+    compact_text = _compact_anchor_term(text)
+    if not compact_text:
+        return False
+    positions_by_term = []
+    for term in group:
+        key = _compact_anchor_term(term)
+        if not key:
+            continue
+        positions = _anchor_term_positions(compact_text, key)
+        if not positions:
+            return False
+        positions_by_term.append(positions)
+    if len(positions_by_term) <= 1:
+        return bool(positions_by_term)
+    for spans in product(*positions_by_term):
+        start = min(span[0] for span in spans)
+        end = max(span[1] for span in spans)
+        if end - start <= ANCHOR_MUST_GROUP_MAX_SPAN:
+            return True
+    return False
+
+
+def _anchor_group_terms_present(text: str, group: tuple[str, ...]) -> bool:
+    compact_text = _compact_anchor_term(text)
+    if not compact_text:
+        return False
+    keys = [_compact_anchor_term(term) for term in group if _compact_anchor_term(term)]
+    return bool(keys) and all(key in compact_text for key in keys)
+
+
+def _candidate_has_reason_context(node: dict) -> bool:
+    if not isinstance(node, dict):
+        return False
+    meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+    tags = " ".join(str(item).lower() for item in (meta.get("tags") or meta.get("bucket_tags") or []))
+    section = str(node.get("section") or "").strip().lower()
+    text = " ".join(
+        [
+            str(node.get("content") or ""),
+            str(node.get("text") or ""),
+            str(meta.get("bucket_name") or ""),
+            str(meta.get("name") or ""),
+        ]
+    ).lower()
+    return (
+        section in {"reflection", "favorite_reason"}
+        or "favorite" in tags
+        or "### reflection" in text
+        or "favorite_reason" in text
+        or "favorite reason" in text
+        or "喜欢它的原因" in text
+        or "喜欢的原因" in text
+    )
+
+
+def _anchor_term_positions(text: str, term: str) -> list[tuple[int, int]]:
+    positions: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        index = text.find(term, start)
+        if index < 0:
+            break
+        positions.append((index, index + len(term)))
+        start = index + max(1, len(term))
+    return positions
+
+
+def _compact_anchor_term(value: object) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+
+
+def _canonical_anchor_state(term: str) -> str:
+    return "哭" if term in {"哭", "哭了"} else term
+
+
+def _dedupe_group(terms: list[str]) -> tuple[str, ...]:
+    output: list[str] = []
+    seen = set()
+    for term in terms:
+        cleaned = str(term or "").strip()
+        key = _compact_anchor_term(cleaned)
+        if not cleaned or not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(cleaned)
+    return tuple(output)
+
+
+def _join_terms(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(str(item) for item in value if str(item).strip())
+    return str(value or "")
+
+
+def _affect_only_residue(query: str) -> str:
+    compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").lower())
+    stripped = compact
+    for term in sorted(AFFECT_ONLY_QUERY_FILLERS, key=len, reverse=True):
+        stripped = stripped.replace(term, "")
+    return stripped
+
+
+def _is_affect_only_query_text(query: str) -> bool:
+    residue = _affect_only_residue(query)
+    return bool(residue and residue in AFFECT_ONLY_QUERY_TERMS)
+
+
 class RecallPolicy:
     def __init__(
         self,
@@ -390,10 +798,17 @@ class RecallPolicy:
         *,
         semantic_threshold: float = 0.72,
         rerank_threshold: float = 0.65,
+        ai_reaction_names: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.options = options or memory_relevance_options_from_config()
         self.semantic_threshold = _safe_float(semantic_threshold, 0.72)
         self.rerank_threshold = _safe_float(rerank_threshold, 0.65)
+        self.ai_reaction_names = self._normalize_reaction_names(
+            ai_reaction_names if ai_reaction_names is not None else [identity_names().get("ai_name")]
+        )
+        self.recall_context_terms = self._normalize_recall_context_terms(
+            [*self.options.context_terms, *GENERIC_RECALL_CONTEXT_TERMS]
+        )
 
     def requires_topic_evidence(self, query: str) -> bool:
         return query_has_explicit_entity_marker(query) or query_has_technical_recall_marker(query)
@@ -420,6 +835,12 @@ class RecallPolicy:
             specific_terms=tuple(self.specific_query_terms(text)),
         )
 
+    def build_query_anchor_plan(self, query: str) -> QueryAnchorPlan:
+        return build_query_anchor_plan(query, self.options)
+
+    def direct_candidate_satisfies_anchor_plan(self, node: dict, plan: QueryAnchorPlan) -> bool:
+        return direct_candidate_satisfies_anchor_plan(node, plan)
+
     def _query_explicitly_requests_old_memory(self, query: str) -> bool:
         if not str(query or "").strip():
             return False
@@ -432,8 +853,16 @@ class RecallPolicy:
         text = str(query or "").strip()
         if not text:
             return False
+        if self._is_reaction_only_query(text):
+            return True
+        if self._is_probe_only_query(text):
+            return True
+        if self._is_short_casual_only_query(text):
+            return True
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
+        if self._is_affect_only_query(text):
+            return True
         if self._is_context_free_response_action_query(text):
             return True
         lowered = text.lower()
@@ -465,7 +894,8 @@ class RecallPolicy:
             "我",
             "你",
             "他",
-                "它",
+            "她",
+            "它",
             "这",
             "那",
             "什么",
@@ -491,7 +921,7 @@ class RecallPolicy:
             cleaned = re.sub(r"\s+", "", str(term or "").lower())
             if cleaned:
                 stripped = stripped.replace(cleaned, "")
-        stripped = re.sub(r"[我你它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+", "", stripped)
+        stripped = re.sub(r"[我你他她它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+", "", stripped)
         return len(stripped) >= 2
 
     def _is_context_free_response_action_query(self, query: str) -> bool:
@@ -510,11 +940,105 @@ class RecallPolicy:
             if cleaned:
                 stripped = stripped.replace(cleaned, "")
         stripped = re.sub(
-            r"[我你它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+",
+            r"[我你他她它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+",
             "",
             stripped,
         )
         return len(stripped) < 2
+
+    def _is_reaction_only_query(self, query: str) -> bool:
+        compact = re.sub(r"\s+", "", str(query or "").lower())
+        if not compact:
+            return False
+        alnum_or_cjk = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", compact)
+        if not alnum_or_cjk:
+            return True
+        reaction_terms = {
+            "tt",
+            "qwq",
+            "qaq",
+            "orz",
+            "xswl",
+            "lol",
+            "lmao",
+            "哈哈",
+            "哈哈哈",
+            "哈哈哈哈",
+            "嘿嘿",
+            "呜呜",
+            "呜呜呜",
+            "哇",
+            "哇啊",
+            "啊啊",
+            "啊啊啊",
+            "嗯嗯",
+            "嗯",
+            "宝宝",
+            "宝贝",
+            "亲爱的",
+        }
+        return alnum_or_cjk in reaction_terms or alnum_or_cjk in self.ai_reaction_names
+
+    @staticmethod
+    def _normalize_reaction_names(values: list[str] | tuple[str, ...] | None) -> set[str]:
+        names: set[str] = set()
+        for value in values or []:
+            compact = re.sub(r"\s+", "", str(value or "").lower())
+            key = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", compact)
+            if key:
+                names.add(key)
+        return names
+
+    @staticmethod
+    def _normalize_recall_context_terms(values) -> set[str]:
+        terms: set[str] = set()
+        for value in values or []:
+            key = re.sub(r"\s+", " ", str(value or "").strip().lower())
+            if key:
+                terms.add(key)
+            compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key)
+            if compact:
+                terms.add(compact)
+        return terms
+
+    def _is_recall_context_term(self, term: str) -> bool:
+        key = re.sub(r"\s+", " ", str(term or "").strip().lower())
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key)
+        return key in self.recall_context_terms or compact in self.recall_context_terms
+
+    def _is_probe_only_query(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        probe_markers = (
+            "试一下",
+            "试试",
+            "测试一下",
+            "测试",
+            "test",
+            "try",
+        )
+        if not any(marker in text for marker in probe_markers):
+            return False
+        recall_intent_markers = (
+            "记得",
+            "记忆",
+            "想起",
+            "回忆",
+            "召回",
+            "检索",
+            "查一下",
+            "找一下",
+            "为什么",
+            "原因",
+            "remember",
+            "recall",
+            "memory",
+            "search",
+            "look up",
+            "why",
+        )
+        return not any(marker in text for marker in recall_intent_markers)
 
     def _is_affect_only_query(self, query: str) -> bool:
         compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").lower())
@@ -527,9 +1051,92 @@ class RecallPolicy:
             return False
         return stripped in AFFECT_ONLY_QUERY_TERMS
 
+    def _is_short_casual_only_query(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        if any(marker in text for marker in AUTO_VAGUE_RECALL_MARKERS):
+            return False
+        if query_has_technical_recall_marker(text):
+            return False
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+        if not compact or len(compact) > 24:
+            return False
+        compact = re.sub(r"\d{1,4}$", "", compact)
+        if not compact:
+            return False
+        if compact in SHORT_CASUAL_ONLY_TERMS:
+            return True
+        has_casual_signal = any(term in compact for term in SHORT_CASUAL_ONLY_TERMS)
+        if not has_casual_signal:
+            return False
+        stripped = compact
+        removable = (
+            SHORT_CASUAL_ONLY_TERMS
+            | SHORT_CASUAL_FILLER_TERMS
+            | AFFECT_ONLY_QUERY_FILLERS
+            | set(self.options.context_terms)
+        )
+        for term in sorted(removable, key=len, reverse=True):
+            cleaned = re.sub(r"\s+", "", str(term or "").lower())
+            if cleaned:
+                stripped = stripped.replace(cleaned, "")
+        return len(stripped) < 2
+
+    def _short_taste_query_terms(self, query: str) -> list[str]:
+        text = str(query or "").strip().lower()
+        if not text:
+            return []
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+        compact = re.sub(r"\d{1,4}$", "", compact)
+        if not compact or len(compact) > 12:
+            return []
+        stripped = compact
+        removable = SHORT_CASUAL_FILLER_TERMS | (AFFECT_ONLY_QUERY_FILLERS - {"好"}) | set(self.options.context_terms)
+        for term in sorted(removable, key=len, reverse=True):
+            cleaned = re.sub(r"\s+", "", str(term or "").lower())
+            if cleaned:
+                stripped = stripped.replace(cleaned, "")
+        return [term for term in SHORT_TASTE_QUERY_TERMS if stripped == term]
+
+    def _fields_have_taste_evidence(
+        self,
+        taste_terms: list[str],
+        fields: str,
+        metadata_text: str,
+    ) -> bool:
+        text = str(fields or "").lower()
+        meta = str(metadata_text or "").lower()
+        has_food_metadata = any(term in meta for term in TASTE_METADATA_TERMS | TASTE_OBJECT_TERMS)
+        for term in taste_terms:
+            if term == "好吃":
+                pattern = r"(?<!好)好吃"
+            elif term == "好喝":
+                pattern = r"(?<!好)好喝"
+            else:
+                pattern = re.escape(term)
+            for match in re.finditer(pattern, text):
+                start, end = match.span()
+                window = text[max(0, start - 18): min(len(text), end + 18)]
+                if "隔壁好吃" in window or "隔壁好喝" in window:
+                    continue
+                if has_food_metadata and any(obj in window for obj in TASTE_OBJECT_TERMS | TASTE_METADATA_TERMS):
+                    return True
+                if any(obj in window for obj in TASTE_OBJECT_TERMS):
+                    return True
+                if re.search(r"觉得.{1,16}" + pattern, window):
+                    return True
+        return False
+
     def specific_query_terms(self, query: str) -> list[str]:
         raw = str(query or "")
         terms = list(content_terms_for_query(raw, self.options))
+        topic_key = recall_topic_query(raw, self.options)
+        allow_single_cjk_terms = {
+            str(term or "").strip()
+            for term in content_terms_for_query(topic_key, self.options)
+            if re.fullmatch(r"[\u4e00-\u9fff]", str(term or "").strip())
+        }
         terms.extend(re.findall(r"\d+(?:\.\d+)+", raw))
         terms.extend(re.findall(r"[A-Za-z]+[A-Za-z0-9_.:-]*\d[A-Za-z0-9_.:-]*", raw))
         kept = []
@@ -543,9 +1150,15 @@ class RecallPolicy:
                 continue
             if key in WEAK_RECALL_TOPIC_TERMS:
                 continue
+            if self._is_recall_context_term(cleaned):
+                continue
             if re.fullmatch(r"[a-z0-9_.:-]+", key) and len(key) < 3 and not re.fullmatch(r"\d+(?:\.\d+)+", key):
                 continue
-            if re.fullmatch(r"[\u4e00-\u9fff]+", cleaned) and len(cleaned) < 2:
+            if (
+                re.fullmatch(r"[\u4e00-\u9fff]+", cleaned)
+                and len(cleaned) < 2
+                and cleaned not in allow_single_cjk_terms
+            ):
                 continue
             if any(_term_subsumes(existing.lower(), key) for existing in kept):
                 continue
@@ -556,6 +1169,7 @@ class RecallPolicy:
         return kept
 
     def moment_has_topic_evidence(self, query: str, moment: dict) -> bool:
+        taste_terms = self._short_taste_query_terms(query)
         terms = self.specific_query_terms(query)
         if not terms:
             return False
@@ -570,9 +1184,19 @@ class RecallPolicy:
                 " ".join(str(item) for item in (meta.get("bucket_domain") or []) if str(item).strip()),
             ]
         ).lower()
+        if taste_terms:
+            metadata_text = " ".join(
+                [
+                    str(meta.get("bucket_name") or ""),
+                    " ".join(str(tag) for tag in (meta.get("bucket_tags") or []) if str(tag).strip()),
+                    " ".join(str(item) for item in (meta.get("bucket_domain") or []) if str(item).strip()),
+                ]
+            ).lower()
+            return self._fields_have_taste_evidence(taste_terms, fields, metadata_text)
         return any(term.lower() in fields for term in terms)
 
     def bucket_has_topic_evidence(self, query: str, bucket: dict) -> bool:
+        taste_terms = self._short_taste_query_terms(query)
         terms = self.specific_query_terms(query)
         if not terms:
             return False
@@ -587,6 +1211,15 @@ class RecallPolicy:
                 " ".join(str(item) for item in (meta.get("domain") or []) if str(item).strip()),
             ]
         ).lower()
+        if taste_terms:
+            metadata_text = " ".join(
+                [
+                    str(meta.get("name") or ""),
+                    " ".join(str(tag) for tag in (meta.get("tags") or []) if str(tag).strip()),
+                    " ".join(str(item) for item in (meta.get("domain") or []) if str(item).strip()),
+                ]
+            ).lower()
+            return self._fields_have_taste_evidence(taste_terms, fields, metadata_text)
         return any(term.lower() in fields for term in terms)
 
     def node_has_topic_evidence(self, query: str, node: dict) -> bool:
@@ -715,6 +1348,7 @@ class RecallPolicy:
             "available_evidence_flags": available_evidence_flags,
             "missing_evidence_flags": missing_evidence_flags,
             "specific_query_terms": self.specific_query_terms(query),
+            "short_taste_query_terms": self._short_taste_query_terms(query),
             "semantic_score": semantic_value,
             "rerank_score": rerank_value,
             "high_confidence_edge": bool(high_confidence_edge),
@@ -770,6 +1404,23 @@ class RecallPolicy:
                 admit_diffused=False,
                 seed_allowed=False,
                 reason=base.reason,
+                suppressed=True,
+                debug=debug,
+            )
+
+        if (
+            debug["short_taste_query_terms"]
+            and not has_topic_evidence
+            and not self.has_strong_score(
+                semantic_score=semantic_score,
+                rerank_score=rerank_score,
+            )
+        ):
+            return RecallPolicyDecision(
+                admit_direct=False,
+                admit_diffused=False,
+                seed_allowed=False,
+                reason="short_taste_query_without_taste_evidence",
                 suppressed=True,
                 debug=debug,
             )

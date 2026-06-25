@@ -16,7 +16,7 @@ from utils import bucket_text_for_embedding, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.reflection")
 
-DAILY_IMPRESSION_SKIP_BUCKET_THRESHOLD = 5
+DEFAULT_DAILY_REFLECTION_MIN_BUCKETS = 5
 
 
 CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
@@ -81,6 +81,8 @@ REFLECT_PROMPT_TEMPLATE = """你是 {ai_name} 的记忆反思器。请根据给�
 - content 写 {ai_name} 第一人称能带走的关系天气，60 到 140 字。
 - content 不要自己写 Markdown affect_anchor 块；affect_anchor 单独放字段里。
 - 日印象只写当天关系温度，不写日报式事件清单；日记可作为当天关系天气来源之一。
+- conversation_turns 是当天短期对话原文，只当关系天气材料，不要把口头上下文直接写成稳定画像事实。
+- 有 conversation_turns 时，优先用普通记忆和对话原文；persona_events 只是没有原文时的轻量补充。
 - 周印象优先总结本周 daily_impressions，再参考高重要普通记忆和未完成承诺；不要直接吞整周日记。
 - 写 affect_anchor 前，先在内部感受这段关系天气的情绪运动：起点是什么、转折在哪里、最后落到哪里。不要输出思考过程，只输出 JSON。
 - affect_anchor 默认必须给，用一个具体情境和 2 到 4 个和弦表达这段关系天气的温度。
@@ -202,6 +204,14 @@ class ReflectionEngine:
         except Exception:
             self.tz = ZoneInfo("Asia/Shanghai")
         self.daily_hour = int(cfg.get("daily_hour", 4))
+        self.daily_min_memory_items = max(
+            0,
+            int(cfg.get("daily_min_memory_items", DEFAULT_DAILY_REFLECTION_MIN_BUCKETS)),
+        )
+        self.daily_conversation_turn_limit = max(
+            0,
+            min(80, int(cfg.get("daily_conversation_turn_limit", 0))),
+        )
         self.persona_events_limit = max(0, int(cfg.get("persona_events_limit", 12)))
         self.persona_events_scan_limit = max(
             self.persona_events_limit,
@@ -345,6 +355,7 @@ class ReflectionEngine:
         embedding_engine=None,
         force: bool = False,
         now: datetime | None = None,
+        conversation_turn_store=None,
     ) -> dict:
         if not self.enabled:
             return {
@@ -383,12 +394,15 @@ class ReflectionEngine:
                 "diary_memory": {"status": "skipped", "reason": "reflection_exists"},
             }
 
-        materials = await self._reflection_materials(period, now_local, bucket_mgr, persona_engine)
-        if (
-            period == "daily"
-            and len(materials["buckets"]) >= DAILY_IMPRESSION_SKIP_BUCKET_THRESHOLD
-            and not force
-        ):
+        materials = await self._reflection_materials(
+            period,
+            now_local,
+            bucket_mgr,
+            persona_engine,
+            conversation_turn_store=conversation_turn_store,
+        )
+        min_daily_buckets = self.daily_min_memory_items
+        if period == "daily" and min_daily_buckets > 0 and len(materials["buckets"]) < min_daily_buckets:
             diary_memory = await self._maybe_extract_diary_memory(
                 period,
                 key,
@@ -399,7 +413,7 @@ class ReflectionEngine:
             )
             return {
                 "status": "skipped",
-                "reason": "sufficient_ombre_buckets",
+                "reason": "insufficient_daily_memory",
                 "period": period,
                 "id": bucket_id,
                 "date": key,
@@ -412,11 +426,19 @@ class ReflectionEngine:
                     "buckets": len(materials["buckets"]),
                     "daily_impressions": len(materials["daily_impressions"]),
                     "persona_events": len(materials["persona_events"]),
+                    "conversation_turns": len(materials["conversation_turns"]),
                     "commitments": len(materials["commitments"]),
-                    "skip_bucket_threshold": DAILY_IMPRESSION_SKIP_BUCKET_THRESHOLD,
+                    "min_buckets": min_daily_buckets,
                 },
             }
-        if not materials["buckets"] and not materials["daily_impressions"] and not materials["persona_events"] and not materials["diary"] and not force:
+        if (
+            not materials["buckets"]
+            and not materials["daily_impressions"]
+            and not materials["persona_events"]
+            and not materials["conversation_turns"]
+            and not materials["diary"]
+            and not force
+        ):
             return {
                 "status": "empty",
                 "period": period,
@@ -463,9 +485,15 @@ class ReflectionEngine:
             for event in materials.get("persona_events", [])
             if event.get("id")
         ]
+        source_conversation_turn_ids = [
+            int(turn.get("id"))
+            for turn in materials.get("conversation_turns", [])
+            if turn.get("id")
+        ]
         source_metadata = {
             "source_bucket_ids": source_bucket_ids[:40],
             "source_persona_event_ids": source_persona_event_ids[:40],
+            "source_conversation_turn_ids": source_conversation_turn_ids[:80],
         }
 
         if existing:
@@ -542,11 +570,19 @@ class ReflectionEngine:
                 "buckets": len(materials["buckets"]),
                 "daily_impressions": len(materials["daily_impressions"]),
                 "persona_events": len(materials["persona_events"]),
+                "conversation_turns": len(materials["conversation_turns"]),
                 "commitments": len(materials["commitments"]),
+                "min_buckets": min_daily_buckets,
             },
         }
 
-    async def run_due(self, bucket_mgr, persona_engine=None, embedding_engine=None) -> list[dict]:
+    async def run_due(
+        self,
+        bucket_mgr,
+        persona_engine=None,
+        embedding_engine=None,
+        conversation_turn_store=None,
+    ) -> list[dict]:
         if not self.enabled or not self.auto_enabled:
             return []
         now_local = self._local_now()
@@ -555,7 +591,15 @@ class ReflectionEngine:
             daily_date = (now_local - timedelta(days=1)).date()
             daily_target = datetime.combine(daily_date, time.max, tzinfo=self.tz)
             results.append(
-                await self.reflect("daily", bucket_mgr, persona_engine, embedding_engine, force=False, now=daily_target)
+                await self.reflect(
+                    "daily",
+                    bucket_mgr,
+                    persona_engine,
+                    embedding_engine,
+                    force=False,
+                    now=daily_target,
+                    conversation_turn_store=conversation_turn_store,
+                )
             )
         if self.weekly_enabled and now_local.weekday() == self.weekly_day and now_local.hour >= self.weekly_hour:
             weekly_target = now_local - timedelta(days=1)
@@ -929,11 +973,19 @@ class ReflectionEngine:
         raw = response.choices[0].message.content if response.choices else ""
         return self._parse_json_object(raw or "") or self._fallback_reflection(period, key, materials)
 
-    async def _reflection_materials(self, period: str, now_local: datetime, bucket_mgr, persona_engine) -> dict:
+    async def _reflection_materials(
+        self,
+        period: str,
+        now_local: datetime,
+        bucket_mgr,
+        persona_engine,
+        conversation_turn_store=None,
+    ) -> dict:
         start, end = self._period_window(period, now_local)
         buckets = []
         daily_impressions = []
         commitments = []
+        conversation_turns = []
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
         except Exception:
@@ -951,6 +1003,22 @@ class ReflectionEngine:
                 buckets.append(self._memory_payload(bucket, content_limit=420))
             if tags & {"commitment", "todo", "wish"} and not meta.get("resolved"):
                 commitments.append(self._memory_payload(bucket, content_limit=260))
+
+        if period == "daily" and self.daily_conversation_turn_limit > 0 and conversation_turn_store:
+            profile_id = str(getattr(persona_engine, "profile_id", "") or "default")
+            try:
+                raw_turns = conversation_turn_store.list_conversation_turns_between(
+                    profile_id=profile_id,
+                    start_at=start,
+                    end_at=end,
+                    limit=self.daily_conversation_turn_limit,
+                )
+            except Exception:
+                raw_turns = []
+            conversation_turns = self._conversation_turn_payloads(
+                raw_turns,
+                limit=self.daily_conversation_turn_limit,
+            )
 
         persona_events = []
         if self.persona_events_limit > 0 and persona_engine and hasattr(persona_engine, "_list_events"):
@@ -987,20 +1055,50 @@ class ReflectionEngine:
                 if event.get("_selection_score") is not None:
                     cleaned["selection_score"] = event.get("_selection_score")
                 persona_events.append(cleaned)
+        if conversation_turns:
+            persona_events = []
         diary = await self._read_diary_for_date(now_local.date().isoformat()) if period == "daily" else None
         return {
             "buckets": buckets[:30],
             "daily_impressions": daily_impressions[:7],
             "persona_events": persona_events[: self.persona_events_limit],
+            "conversation_turns": conversation_turns,
             "commitments": commitments[:12],
             "diary": diary,
         }
+
+    @staticmethod
+    def _conversation_turn_payloads(turns: list[dict] | None, limit: int) -> list[dict]:
+        if limit <= 0 or not turns:
+            return []
+        selected = []
+        for turn in turns:
+            user_text = str(turn.get("user_text") or "").strip()
+            assistant_text = str(turn.get("assistant_text") or "").strip()
+            if not user_text and not assistant_text:
+                continue
+            selected.append(
+                {
+                    "id": turn.get("id"),
+                    "session_id": str(turn.get("session_id") or ""),
+                    "round_id": turn.get("round_id"),
+                    "created_at": str(turn.get("created_at") or ""),
+                    "user_text": user_text[:1200],
+                    "assistant_text": assistant_text[:1200],
+                    "model": str(turn.get("model") or ""),
+                    "client": str(turn.get("client") or ""),
+                    "route": str(turn.get("route") or ""),
+                }
+            )
+        selected.sort(key=lambda item: str(item.get("created_at") or ""))
+        return selected[-limit:]
 
     def _fallback_reflection(self, period: str, key: str, materials: dict) -> dict:
         weather_items = materials.get("daily_impressions", []) if period == "weekly" else []
         names = [item.get("name") or item.get("id") for item in weather_items[:7]]
         if not names:
             names = [item.get("name") or item.get("id") for item in materials.get("buckets", [])[:6]]
+        conversation_turns = materials.get("conversation_turns", [])
         commitments = [item.get("name") or item.get("id") for item in materials.get("commitments", [])[:4]]
         label = "今天" if period == "daily" else "本周"
         title = f"{key} {'日印象' if period == 'daily' else '周印象'}"
@@ -1009,12 +1107,18 @@ class ReflectionEngine:
             main = "、".join([name for name in names if name])
             owed = "；仍需记住：" + "、".join(commitments) if commitments else ""
             content = f"{label}的关系天气：围绕{main or '几件轻小的事'}留下痕迹{owed}。"
+        elif conversation_turns:
+            content = f"{label}的关系天气从 {len(conversation_turns)} 轮短期对话里留下一点原声，先只记温度，不把流水账写成事件清单。"
         elif diary:
             diary_title = diary.get("title") or "当天日记"
             content = f"{label}的关系天气从《{diary_title}》里轻轻留下一点温度，先不把日常写成普通记忆。"
         else:
             content = f"{label}的关系天气很轻，暂时没有明显需要带走的脉络。"
-        anchor_scene = names[0] if names else (diary.get("title") if diary else ("这一段关系天气很轻" if period == "daily" else "这一周的关系天气慢慢落下"))
+        anchor_scene = names[0] if names else (
+            "当天短期对话的原声"
+            if conversation_turns
+            else (diary.get("title") if diary else ("这一段关系天气很轻" if period == "daily" else "这一周的关系天气慢慢落下"))
+        )
         return {
             "title": title,
             "content": content,

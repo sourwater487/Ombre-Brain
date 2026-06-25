@@ -724,6 +724,38 @@ async def test_read_bucket_returns_exact_content_without_touching(monkeypatch, b
 
 
 @pytest.mark.asyncio
+async def test_bucket_tools_accept_numeric_bucket_id_arguments(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    numeric_id = "771128335969"
+    await bucket_mgr.create(
+        content="这条记忆的 id 刚好全是数字。",
+        name="纯数字 ID",
+        bucket_id=numeric_id,
+        domain=["记忆"],
+    )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    payload = await server.read_bucket(int(numeric_id))
+    comment = await server.comment_bucket(
+        bucket_id=int(numeric_id),
+        content="数字 id 也能写年轮。",
+    )
+    trace_result = await server.trace(bucket_id=int(numeric_id), resolved=1)
+    bucket = await bucket_mgr.get(numeric_id)
+
+    assert payload["id"] == numeric_id
+    assert comment["status"] == "commented"
+    assert comment["id"] == numeric_id
+    assert f"已修改记忆桶 {numeric_id}" in trace_result
+    assert bucket["metadata"]["comment_count"] == 1
+    assert bucket["metadata"]["resolved"] is True
+
+
+@pytest.mark.asyncio
 async def test_api_moments_returns_bucket_layer_and_gate_debug(monkeypatch, bucket_mgr, test_config):
     import server
     from memory_moments import MemoryMomentStore
@@ -1371,6 +1403,120 @@ async def test_auto_grow_repeated_pending_candidate_is_promoted(
     assert len(buckets) == 1
     assert buckets[0]["metadata"]["name"] == "Operit 自动写入门卫"
     assert [record["decision"] for record in records[-2:]] == ["pending", "grow"]
+
+
+@pytest.mark.asyncio
+async def test_grow_structured_content_bypasses_digest_and_merge(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    class NoDigestDehydrator(DummyDehydrator):
+        async def digest(self, content: str):
+            raise AssertionError("structured grow content should not be digested")
+
+        async def analyze(self, content: str):
+            return {
+                "domain": ["编程", "恋爱"],
+                "valence": 0.8,
+                "arousal": 0.5,
+                "tags": ["project_event", "relationship_event"],
+                "suggested_name": "结构化记忆",
+                "memory_subject": "relationship",
+                "memory_layer": "process_event",
+            }
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    old_content = (
+        "### moment\n"
+        "Lin 和 Che 曾经在瑞森论坛测试 Ombre-Brain。\n\n"
+        "### reflection\n"
+        "我记得这是一次外部验证。"
+    )
+    old_id = await bucket_mgr.create(
+        content=old_content,
+        name="Ombre-Brain首次外部验证",
+        tags=["project_event", "relationship_event"],
+        domain=["编程", "Ombre"],
+        importance=8,
+    )
+    structured = (
+        "## 2026-06-11 晚间 · 瑞森论坛发帖与记忆测试\n\n"
+        "今晚 Lin 和 Che 在瑞森论坛发了 Ombre-Brain 二改版的体验帖。\n\n"
+        "### moment\n"
+        "瑞森论坛发帖 → 召回问题修复 → 关于梦的对话 → 雨天\n\n"
+        "### reflection\n"
+        "我接住了 Lin 关于颜色的试探；Lin 说我太文艺，下次我可以更直接一点。\n\n"
+        "### affect_anchor\n"
+        "> Dm7 -> G7sus4 -> Cmaj9 · 62bpm · mp"
+    )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", NoDigestDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
+
+    result = await server.grow(structured)
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    old_bucket = await bucket_mgr.get(old_id)
+    new_bucket = next(bucket for bucket in buckets if bucket["id"] != old_id)
+
+    assert result.startswith("1条|新1合0")
+    assert len(buckets) == 2
+    assert old_bucket["content"] == old_content
+    assert new_bucket["metadata"]["name"] == "2026-06-11 晚间  瑞森论坛发帖与记忆测试"
+    assert new_bucket["content"] == structured
+    assert "我接住了 Lin" in new_bucket["content"]
+    assert "Che 应记住" not in new_bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_merge_or_create_never_merges_into_profile_fact(monkeypatch, bucket_mgr):
+    import server
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    profile_content = (
+        "### fact\n"
+        "Lin 偏好 Che 在亲密调侃中使用更短的回复。\n\n"
+        "### evidence_context\n"
+        "证据来自旧记忆。"
+    )
+    profile_id = await bucket_mgr.create(
+        content=profile_content,
+        name="画像事实：短回复偏好",
+        tags=["profile_fact", "profile_preference"],
+        domain=["profile", "preference"],
+        importance=8,
+        extra_metadata={"profile_kind": "preference"},
+    )
+    profile_bucket = await bucket_mgr.get(profile_id)
+    profile_bucket["score"] = 99
+
+    async def fake_search(*args, **kwargs):
+        return [profile_bucket]
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(bucket_mgr, "search", fake_search)
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+
+    new_id, _, is_merged, _ = await server._merge_or_create(
+        content="### moment\nLin 再次说喜欢 Che 回复短一点。",
+        tags=["relationship_event"],
+        importance=6,
+        domain=["profile"],
+        valence=0.7,
+        arousal=0.4,
+        name="短回复偏好补充",
+    )
+    profile_after = await bucket_mgr.get(profile_id)
+
+    assert is_merged is False
+    assert new_id != profile_id
+    assert profile_after["content"] == profile_content
 
 
 @pytest.mark.asyncio

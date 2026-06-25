@@ -38,11 +38,89 @@ from typing import Optional
 
 import frontmatter
 import jieba
-from rapidfuzz import fuzz
 
+from identity import identity_names
+from memory_relevance import content_terms_for_query, memory_relevance_options_from_config, recall_topic_query
 from utils import generate_bucket_id, sanitize_name, safe_path, now_iso, strip_affect_anchor, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.bucket")
+
+
+GENERIC_LEXICAL_STOPWORDS = {
+    "一个",
+    "一些",
+    "一下",
+    "不是",
+    "为了",
+    "他们",
+    "她们",
+    "你们",
+    "我们",
+    "什么",
+    "今天",
+    "刚才",
+    "刚刚",
+    "这个",
+    "那个",
+    "这些",
+    "那些",
+    "然后",
+    "现在",
+    "自己",
+    "事情",
+    "东西",
+    "内容",
+    "相关",
+    "记忆",
+    "回忆",
+    "总结",
+    "记录",
+    "查询",
+    "搜索",
+    "最近",
+    "之前",
+    "过去",
+    "当前",
+    "安排",
+    "计划",
+    "问题",
+    "目标",
+    "ai_name",
+    "assistant",
+    "display_name",
+    "human_name",
+    "user",
+    "user_alias",
+    "user_aliases",
+    "user_display_name",
+    "user_name",
+    "username",
+    "对方",
+    "用户",
+    "because",
+    "current",
+    "from",
+    "have",
+    "memory",
+    "memories",
+    "recent",
+    "related",
+    "search",
+    "status",
+    "that",
+    "this",
+    "thing",
+    "things",
+    "with",
+    "you",
+    "qq",
+    "q_q",
+    "qaq",
+    "qwq",
+    "qvq",
+    "tt",
+    "t_t",
+}
 
 
 class BucketManager:
@@ -56,6 +134,7 @@ class BucketManager:
     """
 
     def __init__(self, config: dict):
+        self.config = config
         # --- Read storage paths from config / 从配置中读取存储路径 ---
         self.base_dir = config["buckets_dir"]
         self.permanent_dir = os.path.join(self.base_dir, "permanent")
@@ -78,8 +157,8 @@ class BucketManager:
         self.wikilink_stopwords = {
             "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
             "都", "一个", "上", "也", "很", "到", "说", "要", "去",
-            "你", "会", "着", "没有", "看", "好", "自己", "这",
-            "我们", "你们", "他们", "然后", "今天", "昨天", "明天", "一下",
+            "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她",
+            "我们", "你们", "他们", "她们", "然后", "今天", "昨天", "明天", "一下",
             "the", "and", "for", "are", "but", "not", "you", "all", "can",
             "had", "her", "was", "one", "our", "out", "has", "have", "with",
             "this", "that", "from", "they", "been", "said", "will", "each",
@@ -93,6 +172,7 @@ class BucketManager:
         self.w_time = scoring.get("time_proximity", 1.5)
         self.w_importance = scoring.get("importance", 1.0)
         self.content_weight = scoring.get("content_weight", 1.0)  # Added to allow better content-based matching during merge
+        self.lexical_stop_terms = self._build_lexical_stop_terms(config)
 
     # ---------------------------------------------------------
     # Create a new bucket
@@ -350,6 +430,16 @@ class BucketManager:
             post["source_persona_event_ids"] = (
                 kwargs["source_persona_event_ids"] if isinstance(kwargs["source_persona_event_ids"], list) else []
             )
+        if "source_conversation_turn_ids" in kwargs:
+            post["source_conversation_turn_ids"] = (
+                kwargs["source_conversation_turn_ids"] if isinstance(kwargs["source_conversation_turn_ids"], list) else []
+            )
+        if "extra_metadata" in kwargs and isinstance(kwargs["extra_metadata"], dict):
+            reserved = {"id", "name", "content", "created", "last_active", "updated_at"}
+            for key, value in kwargs["extra_metadata"].items():
+                if key in reserved or value is None:
+                    continue
+                post[str(key)] = value
 
         # --- Auto-refresh content update time and activation time ---
         # --- 自动刷新内容更新时间与激活时间 ---
@@ -380,7 +470,7 @@ class BucketManager:
         bucket_id: str,
         content: str,
         *,
-        author: str = "Che",
+        author: str | None = None,
         kind: str = "comment",
         valence: float | None = None,
         arousal: float | None = None,
@@ -408,10 +498,11 @@ class BucketManager:
 
         now = now_iso()
         created_at = str(created or now).strip() or now
+        default_author = identity_names(self.config).get("ai_name") or "AI"
         entry = {
             "id": generate_bucket_id(),
             "created": created_at,
-            "author": str(author or "Che"),
+            "author": str(author or default_author),
             "kind": str(kind or "comment"),
             "content": str(content).strip(),
         }
@@ -714,13 +805,14 @@ class BucketManager:
 
         # --- Layer 2: weighted multi-dim ranking ---
         # --- 第二层：多维加权精排 ---
+        topic_scores = self.calc_topic_scores(query, candidates)
         scored = []
         for bucket in candidates:
             meta = bucket.get("metadata", {})
 
             try:
-                # Dim 1: topic relevance (fuzzy text, 0~1)
-                topic_score = self._calc_topic_score(query, bucket)
+                # Dim 1: topic relevance (BM25 lexical text, 0~1)
+                topic_score = topic_scores.get(str(bucket.get("id") or ""), 0.0)
 
                 # Dim 2: emotion resonance (coordinate distance, 0~1)
                 emotion_score = self._calc_emotion_score(
@@ -763,35 +855,372 @@ class BucketManager:
 
     # ---------------------------------------------------------
     # Topic relevance sub-score:
-    # name(×3) + domain(×2.5) + tags(×2) + body(×1)
-    # 文本相关性子分：桶名(×3) + 主题域(×2.5) + 标签(×2) + 正文(×1)
+    # BM25 lexical relevance over weighted fields:
+    # name(×3) + domain(×2.5) + tags(×2) + body(×content_weight)
+    # 文本相关性子分：对加权字段做 BM25，常见词降权，身份词停用。
     # ---------------------------------------------------------
+    def calc_topic_scores(self, query: str, buckets: list[dict]) -> dict[str, float]:
+        query = recall_topic_query(str(query or "").strip())
+        if not query or not buckets:
+            return {}
+
+        short_cjk_query = self._short_cjk_topic_query(query)
+        if short_cjk_query:
+            short_cjk_terms = self._short_cjk_topic_terms(short_cjk_query)
+            if not short_cjk_terms:
+                return {}
+            return {
+                str(bucket.get("id") or ""): max(
+                    self._calc_short_cjk_topic_score(
+                        term,
+                        bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {},
+                        self._bucket_searchable_content(bucket),
+                    )
+                    for term in short_cjk_terms
+                )
+                for bucket in buckets
+                if bucket.get("id")
+            }
+
+        query_terms = self._lexical_query_terms(query)
+        if not query_terms:
+            return {}
+
+        query_phrase = self._lexical_query_phrase(query)
+        docs = []
+        document_frequency: Counter[str] = Counter()
+        for bucket in buckets:
+            bucket_id = str(bucket.get("id") or "")
+            if not bucket_id:
+                continue
+            term_frequency, doc_length = self._bucket_lexical_profile(bucket)
+            phrase_score = self._lexical_phrase_boost(bucket, query_phrase)
+            docs.append((bucket_id, term_frequency, doc_length, phrase_score))
+            present = set(term_frequency)
+            for term in query_terms:
+                if term in present:
+                    document_frequency[term] += 1
+
+        if not docs:
+            return {}
+
+        total_docs = len(docs)
+        avg_doc_length = sum(doc_length for _bid, _tf, doc_length, _phrase in docs) / max(1, total_docs)
+        avg_doc_length = max(avg_doc_length, 1.0)
+        k1 = 1.4
+        b = 0.72
+        scores: dict[str, float] = {}
+
+        for bucket_id, term_frequency, doc_length, phrase_score in docs:
+            raw_score = 0.0
+            for term in query_terms:
+                tf = float(term_frequency.get(term, 0.0))
+                if tf <= 0:
+                    continue
+                df = max(1, int(document_frequency.get(term, 0)))
+                idf = math.log(1.0 + (total_docs - df + 0.5) / (df + 0.5))
+                denominator = tf + k1 * (1.0 - b + b * (doc_length / avg_doc_length))
+                if denominator <= 0:
+                    continue
+                raw_score += idf * (tf * (k1 + 1.0)) / denominator
+
+            if raw_score <= 0 and phrase_score <= 0:
+                continue
+            base_score = self._normalize_bm25_score(raw_score) if raw_score > 0 else 0.0
+            scores[bucket_id] = round(max(base_score, phrase_score), 4)
+        return scores
+
     def _calc_topic_score(self, query: str, bucket: dict) -> float:
         """
         Calculate text dimension relevance score (0~1).
         计算文本维度的相关性得分。
         """
         meta = bucket.get("metadata", {})
+        searchable_content = self._bucket_searchable_content(bucket)
 
-        name_score = fuzz.partial_ratio(query, meta.get("name", "")) * 3
-        domain_score = (
-            max(
-                (fuzz.partial_ratio(query, d) for d in meta.get("domain", [])),
-                default=0,
-            )
-            * 2.5
-        )
-        tag_score = (
-            max(
-                (fuzz.partial_ratio(query, tag) for tag in meta.get("tags", [])),
-                default=0,
-            )
-            * 2
-        )
-        searchable_content = strip_affect_anchor(strip_wikilinks(str(bucket.get("content", ""))))[:1000]
-        content_score = fuzz.partial_ratio(query, searchable_content) * self.content_weight
+        short_cjk_query = self._short_cjk_topic_query(query)
+        if short_cjk_query:
+            if self._is_lexical_stop_term(short_cjk_query):
+                return 0.0
+            return self._calc_short_cjk_topic_score(short_cjk_query, meta, searchable_content)
 
-        return (name_score + domain_score + tag_score + content_score) / (100 * (3 + 2.5 + 2 + self.content_weight))
+        return self.calc_topic_scores(query, [bucket]).get(str(bucket.get("id") or ""), 0.0)
+
+    def filter_specific_lexical_terms(
+        self,
+        terms: list[str],
+        buckets: list[dict],
+        *,
+        preserve_terms: set[str] | None = None,
+        min_specificity: float = 0.34,
+        max_document_ratio: float = 0.45,
+    ) -> list[str]:
+        preserve = {
+            self._compact_lexical_phrase(term)
+            for term in (preserve_terms or set())
+            if self._compact_lexical_phrase(term)
+        }
+        ordered = []
+        seen = set()
+        for term in terms or []:
+            cleaned = str(term or "").strip()
+            key = self._compact_lexical_phrase(cleaned)
+            if not cleaned or not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append((cleaned, key))
+        if not ordered:
+            return []
+        if not buckets:
+            return [term for term, _key in ordered]
+
+        haystacks = [
+            self._bucket_lexical_haystack(bucket)
+            for bucket in buckets
+            if isinstance(bucket, dict) and bucket.get("id")
+        ]
+        haystacks = [haystack for haystack in haystacks if haystack]
+        total_docs = len(haystacks)
+        if total_docs <= 0:
+            return [term for term, _key in ordered]
+
+        max_df = max(1, int(math.ceil(total_docs * max_document_ratio)))
+        if total_docs < 8:
+            max_df = max(1, total_docs // 2)
+        max_idf = math.log(1.0 + (total_docs + 0.5) / 0.5)
+        kept: list[str] = []
+        for term, key in ordered:
+            if key in preserve:
+                kept.append(term)
+                continue
+            df = sum(1 for haystack in haystacks if key in haystack)
+            if df <= 0:
+                continue
+            idf = math.log(1.0 + (total_docs - df + 0.5) / (df + 0.5))
+            specificity = idf / max(max_idf, 1e-9)
+            if df <= max_df or specificity >= min_specificity:
+                kept.append(term)
+        return kept
+
+    def lexical_term_specificity_stats(self, terms: list[str], buckets: list[dict]) -> dict[str, dict[str, float]]:
+        haystacks = [
+            self._bucket_lexical_haystack(bucket)
+            for bucket in buckets or []
+            if isinstance(bucket, dict) and bucket.get("id")
+        ]
+        haystacks = [haystack for haystack in haystacks if haystack]
+        total_docs = len(haystacks)
+        max_idf = math.log(1.0 + (total_docs + 0.5) / 0.5) if total_docs else 1.0
+        stats: dict[str, dict[str, float]] = {}
+        for term in terms or []:
+            cleaned = str(term or "").strip()
+            key = self._compact_lexical_phrase(cleaned)
+            if not key or key in stats:
+                continue
+            df = sum(1 for haystack in haystacks if key in haystack) if total_docs else 0
+            idf = math.log(1.0 + (total_docs - df + 0.5) / (df + 0.5)) if df > 0 else max_idf
+            stats[cleaned] = {
+                "document_frequency": float(df),
+                "document_count": float(total_docs),
+                "specificity": round(idf / max(max_idf, 1e-9), 4),
+            }
+        return stats
+
+    def _bucket_lexical_haystack(self, bucket: dict) -> str:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        text = " ".join(
+            [
+                str(meta.get("name") or ""),
+                " ".join(str(item) for item in meta.get("domain", []) or []),
+                " ".join(str(item) for item in meta.get("tags", []) or []),
+                self._bucket_searchable_content(bucket),
+            ]
+        )
+        return self._compact_lexical_phrase(text)
+
+    def _bucket_searchable_content(self, bucket: dict) -> str:
+        return strip_affect_anchor(strip_wikilinks(str(bucket.get("content", ""))))[:1000]
+
+    def _bucket_lexical_profile(self, bucket: dict) -> tuple[Counter[str], float]:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        fields = (
+            ("name", str(meta.get("name") or ""), 3.0),
+            ("domain", " ".join(str(item) for item in meta.get("domain", []) or []), 2.5),
+            ("tags", " ".join(str(item) for item in meta.get("tags", []) or []), 2.0),
+            ("content", self._bucket_searchable_content(bucket), float(self.content_weight or 1.0)),
+        )
+        term_frequency: Counter[str] = Counter()
+        weighted_length = 0.0
+        for field, text, weight in fields:
+            tokens = self._lexical_tokens(text)
+            if field != "content":
+                compact = self._compact_lexical_phrase(text)
+                if compact and not self._is_lexical_stop_term(compact):
+                    tokens.append(compact)
+            for token in tokens:
+                term_frequency[token] += weight
+            weighted_length += max(1, len(tokens)) * weight if tokens else 0.0
+        return term_frequency, max(weighted_length, 1.0)
+
+    def _lexical_query_terms(self, query: str) -> list[str]:
+        terms = self._lexical_tokens(query)
+        compact = self._lexical_query_phrase(query)
+        if compact:
+            terms.append(compact)
+        return list(dict.fromkeys(terms))
+
+    def _lexical_query_phrase(self, query: str) -> str:
+        compact = self._compact_lexical_phrase(query)
+        if not compact or len(compact) > 32 or self._is_lexical_stop_term(compact):
+            return ""
+        if re.fullmatch(r"[\u4e00-\u9fff]+", compact) and len(compact) < 3:
+            return ""
+        if re.fullmatch(r"[a-z0-9_.:-]+", compact):
+            if re.fullmatch(r"[\d.:-]+", compact):
+                return ""
+            if len(compact) < 3 and not re.search(r"\d", compact):
+                return ""
+        return compact
+
+    def _lexical_phrase_boost(self, bucket: dict, query_phrase: str) -> float:
+        if not query_phrase or len(query_phrase) < 3:
+            return 0.0
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        checks = (
+            (meta.get("name"), 0.95),
+            (" ".join(str(item) for item in meta.get("domain", []) or []), 0.56),
+            (" ".join(str(item) for item in meta.get("tags", []) or []), 0.54),
+            (self._bucket_searchable_content(bucket), 0.48),
+        )
+        best = 0.0
+        for value, score in checks:
+            compact = self._compact_lexical_phrase(value)
+            if compact and query_phrase in compact:
+                best = max(best, score)
+        return best
+
+    def _lexical_tokens(self, text: str) -> list[str]:
+        raw = str(text or "")
+        if not raw.strip():
+            return []
+        candidates: list[str] = []
+        candidates.extend(jieba.lcut(raw, cut_all=False))
+        candidates.extend(re.findall(r"[A-Za-z]+[A-Za-z0-9_.:-]*|\d+(?:\.\d+)+|[\u4e00-\u9fff]{2,}", raw))
+        tokens = []
+        for candidate in candidates:
+            token = self._normalize_lexical_term(candidate)
+            if token:
+                tokens.append(token)
+        return tokens
+
+    def _normalize_lexical_term(self, value: object) -> str:
+        term = str(value or "").strip().lower()
+        term = re.sub(r"^[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", term)
+        term = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+$", "", term)
+        if not term or self._is_lexical_stop_term(term):
+            return ""
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", term)
+        if not compact or self._is_lexical_stop_term(compact):
+            return ""
+        if re.fullmatch(r"[\u4e00-\u9fff]+", compact) and len(compact) < 2:
+            return ""
+        if re.fullmatch(r"[a-z0-9_.:-]+", compact):
+            if re.fullmatch(r"[\d.:-]+", compact):
+                return ""
+            if len(compact) < 3 and not re.search(r"\d", compact):
+                return ""
+        return compact
+
+    @staticmethod
+    def _compact_lexical_phrase(value: object) -> str:
+        return re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            str(value or "").strip().lower(),
+        )
+
+    def _is_lexical_stop_term(self, value: object) -> bool:
+        term = self._compact_lexical_phrase(value)
+        return bool(term and term in self.lexical_stop_terms)
+
+    def _build_lexical_stop_terms(self, config: dict) -> set[str]:
+        values = set(GENERIC_LEXICAL_STOPWORDS)
+        values.update(getattr(self, "wikilink_stopwords", set()))
+        try:
+            options = memory_relevance_options_from_config(config)
+            values.update(options.context_terms)
+        except Exception:
+            pass
+        try:
+            identity = identity_names(config)
+            values.update(identity.get("relationship_terms") or [])
+            values.update(identity.get("user_aliases") or [])
+        except Exception:
+            pass
+        normalized = set()
+        for value in values:
+            compact = self._compact_lexical_phrase(value)
+            if compact:
+                normalized.add(compact)
+        return normalized
+
+    @staticmethod
+    def _normalize_bm25_score(raw_score: float) -> float:
+        return max(0.0, min(1.0, 1.0 - math.exp(-float(raw_score) / 4.0)))
+
+    @staticmethod
+    def _short_cjk_topic_query(query: str) -> str:
+        compact = re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            str(query or ""),
+        )
+        if re.fullmatch(r"[\u4e00-\u9fff]{1,3}", compact):
+            return compact
+        return ""
+
+    def _short_cjk_topic_terms(self, query: str) -> list[str]:
+        terms = []
+        for term in [query, *content_terms_for_query(query)]:
+            cleaned = str(term or "").strip()
+            if not re.fullmatch(r"[\u4e00-\u9fff]{1,3}", cleaned):
+                continue
+            if self._is_lexical_stop_term(cleaned):
+                continue
+            if cleaned not in terms:
+                terms.append(cleaned)
+        return terms
+
+    def _calc_short_cjk_topic_score(self, query: str, meta: dict, searchable_content: str) -> float:
+        def evidence(value: object) -> int:
+            text = str(value or "")
+            if query in text:
+                return 100
+            if len(query) < 3:
+                return 0
+            query_chars = {char for char in query if "\u4e00" <= char <= "\u9fff"}
+            if len(query_chars) < 3:
+                return 0
+            overlap = query_chars & {char for char in text if "\u4e00" <= char <= "\u9fff"}
+            coverage = len(overlap) / len(query_chars)
+            return 70 if len(overlap) >= 2 and coverage >= 0.67 else 0
+
+        name_score = evidence(meta.get("name")) * 3
+        domain_score = max((evidence(d) for d in meta.get("domain", []) or []), default=0) * 2.5
+        tag_score = max((evidence(tag) for tag in meta.get("tags", []) or []), default=0) * 2
+        content_score = evidence(searchable_content) * self.content_weight
+        weighted = name_score + domain_score + tag_score + content_score
+        if weighted <= 0:
+            return 0.0
+
+        score = weighted / (100 * (3 + 2.5 + 2 + self.content_weight))
+        if content_score:
+            score = max(score, 0.36)
+        if domain_score or tag_score:
+            score = max(score, 0.45)
+        if name_score:
+            score = max(score, 0.50)
+        return min(1.0, score)
 
     # ---------------------------------------------------------
     # Emotion resonance sub-score:

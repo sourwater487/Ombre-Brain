@@ -157,7 +157,7 @@ gateway:
   #       - "Qwen/Qwen3-32B"
   #       - "THUDM/GLM-4-32B"
   head_recent_hours: 24
-  dynamic_top_k: 10
+  dynamic_top_k: 12
   inject_max_cards: 2
   skip_recent_rounds: 5
   cooldown_hours: 12
@@ -227,13 +227,13 @@ gateway:
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: false
-  query_planner_enabled: true
+  query_planner_enabled: false
   query_planner_model: ""
   query_planner_min_chars: 24
   query_planner_max_queries: 3
   query_planner_max_tokens: 360
   recall_selection_timeout_seconds: 6.0
-  recall_selection_candidate_limit: 25
+  recall_selection_candidate_limit: 30
   memory_detail_recall_enabled: false
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
