@@ -74,6 +74,7 @@ from utils import (
     count_tokens_approx,
     bucket_text_for_embedding,
     load_config,
+    parse_human_date_reference,
     setup_logging,
     strip_display_temperature_sections,
     strip_temperature_meaning_lines,
@@ -1751,6 +1752,12 @@ class GatewayService:
                     "just_now_context"
                     if just_now_context_requested and not needs_handoff_first
                     else ("handoff_trigger" if is_handoff_trigger_query else "session_start_handoff")
+                )
+            elif not self._query_requests_date_persona_trace(current_user_query):
+                date_persona_trace_debug["skip_reason"] = (
+                    "no_date_hint"
+                    if not self._query_date_hint(current_user_query)
+                    else "date_trace_not_requested"
                 )
             else:
                 date_persona_trace, date_persona_trace_debug = self._build_date_persona_trace_block(
@@ -4711,30 +4718,7 @@ class GatewayService:
         text = str(query or "").strip()
         if not text:
             return None
-        now = datetime.now(self.gateway_tz)
-        explicit = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?", text)
-        if explicit:
-            year, month, day = (int(part) for part in explicit.groups())
-            try:
-                target = datetime(year, month, day, tzinfo=self.gateway_tz).date()
-            except ValueError:
-                return None
-            return {"date": target.isoformat(), "label": target.isoformat()}
-        relative_days = [
-            ("前天", -2),
-            ("昨晚", -1),
-            ("昨天", -1),
-            ("昨日", -1),
-        ]
-        for label, offset in relative_days:
-            if label in text:
-                return {
-                    "date": (now + timedelta(days=offset)).date().isoformat(),
-                    "label": label,
-                }
-        if "今天" in text and self._today_query_requests_date_trace(text):
-            return {"date": now.date().isoformat(), "label": "今天"}
-        return None
+        return parse_human_date_reference(text, now=datetime.now(self.gateway_tz), tz=self.gateway_tz)
 
     @staticmethod
     def _today_query_requests_date_trace(query: str) -> bool:
@@ -4753,6 +4737,38 @@ class GatewayService:
             "这次",
         )
         return any(marker in text for marker in detail_markers)
+
+    def _query_requests_date_persona_trace(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text or not self._query_date_hint(text):
+            return False
+        if self._query_requests_just_now_context(text):
+            return False
+        trace_markers = (
+            "记得",
+            "记不记得",
+            "还记得",
+            "想起",
+            "想起来",
+            "为什么",
+            "怎么说",
+            "怎么回事",
+            "怎么了",
+            "确认",
+            "当时",
+            "那次",
+            "这次",
+            "的事",
+            "什么事",
+            "发生",
+            "聊",
+            "说",
+            "提",
+            "讲",
+            "讨论",
+            "做了什么",
+        )
+        return any(marker in text for marker in trace_markers)
 
     def _build_date_persona_trace_block(
         self,
@@ -6397,6 +6413,13 @@ class GatewayService:
         moment = moment or {}
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        event_date = self._date_yyyy_mm_dd(
+            meta.get("date")
+            or moment_meta.get("bucket_date")
+            or moment_meta.get("date")
+        )
+        if event_date:
+            return [f"[date:{event_date}]"]
         created = self._date_yyyy_mm_dd(
             meta.get("created")
             or moment_meta.get("bucket_created")

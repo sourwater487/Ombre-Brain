@@ -126,9 +126,12 @@ from word_map import WordMapStore, reflection_identity_terms
 from utils import (
     bucket_text_for_embedding,
     count_tokens_approx,
+    local_date_key,
     load_config,
     now_iso,
+    parse_human_date_reference,
     setup_logging,
+    strip_human_date_references,
     strip_display_temperature_sections,
     strip_affect_anchor,
     strip_temperature_meaning_lines,
@@ -282,7 +285,9 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8000,
 )
-HARD_HIDDEN_MCP_TOOLS = frozenset({"dream_tool", "profile_fact", "darkroom_enter"})
+HARD_HIDDEN_MCP_TOOLS = frozenset(
+    {"darkroom_enter", "darkroom_rooms", "darkroom_view", "darkroom_status", "darkroom_release"}
+)
 
 
 def _hard_hidden_mcp_tool_name(name: str) -> str:
@@ -1026,6 +1031,190 @@ def _filter_by_created_date(
     if start and end and start == end:
         return filtered, f", created_date={start}"
     return filtered, f", created_from={start or '*'}, created_to={end or '*'}"
+
+
+def _bucket_matches_breath_date(bucket: dict, date_key: str) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if meta.get("date"):
+        return local_date_key(meta.get("date")) == date_key
+    for key in ("created", "updated_at", "last_active"):
+        if local_date_key(meta.get(key)) == date_key:
+            return True
+    return False
+
+
+def _breath_date_bucket_sort_key(bucket: dict) -> tuple[str, int]:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    date_value = str(meta.get("date") or "")
+    if not date_value:
+        date_value = max(str(meta.get(key) or "") for key in ("updated_at", "last_active", "created"))
+    try:
+        importance = int(meta.get("importance", 5))
+    except (TypeError, ValueError):
+        importance = 5
+    return date_value, importance
+
+
+def _breath_query_requests_date_read(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text or not parse_human_date_reference(text):
+        return False
+    recall_markers = (
+        "聊",
+        "说",
+        "提",
+        "讲",
+        "讨论",
+        "查",
+        "找",
+        "搜索",
+        "记得",
+        "记忆",
+        "做了什么",
+        "发生",
+        "什么事",
+        "什么",
+    )
+    return any(marker in text for marker in recall_markers)
+
+
+def _strip_breath_date_query_shell(query: str) -> str:
+    text = strip_human_date_references(query)
+    shell_terms = {
+        "我们", "咱们", "我", "你",
+        "还记得", "记不记得", "记得", "想起", "想起来", "回忆", "记忆",
+        "在聊什么", "聊了什么", "聊什么", "聊过什么", "说了什么", "说什么",
+        "提到什么", "讲了什么", "讨论什么", "做了什么", "发生了什么",
+        "在聊", "聊", "说", "提到", "提", "讲", "讨论", "发生", "做",
+        "查一下", "查", "搜索", "找一下", "找", "那次", "这次",
+        "事情", "事", "什么", "为什么", "怎么回事", "怎么说",
+        "有", "没有", "有没有", "是", "吗", "么", "嘛", "呢", "啊", "呀", "啦", "吧",
+        "的", "了", "一下", "再", "一次",
+    }
+    identity = _identity()
+    shell_terms.update(
+        str(term)
+        for term in [
+            identity.get("ai_name"),
+            identity.get("user_name"),
+            identity.get("user_display_name"),
+            *(identity.get("user_aliases") or []),
+        ]
+        if str(term or "").strip()
+    )
+    for term in sorted(shell_terms, key=lambda item: len(str(item)), reverse=True):
+        if str(term).strip():
+            text = text.replace(str(term), " ")
+    return re.sub(r"[\s，。！？、,.!?:：;；~～（）()\[\]【】「」『』“”\"'`]+", " ", text).strip()
+
+
+def _breath_date_topic_terms(query: str) -> list[str]:
+    topic_query = _strip_breath_date_query_shell(query)
+    if not topic_query:
+        return []
+    terms = list(_recall_policy().specific_query_terms(topic_query))
+    terms.extend(re.findall(r"[A-Za-z]+[A-Za-z0-9_.:-]*|[\u4e00-\u9fff]{2,}", topic_query))
+    seen = set()
+    result = []
+    for term in terms:
+        cleaned = str(term or "").strip()
+        key = _compact_lookup_key(cleaned)
+        if not key or key in seen:
+            continue
+        if re.fullmatch(r"[a-z0-9_.:-]+", key) and len(key) < 3 and not re.search(r"\d", key):
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff]+", key) and len(key) < 2:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result[:8]
+
+
+def _breath_date_text_has_topic_terms(text: str, topic_terms: list[str]) -> bool:
+    if not topic_terms:
+        return True
+    haystack = _compact_lookup_key(text)
+    return any(_compact_lookup_key(term) in haystack for term in topic_terms if _compact_lookup_key(term))
+
+
+def _breath_date_bucket_text(bucket: dict) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    return " ".join(
+        [
+            str(meta.get("name") or bucket.get("id") or ""),
+            str(meta.get("annotation_summary") or meta.get("summary") or ""),
+            " ".join(str(tag) for tag in meta.get("tags", []) or []),
+            " ".join(str(item) for item in meta.get("domain", []) or []),
+            _rendered_bucket_content(bucket),
+        ]
+    )
+
+
+async def _read_breath_date(
+    *,
+    date_key: str,
+    label: str,
+    query: str,
+    max_tokens: int,
+    max_results: int,
+    domain_filter: list[str] | None = None,
+) -> str:
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+    except Exception as e:
+        logger.error(f"Breath date listing failed / 日期记忆列桶失败: {e}")
+        return "日期记忆暂时无法访问。"
+
+    domain_set = {item.lower() for item in domain_filter or []}
+    topic_terms = _breath_date_topic_terms(query)
+    candidates = []
+    for bucket in all_buckets:
+        if not isinstance(bucket, dict):
+            continue
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("type") == "feel":
+            continue
+        if domain_set and not ({str(item).lower() for item in meta.get("domain", []) or []} & domain_set):
+            continue
+        if not _bucket_matches_breath_date(bucket, date_key):
+            continue
+        if topic_terms and not _breath_date_text_has_topic_terms(_breath_date_bucket_text(bucket), topic_terms):
+            continue
+        candidates.append(bucket)
+
+    candidates.sort(key=_breath_date_bucket_sort_key, reverse=True)
+    if not candidates:
+        if topic_terms:
+            return f"{date_key} 没有找到匹配主题的普通记忆。"
+        return f"{date_key} 没有找到普通记忆。"
+
+    results = []
+    used = 0
+    for bucket in candidates[:max_results]:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        bucket_id = str(bucket.get("id") or "")
+        title = str(meta.get("name") or bucket_id)
+        date_part = " ".join(_bucket_date_meta_parts(bucket))
+        text = (
+            str(meta.get("annotation_summary") or meta.get("summary") or "").strip()
+            or _clip_text(_rendered_bucket_content(bucket), 560)
+        )
+        entry = f"- [bucket_id:{bucket_id}] {date_part} {title}\n{text}".strip()
+        tokens = count_tokens_approx(entry)
+        if used + tokens > max_tokens and results:
+            break
+        results.append(entry)
+        used += tokens
+        if used >= max_tokens:
+            break
+
+    header = f"=== 日期记忆 {date_key}"
+    if label and label != date_key:
+        header += f" ({label})"
+    header += " ==="
+    if topic_terms:
+        header += "\n主题过滤: " + ", ".join(topic_terms)
+    return header + "\n" + "\n---\n".join(results)
 
 
 def _bool_value(value, default: bool = False) -> bool:
@@ -3029,6 +3218,7 @@ async def _merge_or_create(
     memory_subject: str = "",
     memory_layer: str = "",
     memory_classification_source: str = "",
+    date: str = "",
 ) -> tuple[str, str, bool, dict | None]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -3089,6 +3279,7 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
+        date=date or None,
         extra_metadata=_memory_classification_metadata(
             memory_subject,
             memory_layer,
@@ -3835,12 +4026,30 @@ def _bucket_date_meta_parts(bucket: dict | None = None, moment: dict | None = No
     moment = moment or {}
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    event_date = _date_yyyy_mm_dd(
+        meta.get("date")
+        or moment_meta.get("bucket_date")
+        or moment_meta.get("date")
+    )
+    if event_date:
+        return [f"[date:{event_date}]"]
     created = _date_yyyy_mm_dd(
         meta.get("created")
         or moment_meta.get("bucket_created")
         or moment.get("created_at")
     )
     return [f"[created:{created}]"] if created else []
+
+
+def _normalize_event_date_input(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    direct = local_date_key(text)
+    if direct:
+        return direct
+    parsed = parse_human_date_reference(text)
+    return str((parsed or {}).get("date") or "")
 
 
 def _direct_bucket_header(bucket: dict, moment: dict) -> str:
@@ -5427,6 +5636,7 @@ async def breath(
     query: str = "",
     max_tokens: int = 10000,
     domain: str = "",
+    date: str = "",
     valence: float = -1,
     arousal: float = -1,
     max_results: int = 20,
@@ -5443,7 +5653,7 @@ async def breath(
     mode: str = "",
     session_id: str = "",
 ) -> str:
-    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；domain="feel"/"whisper" 读取对应私密通道。"""
+    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；domain="feel"/"whisper" 读取对应私密通道；date 可按事件日期读取。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
@@ -5460,6 +5670,15 @@ async def breath(
     retrieval_mode = _normalize_retrieval_mode(retrieval_mode)
     mode_key = _normalize_breath_mode(mode)
     domain_key = domain.strip().lower()
+    raw_date = str(date or "").strip()
+    date_hint = parse_human_date_reference(raw_date or query)
+    if raw_date and not date_hint:
+        return '日期格式没看懂。可以用 date="2026-06-15"、date="2026.06.15"、date="2026年6月15日"、date="25年6月15日" 或 date="6月15日"。'
+    date_key = ""
+    date_label = ""
+    if date_hint and (raw_date or _breath_query_requests_date_read(query)):
+        date_key = date_hint["date"]
+        date_label = date_hint.get("label", date_key)
 
     if not mode_key and is_session_start and not str(query or "").strip() and not domain_key:
         mode_key = "handoff"
@@ -5470,6 +5689,8 @@ async def breath(
             session_id=session_id,
             debug=debug,
         )
+
+    domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
 
     # --- Feel/whisper retrieval: independent read-only channels ---
     # --- Feel/whisper 检索：独立只读入口 ---
@@ -5482,12 +5703,17 @@ async def breath(
                     b for b in feels
                     if "whisper" in {str(tag).lower() for tag in b["metadata"].get("tags", []) or []}
                 ]
+            if date_key:
+                feels = [b for b in feels if _bucket_matches_breath_date(b, date_key)]
             feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
             if not feels:
+                if date_key:
+                    return f"{date_key} 没有找到 {domain_key}。"
                 return "没有留下过 whisper。" if domain_key == "whisper" else "没有留下过 feel。"
             results = []
             for f in feels:
-                created = f["metadata"].get("created", "")
+                meta = f["metadata"]
+                created = meta.get("date") or meta.get("created", "")
                 entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
                 results.append(entry)
                 if count_tokens_approx("\n---\n".join(results)) > max_tokens:
@@ -5497,6 +5723,16 @@ async def breath(
         except Exception as e:
             logger.error(f"Feel retrieval failed: {e}")
             return "读取 whisper 失败。" if domain_key == "whisper" else "读取 feel 失败。"
+
+    if date_key:
+        return await _read_breath_date(
+            date_key=date_key,
+            label=date_label,
+            query=query,
+            max_tokens=max_tokens,
+            max_results=max_results,
+            domain_filter=domain_filter,
+        )
 
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
@@ -5678,7 +5914,6 @@ async def breath(
 
     # --- With args: search mode (keyword + vector dual channel) ---
     # --- 有参数：检索模式（关键词 + 向量双通道）---
-    domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
     if auto_surface and _recall_policy().is_auto_query_too_vague(query):
@@ -6392,6 +6627,7 @@ async def hold(
     valence: float = -1,
     arousal: float = -1,
     title: str = "",
+    date: str = "",
 ) -> str:
     """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。title 可选，传了就用你给的标题，不传则自动生成。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。"""
     await decay_engine.ensure_started()
@@ -6402,10 +6638,16 @@ async def hold(
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
+    raw_event_date = str(date or "").strip()
+    event_date = _normalize_event_date_input(raw_event_date)
+    if raw_event_date and not event_date:
+        return "date 无法解析，请使用 YYYY-MM-DD、YYYY年M月D日、M月D日、今天/昨天/前天等格式。"
+    requested_valence = valence if 0 <= valence <= 1 else None
+    requested_arousal = arousal if 0 <= arousal <= 1 else None
 
     async def create_whisper_bucket() -> str:
-        whisper_valence = valence if 0 <= valence <= 1 else 0.5
-        whisper_arousal = arousal if 0 <= arousal <= 1 else 0.3
+        whisper_valence = requested_valence if requested_valence is not None else 0.5
+        whisper_arousal = requested_arousal if requested_arousal is not None else 0.3
         whisper_tags = list(dict.fromkeys(extra_tags + ["whisper"]))
         bucket_id = await bucket_mgr.create(
             content=content,
@@ -6416,6 +6658,7 @@ async def hold(
             arousal=whisper_arousal,
             name=None,
             bucket_type="feel",
+            date=event_date or None,
         )
         _queue_embedding_refresh(bucket_id)
         return f"🫧whisper→{bucket_id}"
@@ -6429,8 +6672,8 @@ async def hold(
         # --- Feel 模式：有源记忆时挂成年轮 ---
     if feel:
         # Feel valence/arousal = model's own perspective
-        feel_valence = valence if 0 <= valence <= 1 else 0.5
-        feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
+        feel_valence = requested_valence if requested_valence is not None else 0.5
+        feel_arousal = requested_arousal if requested_arousal is not None else 0.3
         source_id = (source_bucket or "").strip()
         if source_id:
             if not MEMORY_ID_RE.fullmatch(source_id):
@@ -6472,8 +6715,8 @@ async def hold(
     content = await _auto_generate_moment_if_missing(content)
 
     domain = analysis["domain"]
-    valence = analysis["valence"]
-    arousal = analysis["arousal"]
+    valence = requested_valence if requested_valence is not None else analysis["valence"]
+    arousal = requested_arousal if requested_arousal is not None else analysis["arousal"]
     auto_tags = analysis["tags"]
     suggested_name = title.strip() or analysis.get("suggested_name", "")
 
@@ -6501,6 +6744,7 @@ async def hold(
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
+            date=event_date or None,
             extra_metadata=_memory_classification_metadata(
                 classification["memory_subject"],
                 classification["memory_layer"],
@@ -6525,6 +6769,7 @@ async def hold(
         memory_subject=classification["memory_subject"],
         memory_layer=classification["memory_layer"],
         memory_classification_source=classification["memory_classification_source"],
+        date=event_date,
     )
     _queue_memory_enrichment(bucket_id)
 
@@ -6940,6 +7185,7 @@ async def trace(
     anchor: int = -1,
     digested: int = -1,
     content: str = "",
+    date: str = "",
     delete: bool = False,
 ) -> str:
     """修改已有记忆，不创建新桶。tags/domain/content 是替换；改前先 read_bucket。resolved/digested 让旧事沉底。"""
@@ -6991,6 +7237,12 @@ async def trace(
         updates["digested"] = bool(digested)
     if content:
         updates["content"] = content
+    raw_event_date = str(date or "").strip()
+    if raw_event_date:
+        event_date = _normalize_event_date_input(raw_event_date)
+        if not event_date:
+            return "date 无法解析，请使用 YYYY-MM-DD、YYYY年M月D日、M月D日、今天/昨天/前天等格式。"
+        updates["date"] = event_date
 
     if not updates:
         return "没有任何字段需要修改。"
@@ -7506,26 +7758,35 @@ async def api_create_memory(request):
     anchor = _bool_value(body.get("anchor"), False)
     resolved = _bool_value(body.get("resolved"), False)
     digested = _bool_value(body.get("digested"), False)
+    raw_event_date = str(body.get("date") or body.get("event_date") or "").strip()
+    event_date = _normalize_event_date_input(raw_event_date)
+    if raw_event_date and not event_date:
+        return JSONResponse({"error": "invalid date"}, status_code=400)
 
     existing = await bucket_mgr.get(bucket_id) if bucket_id else None
     if existing:
+        update_kwargs = {
+            "content": content,
+            "tags": tags,
+            "importance": importance,
+            "domain": domain,
+            "valence": valence,
+            "arousal": arousal,
+            "name": title,
+            "resolved": resolved,
+            "pinned": pinned,
+            "anchor": anchor,
+            "digested": digested,
+            "confidence": confidence,
+            "source": "chatgpt",
+            "last_active": str(body.get("last_active") or now),
+            "updated_at": str(body.get("updated_at") or now),
+        }
+        if raw_event_date:
+            update_kwargs["date"] = event_date
         ok = await bucket_mgr.update(
             bucket_id,
-            content=content,
-            tags=tags,
-            importance=importance,
-            domain=domain,
-            valence=valence,
-            arousal=arousal,
-            name=title,
-            resolved=resolved,
-            pinned=pinned,
-            anchor=anchor,
-            digested=digested,
-            confidence=confidence,
-            source="chatgpt",
-            last_active=str(body.get("last_active") or now),
-            updated_at=str(body.get("updated_at") or now),
+            **update_kwargs,
         )
         if not ok:
             return JSONResponse({"error": "update failed"}, status_code=500)
@@ -7551,6 +7812,7 @@ async def api_create_memory(request):
             created=str(body.get("created") or now),
             last_active=str(body.get("last_active") or now),
             updated_at=str(body.get("updated_at") or now),
+            date=event_date or None,
         )
         status = "created"
 
@@ -8310,9 +8572,15 @@ async def api_bucket_update(request):
 
     content = str(body.get("content") or "").strip() if "content" in body else None
     name = str(body.get("name") or "").strip() if "name" in body else None
+    event_date = str(body.get("date") or "").strip() if "date" in body else None
 
-    if content is None and name is None:
-        return JSONResponse({"error": "missing content or name"}, status_code=400)
+    if content is None and name is None and event_date is None:
+        return JSONResponse({"error": "missing content, name, or date"}, status_code=400)
+    if event_date:
+        normalized_date = _normalize_event_date_input(event_date)
+        if not normalized_date:
+            return JSONResponse({"error": "invalid date"}, status_code=400)
+        event_date = normalized_date
 
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
@@ -8330,13 +8598,15 @@ async def api_bucket_update(request):
         update_kwargs["content"] = content
     if name is not None:
         update_kwargs["name"] = name or None
+    if event_date is not None:
+        update_kwargs["date"] = event_date
     update_kwargs["last_active"] = meta.get("last_active") or meta.get("created")
 
     ok = await bucket_mgr.update(bucket_id, **update_kwargs)
     if not ok:
         return JSONResponse({"error": "update failed"}, status_code=500)
 
-    embedding_queued = _queue_embedding_refresh(bucket_id)
+    embedding_queued = _queue_embedding_refresh(bucket_id) if (content is not None or name is not None) else False
 
     bucket = await bucket_mgr.get(bucket_id)
     return JSONResponse({
