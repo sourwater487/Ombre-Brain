@@ -7678,6 +7678,65 @@ async def api_profile_facts(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/profile-facts", methods=["POST"])
+async def api_profile_fact_create(request):
+    """Create one evidence-bound profile fact from dashboard input."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    fact = str(body.get("fact") or "").strip()
+    evidence_bucket_id = str(body.get("evidence_bucket_id") or body.get("bucket_id") or "").strip()
+    evidence_moment_id = str(body.get("evidence_moment_id") or body.get("moment_id") or "").strip()
+    if not fact:
+        return JSONResponse({"error": "fact is required"}, status_code=400)
+    if not evidence_bucket_id or not MEMORY_ID_RE.fullmatch(evidence_bucket_id):
+        return JSONResponse({"error": "invalid evidence_bucket_id"}, status_code=400)
+    if evidence_moment_id and not MEMORY_ID_RE.fullmatch(evidence_moment_id):
+        return JSONResponse({"error": "invalid evidence_moment_id"}, status_code=400)
+
+    try:
+        existing_keys = _existing_profile_fact_keys(await bucket_mgr.list_all(include_archive=True))
+        if _normalize_profile_fact_key(fact) in existing_keys and not _bool_value(body.get("allow_duplicate"), False):
+            return JSONResponse({"error": "duplicate profile fact"}, status_code=409)
+        identity = _identity()
+        default_subject = identity.get("user_display_name") or identity.get("user_name") or "Lin"
+        result = await profile_fact(
+            fact=fact,
+            evidence_bucket_id=evidence_bucket_id,
+            profile_kind=body.get("profile_kind") or "preference",
+            subject=body.get("subject") or default_subject,
+            predicate=body.get("predicate") or "",
+            object_value=body.get("object") or body.get("object_value") or "",
+            evidence_moment_id=evidence_moment_id,
+            evidence_context=body.get("evidence_context") or "",
+            reflection=body.get("reflection") or "",
+            followup=body.get("followup") or "",
+            confidence=body.get("confidence", 0.9),
+        )
+        if not result.startswith("profile_fact→"):
+            return JSONResponse({"error": result}, status_code=400)
+        profile_id = result.split("profile_fact→", 1)[1].split(" ", 1)[0]
+        created = await bucket_mgr.get(profile_id)
+        return JSONResponse({
+            "status": "created",
+            "id": profile_id,
+            "result": result,
+            "fact": await _profile_fact_payload(created),
+        })
+    except Exception as e:
+        logger.warning("Manual profile fact create failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @mcp.custom_route("/api/profile-facts/{bucket_id}", methods=["PATCH"])
 async def api_profile_fact_update(request):
     """Confirm, edit, or deprecate a profile fact bucket."""

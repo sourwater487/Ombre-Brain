@@ -1815,7 +1815,20 @@
     gap: 10px;
     align-items: center;
   }
-  .profile-proposal-form input {
+  .profile-manual-form {
+    display: grid;
+    grid-template-columns: minmax(220px, 1.4fr) minmax(140px, 1fr) minmax(120px, 0.8fr) auto;
+    gap: 10px;
+    align-items: start;
+  }
+  .profile-manual-form textarea {
+    grid-row: span 2;
+    min-height: 78px;
+    resize: vertical;
+  }
+  .profile-proposal-form input,
+  .profile-manual-form input,
+  .profile-manual-form textarea {
     min-height: 34px;
     padding: 8px 12px;
     border: 1px solid var(--border);
@@ -1826,6 +1839,7 @@
     font-size: 12px;
   }
   .profile-proposal-form button,
+  .profile-manual-form button,
   .profile-proposal-card button {
     min-height: 34px;
     padding: 7px 12px;
@@ -1838,6 +1852,7 @@
     font-size: 12px;
   }
   .profile-proposal-form button:hover,
+  .profile-manual-form button:hover,
   .profile-proposal-card button:hover {
     border-color: var(--border-strong);
     color: var(--accent);
@@ -2402,6 +2417,20 @@
         <p>证据化用户画像事实；Portrait Memory 只读这些事实，不自动写入。</p>
       </div>
       <button type="button" onclick="loadProfileFacts()">刷新</button>
+    </div>
+    <div class="profile-proposal-panel">
+      <div class="profile-manual-form">
+        <textarea id="profile-manual-fact" placeholder="画像事实"></textarea>
+        <input type="text" id="profile-manual-bucket-id" placeholder="证据 bucket id" />
+        <input type="text" id="profile-manual-moment-id" placeholder="moment id（可选）" />
+        <button type="button" onclick="createManualProfileFact()">手动写入</button>
+        <input type="text" id="profile-manual-kind" placeholder="kind" value="preference" />
+        <input type="text" id="profile-manual-subject" placeholder="subject" value="Lin" />
+        <input type="text" id="profile-manual-predicate" placeholder="predicate" />
+        <input type="text" id="profile-manual-object" placeholder="object" />
+        <input type="number" id="profile-manual-confidence" min="0" max="1" step="0.01" value="0.9" />
+      </div>
+      <div class="profile-proposal-message" id="profile-manual-message"></div>
     </div>
     <div class="profile-proposal-panel">
       <div class="profile-proposal-form">
@@ -3429,6 +3458,60 @@ function setProfileProposalMessage(message, tone) {
   el.textContent = message || '';
   el.classList.remove('ok', 'error');
   if (tone) el.classList.add(tone);
+}
+
+function setProfileManualMessage(message, tone) {
+  var el = document.getElementById('profile-manual-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+function profileManualValue(id) {
+  var el = document.getElementById(id);
+  return (el && el.value || '').trim();
+}
+
+async function createManualProfileFact() {
+  var fact = profileManualValue('profile-manual-fact');
+  var bucketId = profileManualValue('profile-manual-bucket-id');
+  var momentId = profileManualValue('profile-manual-moment-id');
+  if (!fact) {
+    setProfileManualMessage('先写画像事实。', 'error');
+    return;
+  }
+  if (!bucketId) {
+    setProfileManualMessage('先填证据 bucket id。', 'error');
+    return;
+  }
+  setProfileManualMessage('写入中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/profile-facts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        fact: fact,
+        evidence_bucket_id: bucketId,
+        evidence_moment_id: momentId,
+        profile_kind: profileManualValue('profile-manual-kind') || 'preference',
+        subject: profileManualValue('profile-manual-subject') || 'Lin',
+        predicate: profileManualValue('profile-manual-predicate'),
+        object: profileManualValue('profile-manual-object'),
+        confidence: Number(profileManualValue('profile-manual-confidence') || 0.9)
+      })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '写入失败');
+    setProfileManualMessage('已写入画像事实 ' + (data.id || ''), 'ok');
+    var factInput = document.getElementById('profile-manual-fact');
+    if (factInput) factInput.value = '';
+    await loadProfileFacts();
+    await loadBuckets();
+  } catch (e) {
+    setProfileManualMessage('写入失败: ' + e.message, 'error');
+  }
 }
 
 async function generateProfileFactProposals() {
