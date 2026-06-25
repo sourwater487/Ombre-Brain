@@ -407,6 +407,84 @@ class GatewayStateStore:
             for row in rows
         ]
 
+    def list_conversation_turns_between(
+        self,
+        *,
+        profile_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(80, int(limit or 12)))
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT id, profile_id, session_id, round_id, created_at,
+                   user_text, assistant_text, model, client, route
+            FROM conversation_turns
+            WHERE profile_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (safe_profile_id, max(safe_limit, 500)),
+        ).fetchall()
+        conn.close()
+
+        compare_tz = start_at.tzinfo or end_at.tzinfo
+
+        def parse_local(value: Any) -> datetime | None:
+            try:
+                parsed = datetime.fromisoformat(str(value or ""))
+            except ValueError:
+                return None
+            if compare_tz is None:
+                return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=compare_tz)
+            return parsed.astimezone(compare_tz)
+
+        start = start_at
+        end = end_at
+        if compare_tz is not None:
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=compare_tz)
+            else:
+                start = start.astimezone(compare_tz)
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=compare_tz)
+            else:
+                end = end.astimezone(compare_tz)
+        elif start.tzinfo is not None:
+            start = start.replace(tzinfo=None)
+        elif end.tzinfo is not None:
+            end = end.replace(tzinfo=None)
+
+        filtered = []
+        for row in rows:
+            created = parse_local(row["created_at"])
+            if created is None or not (start <= created < end):
+                continue
+            filtered.append(row)
+            if len(filtered) >= safe_limit:
+                break
+
+        return [
+            {
+                "id": row["id"],
+                "profile_id": row["profile_id"],
+                "session_id": row["session_id"],
+                "round_id": row["round_id"],
+                "created_at": row["created_at"],
+                "user_text": row["user_text"] or "",
+                "assistant_text": row["assistant_text"] or "",
+                "model": row["model"] or "",
+                "client": row["client"] or "",
+                "route": row["route"] or "",
+            }
+            for row in filtered
+        ]
+
     def list_injection_debug(
         self,
         *,

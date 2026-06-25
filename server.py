@@ -74,6 +74,7 @@ from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
 from gateway import GatewayService
+from gateway_state import GatewayStateStore
 from identity import identity_names
 from identity_semantics import IdentitySemanticStore
 from import_memory import ImportEngine
@@ -167,6 +168,7 @@ memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/
 memory_write_gate = MemoryWriteGate(config)            # Automatic grow gate / 自动写入门卫
 reflection_engine = ReflectionEngine(config)           # Reflection worker / 关系天气与关系整理
 portrait_engine = DailyPortraitMaintainer(config)      # Daily portrait state / 每日画像状态
+gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
@@ -7935,6 +7937,7 @@ async def reflect(period: str = "daily", force: bool = False) -> dict:
         persona_engine=persona_engine,
         embedding_engine=embedding_engine,
         force=force,
+        conversation_turn_store=gateway_state_store,
     )
 
 
@@ -9300,6 +9303,7 @@ async def api_reflection_run(request):
             persona_engine=persona_engine,
             embedding_engine=embedding_engine,
             force=_bool_value(body.get("force"), False),
+            conversation_turn_store=gateway_state_store,
         )
         return JSONResponse(result)
     except Exception as e:
@@ -9569,6 +9573,18 @@ async def api_config_get(request):
                 reflection_cfg.get(
                     "daily_enabled",
                     getattr(reflection_engine, "daily_enabled", True),
+                )
+            ),
+            "daily_min_memory_items": int(
+                reflection_cfg.get(
+                    "daily_min_memory_items",
+                    getattr(reflection_engine, "daily_min_memory_items", 5),
+                )
+            ),
+            "daily_conversation_turn_limit": int(
+                reflection_cfg.get(
+                    "daily_conversation_turn_limit",
+                    getattr(reflection_engine, "daily_conversation_turn_limit", 0),
                 )
             ),
             "memory_affect_anchor_enabled": bool(
@@ -10100,6 +10116,24 @@ async def api_config_update(request):
             if key in r:
                 reflection_cfg[key] = str(r[key] or "").strip()
                 updated.append(f"reflection.{key}")
+        if "daily_min_memory_items" in r:
+            reflection_cfg["daily_min_memory_items"] = _int_between(
+                r.get("daily_min_memory_items"),
+                5,
+                0,
+                100,
+            )
+            reflection_engine.daily_min_memory_items = reflection_cfg["daily_min_memory_items"]
+            updated.append("reflection.daily_min_memory_items")
+        if "daily_conversation_turn_limit" in r:
+            reflection_cfg["daily_conversation_turn_limit"] = _int_between(
+                r.get("daily_conversation_turn_limit"),
+                0,
+                0,
+                80,
+            )
+            reflection_engine.daily_conversation_turn_limit = reflection_cfg["daily_conversation_turn_limit"]
+            updated.append("reflection.daily_conversation_turn_limit")
         if "api_key" in r and r["api_key"]:
             reflection_cfg["api_key"] = str(r["api_key"])
             os.environ["OMBRE_REFLECTION_API_KEY"] = reflection_cfg["api_key"]
@@ -10526,6 +10560,20 @@ async def api_config_update(request):
                 for key in ("model", "base_url"):
                     if key in body["reflection"]:
                         sc_reflection[key] = str(body["reflection"][key] or "").strip()
+                if "daily_min_memory_items" in body["reflection"]:
+                    sc_reflection["daily_min_memory_items"] = _int_between(
+                        body["reflection"].get("daily_min_memory_items"),
+                        5,
+                        0,
+                        100,
+                    )
+                if "daily_conversation_turn_limit" in body["reflection"]:
+                    sc_reflection["daily_conversation_turn_limit"] = _int_between(
+                        body["reflection"].get("daily_conversation_turn_limit"),
+                        0,
+                        0,
+                        80,
+                    )
                 # Never persist api_key to yaml (use env var)
 
             if "portrait" in body:
@@ -10880,6 +10928,7 @@ if __name__ == "__main__":
             local_persona_engine = PersonaStateEngine(config)
             local_reflection_engine = ReflectionEngine(config)
             local_memory_edge_store = MemoryEdgeStore(config)
+            local_gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
             while True:
                 try:
                     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
@@ -10892,10 +10941,23 @@ if __name__ == "__main__":
                     local_reflection_engine.relationship_weather_affect_anchor_enabled = bool(
                         reflection_cfg.get("relationship_weather_affect_anchor_enabled", True)
                     )
+                    local_reflection_engine.daily_min_memory_items = _int_between(
+                        reflection_cfg.get("daily_min_memory_items"),
+                        5,
+                        0,
+                        100,
+                    )
+                    local_reflection_engine.daily_conversation_turn_limit = _int_between(
+                        reflection_cfg.get("daily_conversation_turn_limit"),
+                        0,
+                        0,
+                        80,
+                    )
                     results = await local_reflection_engine.run_due(
                         local_bucket_mgr,
                         local_persona_engine,
                         local_embedding_engine,
+                        local_gateway_state_store,
                     )
                     if results:
                         logger.info("Reflection run-due results / 反思定时结果: %s", results)

@@ -350,6 +350,10 @@ class BucketManager:
             post["source_persona_event_ids"] = (
                 kwargs["source_persona_event_ids"] if isinstance(kwargs["source_persona_event_ids"], list) else []
             )
+        if "source_conversation_turn_ids" in kwargs:
+            post["source_conversation_turn_ids"] = (
+                kwargs["source_conversation_turn_ids"] if isinstance(kwargs["source_conversation_turn_ids"], list) else []
+            )
 
         # --- Auto-refresh content update time and activation time ---
         # --- 自动刷新内容更新时间与激活时间 ---
