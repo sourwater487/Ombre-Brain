@@ -1815,6 +1815,23 @@
   .portrait-row-meta {
     margin-top: 6px;
   }
+  .portrait-row-meta button {
+    min-height: 24px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+  }
+  .portrait-row-meta button.danger { color: var(--negative); }
+  .portrait-row-meta button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .portrait-row-meta button.danger:hover { color: var(--negative); }
   .portrait-evidence {
     margin-top: 5px;
     color: var(--text-light);
@@ -2441,8 +2458,9 @@
         <p>新窗口 handoff 当前使用的每日画像状态；只读，不写 profile_fact、anchor 或 Core Memory。</p>
       </div>
       <div class="profile-actions">
-        <button type="button" onclick="loadPortraitState()">刷新</button>
+        <button type="button" onclick="refreshPortraitView()">刷新</button>
         <button type="button" onclick="runPortraitMaintain()">手动生成</button>
+        <button type="button" class="danger" onclick="resetPortraitState()">清空画像</button>
       </div>
     </div>
     <section class="portrait-state-panel" id="portrait-state-panel">
@@ -2869,8 +2887,8 @@ let identitySemanticData = null;
 let currentFilter = 'all';
 let bucketBulkMode = false;
 let selectedBucketIds = new Set();
-let dashboardCommentAuthor = 'Rain';
-let dashboardAiAuthor = 'Haven';
+let dashboardCommentAuthor = 'Lin';
+let dashboardAiAuthor = 'Che';
 let reflectionSelectedDate = formatLocalDate(new Date());
 let reflectionCurrentMonth = monthStart(new Date());
 let configSnapshot = null;
@@ -3016,7 +3034,8 @@ document.getElementById('search-input').addEventListener('input', (e) => {
   }, 300);
 });
 
-async function loadBuckets() {
+async function loadBuckets(options) {
+  options = options || {};
   try {
     const res = await authFetch(BASE + '/api/buckets');
     if (!res) return;
@@ -3032,7 +3051,7 @@ async function loadBuckets() {
     renderBuckets(filterBuckets(allBuckets));
     if (getActiveTab() === 'reflection') renderReflectionReview();
     if (getActiveTab() === 'dreams') loadDreams();
-    if (getActiveTab() === 'profile') {
+    if (getActiveTab() === 'profile' && !options.skipProfileRefresh) {
       loadPortraitState();
       loadProfileFacts();
     }
@@ -3283,7 +3302,7 @@ async function loadDreams() {
       return;
     }
     content.innerHTML = '<div class="dream-list">' + records.map(function(record) {
-      var aiName = record.ai_name || dashboardAiAuthor || 'Haven';
+      var aiName = record.ai_name || dashboardAiAuthor || 'Che';
       return '<div class="dream-row">' +
         '<div class="dream-row-title">' + formatDreamDate(record) + ' ' + esc(aiName) + ' 做了一个梦</div>' +
         '<div class="dream-row-status">' + dreamStatusLabel(record.status) + '</div>' +
@@ -3358,6 +3377,32 @@ async function runPortraitMaintain() {
   }
 }
 
+async function refreshPortraitView() {
+  await loadBuckets({ skipProfileRefresh: true });
+  await loadPortraitState();
+  await loadProfileFacts();
+}
+
+async function resetPortraitState() {
+  var typed = prompt('输入 RESET 清空 Portrait State。下一次手动生成会按第一次生成运行。');
+  if (typed !== 'RESET') return;
+  setPortraitMaintainMessage('清空中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/portrait-state/reset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ confirm: 'RESET' })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '清空失败');
+    setPortraitMaintainMessage('已清空画像；下一次手动生成会按第一次生成。', 'ok');
+    await loadPortraitState();
+  } catch (e) {
+    setPortraitMaintainMessage('清空失败: ' + e.message, 'error');
+  }
+}
+
 function renderPortraitState(data) {
   var content = document.getElementById('portrait-state-content');
   var summary = document.getElementById('portrait-state-summary');
@@ -3375,6 +3420,7 @@ function renderPortraitState(data) {
     '<span class="profile-chip">state ' + esc(state.state_path || '—') + '</span>' +
   '</div>';
   content.innerHTML =
+    renderPortraitTimeline(state.recent_timeline, state.recent_activities) +
     '<div class="portrait-state-grid">' +
       renderPortraitScope('user', portrait.user || {}) +
       renderPortraitScope('persona', portrait.persona || {}) +
@@ -3388,26 +3434,42 @@ function renderPortraitState(data) {
 
 function renderPortraitScope(scope, scopeState) {
   var labels = {
-    user: 'User Portrait',
+    user: 'Lin Portrait',
     persona: 'Persona',
     relationship: 'Relationship'
   };
   var stableRows = scopeState.stable ? [{
     text: scopeState.stable,
     evidence: scopeState.stable_evidence || [],
+    source_dates: scopeState.stable_source_dates || [],
+    source_date: scopeState.stable_source_date || '',
     updated_at: scopeState.stable_updated_at || ''
   }] : [];
   var midRows = scopeState.mid_term ? [{
     text: scopeState.mid_term,
     evidence: scopeState.mid_term_evidence || [],
+    source_dates: scopeState.mid_term_source_dates || [],
+    source_date: scopeState.mid_term_source_date || '',
     updated_at: scopeState.mid_term_updated_at || ''
   }] : [];
+  stableRows = stableRows.map(function(row) {
+    return withPortraitDelete(row, { area: 'portrait', scope: scope, layer: 'stable', text: row.text || '' });
+  });
+  midRows = midRows.map(function(row) {
+    return withPortraitDelete(row, { area: 'portrait', scope: scope, layer: 'mid_term', text: row.text || '' });
+  });
+  var stagingRows = portraitRows(scopeState.staging_pool).slice(0, 6).map(function(row, index) {
+    return withPortraitDelete(row, { area: 'portrait', scope: scope, layer: 'staging_pool', index: index, text: row && row.text || '' });
+  });
+  var recentRows = portraitRows(scopeState.recent_buffer).slice(0, 6).map(function(row, index) {
+    return withPortraitDelete(row, { area: 'portrait', scope: scope, layer: 'recent_buffer', index: index, text: row && row.text || '' });
+  });
   return '<section class="portrait-scope">' +
     '<h3>' + esc(labels[scope] || scope) + '</h3>' +
     renderPortraitLayer('stable', stableRows, '还没有 stable portrait。') +
     renderPortraitLayer('mid term', midRows, '还没有 mid-term portrait。') +
-    renderPortraitLayer('staging pool', portraitRows(scopeState.staging_pool).slice(0, 6), 'staging pool 为空。') +
-    renderPortraitLayer('recent buffer', portraitRows(scopeState.recent_buffer).slice(0, 6), 'recent buffer 为空。') +
+    renderPortraitLayer('staging pool', stagingRows, 'staging pool 为空。') +
+    renderPortraitLayer('recent buffer', recentRows, 'recent buffer 为空。') +
   '</section>';
 }
 
@@ -3425,11 +3487,50 @@ function renderPortraitRows(rows, emptyText) {
 }
 
 function renderPortraitCandidates(title, candidates) {
-  var rows = portraitRows(candidates).slice(-8).reverse();
+  var area = title.indexOf('Stable') === 0 ? 'stable_candidates' : 'profile_fact_candidates';
+  var rows = portraitRows(candidates).map(function(row, index) {
+    return withPortraitDelete(row, { area: area, index: index, text: row && row.text || '' });
+  }).slice(-8).reverse();
   return '<section class="portrait-candidates">' +
     '<h3>' + esc(title) + '</h3>' +
     renderPortraitRows(rows, '没有候选。') +
   '</section>';
+}
+
+function renderPortraitTimeline(timeline, recentActivities) {
+  var rows = portraitRows(timeline);
+  var area = 'recent_timeline';
+  if (!rows.length) {
+    rows = portraitRows(recentActivities);
+    area = 'recent_activities';
+  }
+  rows = rows.slice(0, 8).map(function(row, index) {
+    return withPortraitDelete(row, { area: area, index: index, text: row && row.text || '' });
+  });
+  return '<section class="portrait-scope portrait-timeline">' +
+    '<div class="portrait-layer-title">Recent Timeline</div>' +
+    renderPortraitRows(rows, '还没有 recent timeline。') +
+  '</section>';
+}
+
+function withPortraitDelete(row, spec) {
+  row = Object.assign({}, row || {});
+  row._delete = spec;
+  return row;
+}
+
+function portraitRowDateLabel(item) {
+  if (item.time_label) return 'time ' + item.time_label;
+  var dates = Array.isArray(item.source_dates) ? item.source_dates.filter(Boolean) : [];
+  if (item.source_date) dates.unshift(item.source_date);
+  var seen = [];
+  dates.forEach(function(date) {
+    date = String(date || '').trim();
+    if (date && seen.indexOf(date) === -1) seen.push(date);
+  });
+  if (seen.length) return 'source ' + seen.slice(0, 3).join(', ');
+  if (item.last_seen_date) return 'seen ' + item.last_seen_date;
+  return item.updated_at || item.created_at || '';
 }
 
 function renderPortraitRow(item) {
@@ -3443,16 +3544,45 @@ function renderPortraitRow(item) {
   if (item.object) meta.push(item.object);
   if (item.confidence != null) meta.push('confidence ' + Number(item.confidence || 0).toFixed(2));
   if (item.count) meta.push('seen ' + item.count);
-  if (item.updated_at || item.last_seen_date || item.created_at) {
-    meta.push(item.updated_at || item.last_seen_date || item.created_at);
-  }
+  var dateLabel = portraitRowDateLabel(item);
+  if (dateLabel) meta.push(dateLabel);
+  var deleteSpec = item._delete ? escAttr(jsString(JSON.stringify(item._delete))) : '';
+  var deleteButton = deleteSpec
+    ? '<button type="button" class="danger" onclick="deletePortraitStateItem(\'' + deleteSpec + '\')">删除</button>'
+    : '';
   return '<div class="portrait-row">' +
     '<div class="portrait-row-text">' + esc(text) + '</div>' +
     (meta.length ? '<div class="portrait-row-meta">' + meta.map(function(part) {
       return '<span class="profile-chip">' + esc(part) + '</span>';
-    }).join('') + '</div>' : '') +
+    }).join('') + deleteButton + '</div>' : (deleteButton ? '<div class="portrait-row-meta">' + deleteButton + '</div>' : '')) +
     renderPortraitEvidence(item.evidence) +
   '</div>';
+}
+
+async function deletePortraitStateItem(specJson) {
+  var spec;
+  try {
+    spec = JSON.parse(specJson || '{}');
+  } catch (e) {
+    alert('删除参数错误。');
+    return;
+  }
+  if (!confirm('删除这条画像记录？')) return;
+  spec.confirm = 'DELETE';
+  try {
+    var res = await authFetch(BASE + '/api/portrait-state/items', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(spec)
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || data.reason || '删除失败');
+    setPortraitMaintainMessage('已删除画像记录。', 'ok');
+    await loadPortraitState();
+  } catch (e) {
+    setPortraitMaintainMessage('删除失败: ' + e.message, 'error');
+  }
 }
 
 function renderPortraitEvidence(evidence) {

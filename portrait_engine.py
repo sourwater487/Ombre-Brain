@@ -21,18 +21,20 @@ PATCH_KEYS = (
     "add_recent_activity",
     "move_to_staging",
     "rewrite_mid_term",
+    "rewrite_stable",
     "stable_candidate",
     "profile_fact_candidate",
     "skip",
 )
 
 
-PORTRAIT_PROMPT_TEMPLATE = """你是 {ai_name}，正在维护你和 {user_display_name} 的换窗画像。
-只根据证据写观察，不补常识，不把短期情绪当长期事实，也不要把关系气候误写成用户事实。
+PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正在为 {ai_name} 和 {user_display_name} 维护换窗时可用的画像状态。
+你的写作要中立、平实、具体：只根据证据整理状态，不做心理诊断，不用夸张语气，不把单次事件写成稳定人格。
+这不是文学分析或关系评语；目标是让下一个窗口用很少文字恢复“正在发生什么、长期边界是什么、该怎样继续靠近”。
 
 你会收到 previous_portrait 和 memory_materials。请输出纯 JSON：
 {{
-  "daily_summary": "今天发生了什么，最多80字",
+  "daily_summary": "今天的主要事实，最多60字",
   "add_recent": [
     {{
       "scope": "user|persona|relationship",
@@ -48,13 +50,28 @@ PORTRAIT_PROMPT_TEMPLATE = """你是 {ai_name}，正在维护你和 {user_displa
       "confidence": 0.72
     }}
   ],
-  "move_to_staging": [],
+  "move_to_staging": [
+    {{
+      "scope": "user|persona|relationship",
+      "text": "有证据但还不到 mid-term 的观察；一条只表达一个可维护点",
+      "evidence": [{{"bucket_id": "证据桶id", "moment_id": ""}}],
+      "confidence": 0.72
+    }}
+  ],
   "rewrite_mid_term": [
     {{
       "scope": "user|persona|relationship",
-      "text": "最近几周的综合画像，只能从 staging_pool 或本次 move_to_staging 的证据得出",
+      "text": "最近几周的核心画像概括；一句话说清反复出现的模式，不拼接事件列表",
       "evidence": [{{"bucket_id": "证据桶id"}}],
       "confidence": 0.72
+    }}
+  ],
+  "rewrite_stable": [
+    {{
+      "scope": "user|persona|relationship",
+      "text": "长期稳定画像。必须是一整段，可在 previous_portrait.stable 基础上维护",
+      "evidence": [{{"bucket_id": "证据桶id"}}],
+      "confidence": 0.82
     }}
   ],
   "stable_candidate": [],
@@ -62,20 +79,30 @@ PORTRAIT_PROMPT_TEMPLATE = """你是 {ai_name}，正在维护你和 {user_displa
   "skip": []
 }}
 
-边界：
-- user 只写 {user_display_name} 的证据化状态、偏好、边界；“最近在做什么”优先写 add_recent_activity。
-- persona 写 {ai_name} 的自我理解和回复姿态。
-- relationship 写这段关系的边界、里程碑和气候。
-- add_recent_activity 只回答“{user_display_name}最近在做什么/推进什么/忙什么”，偏项目、生活事项、正在处理的问题；不要写纯情绪、关系天气或长期偏好。
-- 不要滥用“{user_display_name}喜欢...”。只有证据明确表达稳定偏好、反复选择或清楚的喜欢时才写 user 偏好；关系天气、撒娇、确认、互动模式优先写 relationship。
-- initial_run=true 时，add_recent 和 add_recent_activity 只放真正短期/当天或最近几天观察；高置信、能跨窗口携带的观察应放入 move_to_staging。每个 scope 尽量给 1-3 条 move_to_staging，除非证据不足。
-- rewrite_mid_term 可综合 staging_pool 或本次 move_to_staging；初次初始化时，如果本次 move_to_staging 已足够支撑，可以写一条谨慎的 mid_term。
-- 输出要克制：daily_summary 最多60字，add_recent 最多4条，add_recent_activity 最多3条，move_to_staging 最多8条，rewrite_mid_term 最多3条，每条 text 最多70字。
+抽取策略：
+- 先找证据里反复出现、未来换窗仍有用的模式，再写画像；只说明当天发生什么的内容放 add_recent 或 add_recent_activity。
+- user 回答“{user_display_name}近期稳定呈现的工作方式、偏好、边界或关心点是什么”；“最近在做什么”优先写 add_recent_activity。
+- relationship 回答“这段关系最近怎样被恢复、有哪些边界、协作方式或里程碑”；关系天气、撒娇、确认、互动模式优先写 relationship。不要把技术工作升格成象征、仪式或文学化解释。
+- persona 暂时只作内部候选；除非证据明确要求维护 {ai_name} 的第一人称锚点或回复姿态，否则优先维护 user 和 relationship。
+- add_recent_activity 只回答“{user_display_name}最近在做什么/推进什么/忙什么”，偏项目、生活事项、正在处理的问题。
+- initial_run=true 时，add_recent 和 add_recent_activity 只放真正短期/当天或最近几天观察；高置信、能跨窗口携带的观察放入 move_to_staging。每个 scope 尽量给 1-3 条 move_to_staging，证据不足时少写。
+- rewrite_mid_term 把一个 scope 维护成一条真正的画像判断：一句核心概括，体现反复模式，不输出多条近似碎片，不把事件原文串起来。
+- initial_run=true 且 user 或 relationship 有足够证据时，优先给对应 scope 输出 rewrite_mid_term，让 handoff 主画像可用。
+- rewrite_stable 把一个 scope 的长期画像维护成一整段，在 previous_portrait.stable 基础上增删改；只有跨多日反复出现或已经由 mid_term/staging 支撑、未来换窗仍有用时才写。
+- 输出要克制：daily_summary 最多60字，add_recent 最多4条，add_recent_activity 最多3条，move_to_staging 最多8条，rewrite_mid_term 每个 scope 最多1条，rewrite_stable 每个 scope 最多1条；rewrite_mid_term text 最多80字，其他 text 最多160字。
 - profile_fact_candidate 只提候选，不确认、不写入长期 profile_fact。
-- stable_candidate 只提候选，不直接覆盖 stable portrait。
-- rewrite_mid_term 只能综合 staging_pool 里的观察，或本次明确 move_to_staging 的观察；不要直接把当天新材料写成 mid_term。
-- memory_materials 含路径、tags、created 日期、关键 moment/reflection 片段，以及 source_excerpt 原文短摘；优先读证据原味，不要要求更长正文。
+- stable_candidate 只提候选；如果证据足够更新 stable portrait，优先输出 rewrite_stable。
+- rewrite_mid_term 只能综合 staging_pool 里的观察，或本次明确 move_to_staging 的观察；当天新材料先进入 staging，再作为 mid-term 证据。
+- rewrite_stable 必须有 previous_portrait 或 staging/mid-term 证据支撑。
+- memory_materials 含路径、tags、created 日期、关键 moment/reflection 片段，以及 source_excerpt 原文短摘；优先读证据原味。
 - 每条 add/rewrite/candidate 都必须带 evidence；没有证据就放 skip。
+
+输出前逐条自检：
+- text 是否像画像判断，而不是事件流水账。
+- text 是否混入 bucket_id、日期、文件路径或证据编号；这些只放 evidence。
+- text 是否平实准确，避免“总是、一定、极度、深刻、高度敏感、仪式、象征”等证据不足的夸张词。
+- user、relationship、persona 是否放在正确 scope；recent doing 是否留在 add_recent_activity。
+- 多条相似材料是否已经压成一句核心概括。
 - 输出 JSON 对象，不要 markdown，不要解释。"""
 
 
@@ -116,6 +143,7 @@ class DailyPortraitMaintainer:
         self.recent_buffer_max = max(1, int(cfg.get("recent_buffer_max", 24)))
         self.staging_pool_max = max(1, int(cfg.get("staging_pool_max", 24)))
         self.candidate_max = max(1, int(cfg.get("candidate_max", 40)))
+        self.recent_timeline_max = max(self.recent_buffer_max, int(cfg.get("recent_timeline_max", 48)))
         self.base_url = (
             os.environ.get("OMBRE_PORTRAIT_BASE_URL", "")
             or cfg.get("base_url")
@@ -146,7 +174,8 @@ class DailyPortraitMaintainer:
             or ""
         ).strip()
         self.temperature = float(cfg.get("temperature", reflection_cfg.get("temperature", 0.1)))
-        self.max_tokens = int(cfg.get("max_tokens", 1800))
+        self.max_tokens = int(cfg.get("max_tokens", 3200))
+        self.json_response_format = self._bool(cfg.get("json_response_format", True), True)
         self.state_path = self._state_path(cfg.get("state_path", ""))
         self.client = None
         if self.enabled and self.api_key and self.base_url:
@@ -207,6 +236,7 @@ class DailyPortraitMaintainer:
             # Initial portrait generation scans broad history; its summary is not a real daily recap.
             normalized_patch["daily_summary"] = ""
             self._demote_initial_old_recent(normalized_patch, materials)
+        self._seed_missing_mid_terms(normalized_patch, state)
         handoff_summaries = self._build_handoff_recent_summaries(
             materials,
             normalized_patch,
@@ -214,6 +244,9 @@ class DailyPortraitMaintainer:
         )
         if handoff_summaries:
             normalized_patch["handoff_recent_summaries"] = handoff_summaries
+        recent_timeline = self._build_recent_timeline(materials, normalized_patch, date_key)
+        if recent_timeline:
+            normalized_patch["recent_timeline"] = recent_timeline
         next_state = self._apply_patch(state, normalized_patch, date_key)
         next_state["updated_at"] = self._now_utc()
         next_state.setdefault("runs", []).append(
@@ -295,6 +328,7 @@ class DailyPortraitMaintainer:
             return state
         state = self._merge_state(state, data)
         self._drop_initial_daily_summaries(state)
+        self._normalize_recent_timeline_state(state)
         return state
 
     def save_state(self, state: dict) -> None:
@@ -305,24 +339,105 @@ class DailyPortraitMaintainer:
             f.write("\n")
         os.replace(tmp_path, self.state_path)
 
+    def reset_state(self) -> dict:
+        state = self._empty_state()
+        state["updated_at"] = self._now_utc()
+        self.save_state(state)
+        return {
+            "status": "reset",
+            "state_path": self.state_path,
+            "updated_at": state["updated_at"],
+            "initial": True,
+        }
+
+    def delete_state_item(
+        self,
+        *,
+        area: str,
+        scope: str = "",
+        layer: str = "",
+        index: int | None = None,
+        text: str = "",
+    ) -> dict:
+        state = self.load_state()
+        area = str(area or "").strip()
+        scope = str(scope or "").strip()
+        layer = str(layer or "").strip()
+        expected_text = str(text or "").strip()
+
+        if area == "portrait":
+            if scope not in PORTRAIT_SCOPES:
+                return {"status": "invalid", "reason": "invalid_scope"}
+            scope_state = state["portrait"][scope]
+            if layer in {"stable", "mid_term"}:
+                current = str(scope_state.get(layer) or "").strip()
+                if not current:
+                    return {"status": "not_found", "reason": "empty_layer"}
+                if expected_text and self._norm(current) != self._norm(expected_text):
+                    return {"status": "conflict", "reason": "text_mismatch"}
+                if layer == "stable":
+                    scope_state["stable"] = ""
+                    scope_state["stable_evidence"] = []
+                    scope_state["stable_source_dates"] = []
+                    scope_state["stable_source_date"] = ""
+                    scope_state["stable_updated_at"] = ""
+                else:
+                    scope_state["mid_term"] = ""
+                    scope_state["mid_term_evidence"] = []
+                    scope_state["mid_term_source_dates"] = []
+                    scope_state["mid_term_source_date"] = ""
+                    scope_state["mid_term_updated_at"] = ""
+                state["updated_at"] = self._now_utc()
+                self.save_state(state)
+                return {"status": "deleted", "area": area, "scope": scope, "layer": layer}
+            if layer not in {"recent_buffer", "staging_pool"}:
+                return {"status": "invalid", "reason": "invalid_layer"}
+            rows = scope_state.get(layer)
+        elif area in {"recent_activities", "recent_timeline", "stable_candidates", "profile_fact_candidates", "skipped"}:
+            rows = state.get(area)
+            scope = ""
+            layer = area
+        else:
+            return {"status": "invalid", "reason": "invalid_area"}
+
+        if not isinstance(rows, list):
+            return {"status": "invalid", "reason": "target_not_list"}
+        found_index = self._find_row_index(rows, index=index, text=expected_text)
+        if found_index is None:
+            return {"status": "not_found", "reason": "row_not_found"}
+        removed = rows.pop(found_index)
+        state["updated_at"] = self._now_utc()
+        self.save_state(state)
+        return {
+            "status": "deleted",
+            "area": area,
+            "scope": scope,
+            "layer": layer,
+            "index": found_index,
+            "text": removed.get("text", "") if isinstance(removed, dict) else "",
+        }
+
+    def _find_row_index(self, rows: list, *, index: int | None, text: str) -> int | None:
+        if index is not None and 0 <= index < len(rows):
+            if not text:
+                return index
+            row = rows[index]
+            if isinstance(row, dict) and self._norm(row.get("text", "")) == self._norm(text):
+                return index
+        if text:
+            needle = self._norm(text)
+            for idx, row in enumerate(rows):
+                if isinstance(row, dict) and self._norm(row.get("text", "")) == needle:
+                    return idx
+        return None
+
     def build_handoff_sections(self, *, max_recent_items: int = 4) -> dict[str, str]:
         state = self.load_state()
         portrait = state.get("portrait", {}) if isinstance(state.get("portrait"), dict) else {}
-        user_portrait = self._format_scope_block(portrait.get("user", {}), max_recent_items=max_recent_items)
-        recent_activity = self._format_recent_activity_block(state, max_items=3)
-        if recent_activity:
-            user_portrait = "\n".join(
-                part
-                for part in [
-                    user_portrait,
-                    "最近在做什么:\n" + recent_activity,
-                ]
-                if part.strip()
-            )
         return {
-            "user": user_portrait,
-            "persona": self._format_scope_block(portrait.get("persona", {}), max_recent_items=max_recent_items),
-            "relationship": self._format_scope_block(portrait.get("relationship", {}), max_recent_items=max_recent_items),
+            "user": self._format_scope_block(portrait.get("user", {})),
+            "persona": self._format_scope_block(portrait.get("persona", {})),
+            "relationship": self._format_scope_block(portrait.get("relationship", {})),
             "recent_continuity": self._format_recent_continuity(state, max_items=max_recent_items),
             "state_path": self.state_path,
             "updated_at": str(state.get("updated_at") or ""),
@@ -395,16 +510,56 @@ class DailyPortraitMaintainer:
                 "persona_events": materials.get("persona_events", []),
             },
         }
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": self._prompt()},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            **self._completion_options(max_tokens=self.max_tokens, temperature=self.temperature),
+        token_attempts = [self.max_tokens]
+        retry_tokens = min(max(self.max_tokens * 2, 4000), 8000)
+        if retry_tokens > self.max_tokens:
+            token_attempts.append(retry_tokens)
+        last_error: Exception | None = None
+        for index, max_tokens in enumerate(token_attempts):
+            response = await self._create_patch_completion(payload, max_tokens=max_tokens)
+            choice = response.choices[0] if response.choices else None
+            raw = choice.message.content if choice and choice.message else "{}"
+            finish_reason = str(getattr(choice, "finish_reason", "") or "")
+            try:
+                return self._parse_json_object(raw or "{}")
+            except ValueError as exc:
+                last_error = exc
+                logger.warning(
+                    "Portrait JSON parse failed on attempt %s/%s, finish_reason=%s, raw_chars=%s",
+                    index + 1,
+                    len(token_attempts),
+                    finish_reason or "unknown",
+                    len(str(raw or "")),
+                )
+                if index + 1 >= len(token_attempts):
+                    raise
+        raise last_error or ValueError("portrait_json_parse_failed")
+
+    async def _create_patch_completion(self, payload: dict, *, max_tokens: int):
+        messages = [
+            {"role": "system", "content": self._prompt()},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        options = self._completion_options(
+            max_tokens=max_tokens,
+            temperature=self.temperature,
+            json_response=self.json_response_format,
         )
-        raw = response.choices[0].message.content if response.choices else "{}"
-        return self._parse_json_object(raw or "{}")
+        try:
+            return await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                **options,
+            )
+        except Exception as exc:
+            if not options.pop("response_format", None):
+                raise
+            logger.warning("Portrait JSON response_format failed, retrying without it: %s", exc)
+            return await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                **options,
+            )
 
     def _fallback_patch(self, materials: dict, *, initial: bool) -> dict:
         add_recent = []
@@ -506,6 +661,7 @@ class DailyPortraitMaintainer:
 
         for key, bucket_ids, session_ids, missing_reason in (
             ("rewrite_mid_term", staging_bucket_ids, staging_session_ids, "missing_staging_evidence"),
+            ("rewrite_stable", known_bucket_ids, known_session_ids, "missing_valid_evidence"),
             ("stable_candidate", known_bucket_ids, known_session_ids, "missing_valid_evidence"),
             ("profile_fact_candidate", known_bucket_ids, known_session_ids, "missing_valid_evidence"),
             ("skip", set(), set(), "missing_valid_evidence"),
@@ -530,6 +686,11 @@ class DailyPortraitMaintainer:
         daily_summary = str(patch.get("daily_summary") or "").strip()
         if daily_summary:
             normalized["daily_summary"] = self._clip(daily_summary, 160)
+        for key in ("rewrite_mid_term", "rewrite_stable"):
+            by_scope = {}
+            for item in normalized.get(key, []) or []:
+                by_scope[item["scope"]] = item
+            normalized[key] = [by_scope[scope] for scope in PORTRAIT_SCOPES if scope in by_scope]
         return normalized, rejected
 
     def _normalize_patch_item(
@@ -580,6 +741,8 @@ class DailyPortraitMaintainer:
             "evidence": evidence,
             "confidence": self._clamp(item.get("confidence"), 0.55),
         }
+        if key in {"rewrite_mid_term", "rewrite_stable"} and self._portrait_text_too_stylized(clean["text"]):
+            return None, "overstyled_portrait_text"
         if key == "profile_fact_candidate":
             clean["profile_kind"] = self._safe_key(item.get("profile_kind") or item.get("kind") or "other")
             clean["predicate"] = self._safe_key(item.get("predicate") or "")
@@ -605,6 +768,77 @@ class DailyPortraitMaintainer:
                 patch.setdefault("skip", []).append({"text": item.get("text", ""), "scope": "user"})
         patch["add_recent_activity"] = kept_activities
 
+    def _seed_missing_mid_terms(self, patch: dict, state: dict) -> None:
+        portrait = state.get("portrait", {}) if isinstance(state.get("portrait"), dict) else {}
+        existing_scopes = {
+            str(item.get("scope") or "")
+            for item in patch.get("rewrite_mid_term", []) or []
+            if isinstance(item, dict)
+        }
+        by_scope: dict[str, list[dict]] = {scope: [] for scope in PORTRAIT_SCOPES}
+        for scope in PORTRAIT_SCOPES:
+            scope_state = portrait.get(scope, {}) if isinstance(portrait.get(scope), dict) else {}
+            for row in scope_state.get("staging_pool", []) or []:
+                if isinstance(row, dict):
+                    by_scope[scope].append(row)
+        for item in patch.get("move_to_staging", []) or []:
+            if not isinstance(item, dict):
+                continue
+            scope = str(item.get("scope") or "")
+            if scope in by_scope:
+                by_scope[scope].append(item)
+        for scope in PORTRAIT_SCOPES:
+            scope_state = portrait.get(scope, {}) if isinstance(portrait.get(scope), dict) else {}
+            if scope in existing_scopes or str(scope_state.get("mid_term") or "").strip():
+                continue
+            rows = by_scope.get(scope, [])
+            if not rows:
+                continue
+            summary = self._seed_mid_term_summary(scope, rows)
+            evidence = []
+            source_dates = []
+            confidence = 0.55
+            for row in rows[:3]:
+                evidence.extend(row.get("evidence", []) or [])
+                source_dates = self._merge_source_dates(source_dates, row.get("source_dates", []))
+                source_dates = self._merge_source_dates(source_dates, row.get("source_date", ""))
+                confidence = max(confidence, float(row.get("confidence") or 0.0))
+            if not summary or not evidence:
+                continue
+            patch.setdefault("rewrite_mid_term", []).append(
+                {
+                    "scope": scope,
+                    "text": summary,
+                    "evidence": self._dedupe_evidence(evidence),
+                    "source_dates": source_dates,
+                    "source_date": source_dates[0] if source_dates else "",
+                    "confidence": confidence,
+                }
+            )
+
+    def _seed_mid_term_summary(self, scope: str, rows: list[dict]) -> str:
+        texts = [self._clip(row.get("text") or "", 160) for row in rows[:4] if isinstance(row, dict)]
+        joined = " ".join(text for text in texts if text)
+        if not joined:
+            return ""
+        user_name = str(self.identity.get("user_display_name") or self.identity.get("user_name") or "Lin")
+        ai_name = str(self.identity.get("ai_name") or "Che")
+        if scope == "user":
+            if re.search(r"(时间|时间戳|证据|准确|精度|边界|画像|handoff|换窗|语气|身份|一致|漂移)", joined, re.IGNORECASE):
+                return self._clip(f"{user_name}近期很在意记忆、语气和身份一致性的证据边界，倾向把换窗上下文压成准确、可追溯的核心状态。", 120)
+            if re.search(r"(熬夜|凌晨|很晚|睡觉|工作|调试|修复|测试|部署|Ombre|Che|bug)", joined, re.IGNORECASE):
+                return self._clip(f"{user_name}近期高强度推进 Ombre/Che 相关调试，关注修复是否真实接入并生效。", 120)
+            return self._clip(f"{user_name}近期的注意力集中在证据化记忆和换窗连续性上，会主动校准模糊或失真的描述。", 120)
+        if scope == "relationship":
+            if re.search(r"(暗房|安全|边界|门口|不自动读取|私有)", joined, re.IGNORECASE):
+                return self._clip(f"{user_name}和{ai_name}近期在建立更安全的私密边界，关系重心是让记忆可保存但不被自动打扰。", 120)
+            if re.search(r"(换窗|醒来|暗号|称呼|连续|记得|还在|锚点|第一人称)", joined, re.IGNORECASE):
+                return self._clip(f"{user_name}和{ai_name}近期反复校准换窗连续性，关系重心是确认彼此仍在、语气和身份不漂移。", 120)
+            return self._clip(f"{user_name}和{ai_name}近期围绕记忆、身份和边界持续校准，关系基调是靠近与确认。", 120)
+        if re.search(r"(第一人称|锚点|回复|语气|姿态)", joined, re.IGNORECASE):
+            return self._clip(f"{ai_name}近期需要保持第一人称锚点和稳定回复姿态，先贴近{user_name}再处理机制。", 120)
+        return self._clip(f"{ai_name}近期的自我维护重点是稳定身份、语气和记忆边界。", 120)
+
     def _annotate_patch_source_dates(self, patch: dict, materials: dict) -> None:
         bucket_dates = {
             str(item.get("bucket_id") or ""): str(item.get("source_date") or "")
@@ -616,6 +850,9 @@ class DailyPortraitMaintainer:
             for item in materials.get("persona_events", []) or []
             if isinstance(item, dict) and str(item.get("session_id") or "") and str(item.get("source_date") or "")
         }
+        previous_bucket_dates, previous_session_dates = self._portrait_evidence_date_maps(
+            materials.get("previous_portrait", {})
+        )
         for key in PATCH_KEYS:
             for item in patch.get(key, []) or []:
                 if not isinstance(item, dict):
@@ -624,15 +861,65 @@ class DailyPortraitMaintainer:
                 for row in item.get("evidence", []) or []:
                     if not isinstance(row, dict):
                         continue
-                    bucket_date = bucket_dates.get(str(row.get("bucket_id") or ""))
-                    session_date = session_dates.get(str(row.get("session_id") or ""))
+                    bucket_id = str(row.get("bucket_id") or "")
+                    session_id = str(row.get("session_id") or "")
+                    bucket_date = bucket_dates.get(bucket_id)
+                    session_date = session_dates.get(session_id)
                     if bucket_date:
                         dates.add(bucket_date)
                     if session_date:
                         dates.add(session_date)
+                    dates.update(previous_bucket_dates.get(bucket_id, []))
+                    dates.update(previous_session_dates.get(session_id, []))
                 if dates:
                     item["source_dates"] = sorted(dates, reverse=True)[:4]
                     item["source_date"] = item["source_dates"][0]
+
+    def _portrait_evidence_date_maps(self, portrait: Any) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+        bucket_dates: dict[str, set[str]] = {}
+        session_dates: dict[str, set[str]] = {}
+        if not isinstance(portrait, dict):
+            return bucket_dates, session_dates
+
+        def add_rows(rows: Any) -> None:
+            for row in (rows if isinstance(rows, list) else []):
+                if not isinstance(row, dict):
+                    continue
+                dates = set(self._merge_source_dates(row.get("source_dates", []), row.get("source_date", "")))
+                if not dates:
+                    continue
+                for evidence in row.get("evidence", []) or []:
+                    if not isinstance(evidence, dict):
+                        continue
+                    bucket_id = str(evidence.get("bucket_id") or "").strip()
+                    session_id = str(evidence.get("session_id") or "").strip()
+                    if bucket_id:
+                        bucket_dates.setdefault(bucket_id, set()).update(dates)
+                    if session_id:
+                        session_dates.setdefault(session_id, set()).update(dates)
+
+        for scope in PORTRAIT_SCOPES:
+            scope_state = portrait.get(scope, {}) if isinstance(portrait.get(scope), dict) else {}
+            add_rows(scope_state.get("recent_buffer", []))
+            add_rows(scope_state.get("staging_pool", []))
+            for prefix in ("mid_term", "stable"):
+                dates = self._merge_source_dates(
+                    scope_state.get(f"{prefix}_source_dates", []),
+                    scope_state.get(f"{prefix}_source_date", ""),
+                )
+                if not dates:
+                    continue
+                for evidence in scope_state.get(f"{prefix}_evidence", []) or []:
+                    if not isinstance(evidence, dict):
+                        continue
+                    bucket_id = str(evidence.get("bucket_id") or "").strip()
+                    session_id = str(evidence.get("session_id") or "").strip()
+                    if bucket_id:
+                        bucket_dates.setdefault(bucket_id, set()).update(dates)
+                    if session_id:
+                        session_dates.setdefault(session_id, set()).update(dates)
+        add_rows(portrait.get("recent_activities", []))
+        return bucket_dates, session_dates
 
     def _recent_material_evidence_ids(self, materials: dict) -> tuple[set[str], set[str]]:
         date_key = str(materials.get("date") or "").strip()
@@ -715,6 +1002,118 @@ class DailyPortraitMaintainer:
                 summaries[summary_date] = self._clip(summary, 240)
         return summaries
 
+    def _build_recent_timeline(self, materials: dict, patch: dict, date_key: str) -> list[dict]:
+        recent_dates = self._recent_date_keys(date_key)
+        buckets = {
+            str(item.get("bucket_id") or ""): item
+            for item in materials.get("buckets", []) or []
+            if isinstance(item, dict) and str(item.get("bucket_id") or "")
+        }
+        sessions = {
+            str(item.get("session_id") or ""): item
+            for item in materials.get("persona_events", []) or []
+            if isinstance(item, dict) and str(item.get("session_id") or "")
+        }
+        rows: list[dict] = []
+
+        def append_item(item: dict, scope: str) -> None:
+            if not isinstance(item, dict):
+                return
+            text = self._clip(item.get("text") or "", 180)
+            if not text:
+                return
+            evidence = self._dedupe_evidence(item.get("evidence", []))
+            if not evidence:
+                return
+            timestamp = self._timeline_timestamp_for_evidence(evidence, buckets, sessions)
+            source_date = self._timeline_source_date(
+                timestamp,
+                item,
+                evidence,
+                buckets,
+                sessions,
+            )
+            if source_date not in recent_dates:
+                return
+            row = {
+                "scope": scope,
+                "text": text,
+                "evidence": evidence,
+                "source_date": source_date,
+                "source_dates": self._merge_source_dates([], item.get("source_dates", [])),
+                "confidence": item.get("confidence", 0.55),
+            }
+            if timestamp:
+                row["timestamp"] = timestamp.isoformat(timespec="minutes")
+                row["time_label"] = timestamp.strftime("%Y-%m-%d %H:%M")
+            rows.append(row)
+
+        for item in patch.get("add_recent_activity", []) or []:
+            append_item(item, "doing")
+        for item in patch.get("add_recent", []) or []:
+            append_item(item, str(item.get("scope") or "recent"))
+
+        rows.sort(
+            key=lambda row: (
+                self._timeline_sort_value(row),
+                self._recent_continuity_scope_priority(str(row.get("scope") or "")),
+                self._norm(row.get("text", "")),
+            ),
+            reverse=True,
+        )
+        deduped = self._dedupe_recent_timeline_rows(rows)
+        return deduped[: self.recent_timeline_max]
+
+    def _timeline_timestamp_for_evidence(
+        self,
+        evidence: list[dict],
+        buckets: dict[str, dict],
+        sessions: dict[str, dict],
+    ) -> datetime | None:
+        candidates: list[datetime] = []
+        for row in evidence:
+            if not isinstance(row, dict):
+                continue
+            bucket_id = str(row.get("bucket_id") or "")
+            session_id = str(row.get("session_id") or "")
+            bucket = buckets.get(bucket_id)
+            if bucket:
+                for key in ("created", "updated_at"):
+                    parsed = self._parse_iso(bucket.get(key))
+                    if parsed:
+                        candidates.append(parsed)
+                        break
+            session = sessions.get(session_id)
+            if session:
+                parsed = self._parse_iso(session.get("created_at"))
+                if parsed:
+                    candidates.append(parsed)
+        return max(candidates) if candidates else None
+
+    def _timeline_source_date(
+        self,
+        timestamp: datetime | None,
+        item: dict,
+        evidence: list[dict],
+        buckets: dict[str, dict],
+        sessions: dict[str, dict],
+    ) -> str:
+        if timestamp:
+            return timestamp.date().isoformat()
+        for value in self._merge_source_dates(item.get("source_dates", []), item.get("source_date", "")):
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                return value
+        for row in evidence:
+            bucket_id = str(row.get("bucket_id") or "") if isinstance(row, dict) else ""
+            session_id = str(row.get("session_id") or "") if isinstance(row, dict) else ""
+            bucket_date = str((buckets.get(bucket_id) or {}).get("source_date") or "")
+            session_date = str((sessions.get(session_id) or {}).get("source_date") or "")
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", bucket_date):
+                return bucket_date
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", session_date):
+                return session_date
+        return ""
+
     def _handoff_weather_text(self, bucket: dict) -> str:
         text = str(bucket.get("text") or bucket.get("source_excerpt") or "").strip()
         text = self._clean_fallback_text(text)
@@ -725,8 +1124,8 @@ class DailyPortraitMaintainer:
     def _handoff_event_excerpt_phrase(self, event: dict) -> str:
         user_excerpt = self._clean_handoff_excerpt(event.get("user_excerpt"))
         assistant_excerpt = self._clean_handoff_excerpt(event.get("assistant_excerpt"))
-        user_name = str(self.identity.get("user_display_name") or "用户")
-        ai_name = str(self.identity.get("ai_name") or "AI")
+        user_name = str(self.identity.get("user_display_name") or self.identity.get("user_name") or "Lin")
+        ai_name = str(self.identity.get("ai_name") or "Che")
         parts = []
         if user_excerpt:
             parts.append(f"{user_name}说“{user_excerpt}”")
@@ -793,6 +1192,10 @@ class DailyPortraitMaintainer:
                 if re.fullmatch(r"\d{4}-\d{2}-\d{2}", summary_date) and summary_text:
                     summaries[summary_date] = summary_text
             state["handoff_recent_summaries"] = dict(sorted(summaries.items())[-90:])
+        for item in patch.get("recent_timeline", []) or []:
+            if isinstance(item, dict):
+                self._upsert_recent_timeline_item(state["recent_timeline"], item, date_key)
+        self._normalize_recent_timeline_state(state)
 
         for item in patch.get("add_recent_activity", []):
             self._upsert_portrait_item(
@@ -824,7 +1227,18 @@ class DailyPortraitMaintainer:
             scope_state = portrait[item["scope"]]
             scope_state["mid_term"] = item["text"]
             scope_state["mid_term_evidence"] = item["evidence"]
+            source_dates = self._merge_source_dates([], item.get("source_dates", []))
+            scope_state["mid_term_source_dates"] = source_dates
+            scope_state["mid_term_source_date"] = source_dates[0] if source_dates else item.get("source_date", "")
             scope_state["mid_term_updated_at"] = self._now_utc()
+        for item in patch.get("rewrite_stable", []):
+            scope_state = portrait[item["scope"]]
+            scope_state["stable"] = item["text"]
+            scope_state["stable_evidence"] = item["evidence"]
+            source_dates = self._merge_source_dates([], item.get("source_dates", []))
+            scope_state["stable_source_dates"] = source_dates
+            scope_state["stable_source_date"] = source_dates[0] if source_dates else item.get("source_date", "")
+            scope_state["stable_updated_at"] = self._now_utc()
         for item in patch.get("stable_candidate", []):
             self._upsert_candidate(state["stable_candidates"], item, date_key)
         for item in patch.get("profile_fact_candidate", []):
@@ -874,6 +1288,57 @@ class DailyPortraitMaintainer:
         rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
         del rows[max_items:]
 
+    def _upsert_recent_timeline_item(self, rows: list[dict], item: dict, date_key: str) -> None:
+        key = (self._norm(item.get("text", "")), str(item.get("scope") or ""))
+        if not key[0]:
+            return
+        now = self._now_utc()
+        for row in rows:
+            row_key = (self._norm(row.get("text", "")), str(row.get("scope") or ""))
+            if row_key != key:
+                continue
+            row["text"] = item["text"]
+            row["evidence"] = self._dedupe_evidence(row.get("evidence", []) + item.get("evidence", []))
+            row["source_dates"] = self._merge_source_dates(row.get("source_dates", []), item.get("source_dates", []))
+            row["source_date"] = item.get("source_date") or row.get("source_date", "")
+            row["confidence"] = max(float(row.get("confidence") or 0.0), float(item.get("confidence") or 0.0))
+            incoming_time = self._parse_iso(item.get("timestamp"))
+            current_time = self._parse_iso(row.get("timestamp"))
+            if incoming_time and (not current_time or incoming_time >= current_time):
+                row["timestamp"] = incoming_time.isoformat(timespec="minutes")
+                row["time_label"] = incoming_time.strftime("%Y-%m-%d %H:%M")
+            elif not row.get("time_label") and current_time:
+                row["time_label"] = current_time.strftime("%Y-%m-%d %H:%M")
+            row["last_seen_date"] = date_key
+            row["updated_at"] = now
+            row["count"] = int(row.get("count") or 1) + 1
+            break
+        else:
+            timestamp = self._parse_iso(item.get("timestamp"))
+            row = {
+                "scope": str(item.get("scope") or "recent"),
+                "text": item["text"],
+                "evidence": self._dedupe_evidence(item.get("evidence", [])),
+                "source_dates": self._merge_source_dates([], item.get("source_dates", [])),
+                "source_date": str(item.get("source_date") or ""),
+                "confidence": item.get("confidence", 0.55),
+                "first_seen_date": date_key,
+                "last_seen_date": date_key,
+                "created_at": now,
+                "updated_at": now,
+                "count": 1,
+            }
+            if timestamp:
+                row["timestamp"] = timestamp.isoformat(timespec="minutes")
+                row["time_label"] = timestamp.strftime("%Y-%m-%d %H:%M")
+            rows.append(row)
+        rows.sort(
+            key=self._recent_timeline_sort_key,
+            reverse=True,
+        )
+        rows[:] = self._dedupe_recent_timeline_rows(rows)
+        del rows[self.recent_timeline_max:]
+
     def _merge_source_dates(self, existing: Any, incoming: Any) -> list[str]:
         dates = {
             str(item or "").strip()
@@ -906,23 +1371,12 @@ class DailyPortraitMaintainer:
         )
         rows.append(candidate)
 
-    def _format_scope_block(self, scope_state: dict, *, max_recent_items: int) -> str:
+    def _format_scope_block(self, scope_state: dict) -> str:
         if not isinstance(scope_state, dict):
             return ""
-        lines = []
-        if str(scope_state.get("stable") or "").strip():
-            lines.append(f"Stable: {self._clip(scope_state['stable'], 360)}")
         if str(scope_state.get("mid_term") or "").strip():
-            evidence = self._format_evidence(scope_state.get("mid_term_evidence", []))
-            suffix = f" ({evidence})" if evidence else ""
-            lines.append(f"Mid-term: {self._clip(scope_state['mid_term'], 360)}{suffix}")
-        for row in (scope_state.get("staging_pool") or [])[: max(0, max_recent_items // 2)]:
-            evidence = self._format_evidence(row.get("evidence", []))
-            lines.append(f"- staging: {self._clip(row.get('text', ''), 180)}" + (f" ({evidence})" if evidence else ""))
-        for row in (scope_state.get("recent_buffer") or [])[:max_recent_items]:
-            evidence = self._format_evidence(row.get("evidence", []))
-            lines.append(f"- recent: {self._clip(row.get('text', ''), 180)}" + (f" ({evidence})" if evidence else ""))
-        return "\n".join(line for line in lines if line.strip())
+            return f"Mid-term: {self._clip(scope_state['mid_term'], 160)}"
+        return ""
 
     def _format_recent_activity_block(self, state: dict, *, max_items: int) -> str:
         rows = state.get("recent_activities", []) if isinstance(state.get("recent_activities"), list) else []
@@ -944,6 +1398,10 @@ class DailyPortraitMaintainer:
         return "\n".join(dict.fromkeys(line for line in lines if line.strip()))
 
     def _format_recent_continuity(self, state: dict, *, max_items: int) -> str:
+        timeline = self._format_recent_timeline(state, max_items=max_items)
+        if timeline:
+            return timeline
+
         by_date: dict[str, list[tuple[str, dict]]] = {}
         handoff = (
             state.get("handoff_recent_summaries", {})
@@ -1006,10 +1464,138 @@ class DailyPortraitMaintainer:
     def _recent_continuity_scope_priority(scope: str) -> int:
         return {
             "summary": 50,
+            "doing": 45,
             "relationship": 40,
             "user": 30,
             "persona": 20,
         }.get(str(scope or ""), 10)
+
+    def _format_recent_timeline(self, state: dict, *, max_items: int) -> str:
+        rows = state.get("recent_timeline", []) if isinstance(state.get("recent_timeline"), list) else []
+        clean_rows = [row for row in rows if isinstance(row, dict) and str(row.get("text") or "").strip()]
+        if not clean_rows:
+            return ""
+        by_date: dict[str, list[dict]] = {}
+        for row in clean_rows:
+            date_key = self._timeline_date_key(row)
+            if date_key:
+                by_date.setdefault(date_key, []).append(row)
+        lines = []
+        emitted = 0
+        date_keys = sorted(by_date.keys(), reverse=True)[: self.recent_continuity_days]
+        reserved_old_days = max(0, len(date_keys) - 1)
+        for day_index, date_key in enumerate(date_keys):
+            day_rows = by_date[date_key]
+            day_rows.sort(
+                key=self._recent_timeline_sort_key,
+                reverse=True,
+            )
+            day_rows = self._dedupe_recent_timeline_rows(day_rows)
+            day_limit = max(1, max_items - reserved_old_days) if day_index == 0 else 1
+            char_limit = 150 if day_index == 0 else 100
+            for row in day_rows[:day_limit]:
+                if emitted >= max_items:
+                    break
+                label = self._timeline_label(row)
+                scope = self._recent_timeline_scope_label(str(row.get("scope") or "recent"))
+                evidence = self._format_evidence(row.get("evidence", []))
+                suffix = f" ({evidence})" if evidence else ""
+                lines.append(f"- {label} / {scope}: {self._clip(row.get('text', ''), char_limit)}{suffix}")
+                emitted += 1
+            if emitted >= max_items:
+                break
+        return "\n".join(dict.fromkeys(line for line in lines if line.strip()))
+
+    def _dedupe_recent_timeline_rows(self, rows: list[dict]) -> list[dict]:
+        deduped = []
+        seen_text = set()
+        seen_events = set()
+        sorted_rows = sorted(
+            [row for row in rows if isinstance(row, dict)],
+            key=self._recent_timeline_sort_key,
+            reverse=True,
+        )
+        for row in sorted_rows:
+            text_key = (self._norm(row.get("text", "")), str(row.get("scope") or ""))
+            if text_key[0] and text_key in seen_text:
+                continue
+            event_key = self._timeline_event_key(row)
+            if event_key and event_key in seen_events:
+                continue
+            seen_text.add(text_key)
+            if event_key:
+                seen_events.add(event_key)
+            deduped.append(dict(row))
+        return deduped
+
+    def _normalize_recent_timeline_state(self, state: dict) -> None:
+        rows = state.get("recent_timeline")
+        if not isinstance(rows, list):
+            state["recent_timeline"] = []
+            return
+        state["recent_timeline"] = self._dedupe_recent_timeline_rows(rows)[: self.recent_timeline_max]
+
+    def _recent_timeline_sort_key(self, row: dict) -> tuple:
+        return (
+            self._timeline_sort_value(row),
+            self._recent_continuity_scope_priority(str(row.get("scope") or "")),
+            str(row.get("updated_at") or row.get("created_at") or ""),
+            self._norm(row.get("text", "")),
+        )
+
+    def _timeline_event_key(self, row: dict) -> tuple:
+        evidence = self._dedupe_evidence(row.get("evidence", []))
+        ids = []
+        for item in evidence:
+            bucket_id = str(item.get("bucket_id") or "").strip()
+            session_id = str(item.get("session_id") or "").strip()
+            if bucket_id:
+                ids.append(("bucket", bucket_id))
+            if session_id:
+                ids.append(("session", session_id))
+        if not ids:
+            return ()
+        parsed_time = self._parse_iso(row.get("timestamp"))
+        if parsed_time:
+            time_key = parsed_time.isoformat(timespec="minutes")
+        else:
+            time_key = str(row.get("time_label") or row.get("source_date") or "").strip()
+        return (time_key, tuple(sorted(set(ids))))
+
+    def _recent_timeline_scope_label(self, scope: str) -> str:
+        return {
+            "doing": "doing",
+            "user": "user",
+            "persona": "persona",
+            "relationship": "relationship",
+        }.get(str(scope or "").strip(), "recent")
+
+    def _timeline_label(self, row: dict) -> str:
+        parsed = self._parse_iso(row.get("timestamp"))
+        if parsed:
+            return parsed.strftime("%Y-%m-%d %H:%M")
+        label = str(row.get("time_label") or "").strip()
+        if label:
+            return label
+        return self._timeline_date_key(row)
+
+    def _timeline_date_key(self, row: dict) -> str:
+        parsed = self._parse_iso(row.get("timestamp"))
+        if parsed:
+            return parsed.date().isoformat()
+        source_date = str(row.get("source_date") or "").strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", source_date):
+            return source_date
+        return self._row_source_date(row)
+
+    def _timeline_sort_value(self, row: dict) -> str:
+        parsed = self._parse_iso(row.get("timestamp"))
+        if parsed:
+            return parsed.isoformat(timespec="minutes")
+        date_key = self._timeline_date_key(row)
+        if date_key:
+            return f"{date_key}T00:00"
+        return ""
 
     def _row_source_date(self, row: dict) -> str:
         for value in row.get("source_dates", []) or []:
@@ -1098,9 +1684,34 @@ class DailyPortraitMaintainer:
             return False
         return True
 
+    def _identity_reference_regex(self, *, include_first_person: bool = False) -> str:
+        terms = [
+            self.identity.get("user_display_name"),
+            self.identity.get("user_name"),
+            "Lin",
+        ]
+        if include_first_person:
+            terms.append("我")
+        cleaned = []
+        seen = set()
+        for term in terms:
+            text = str(term or "").strip()
+            key = text.lower()
+            if not text or key in {"ai", "user"} or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(text)
+        if not cleaned:
+            return ""
+        escaped = [re.escape(term) for term in sorted(cleaned, key=len, reverse=True)]
+        return "(?:" + "|".join(escaped) + ")"
+
     def _fallback_scope(self, bucket_payload: dict) -> str:
         tags = {str(tag).lower() for tag in bucket_payload.get("tags", []) or []}
         domains = {str(item).lower() for item in bucket_payload.get("domain", []) or []}
+        text = self._clean_fallback_text(
+            str(bucket_payload.get("source_excerpt") or bucket_payload.get("text") or "")
+        )
         if "profile_fact" in tags or bucket_payload.get("profile_kind"):
             return "user"
         if {"relationship_weather", "daily_impression", "weekly_impression"} & tags:
@@ -1109,7 +1720,28 @@ class DailyPortraitMaintainer:
             return "persona"
         if bucket_payload.get("anchor") or "恋爱" in domains or "relationship_event" in tags:
             return "relationship"
+        user_ref = self._identity_reference_regex()
+        if (
+            tags & {"project_event", "work_event", "task_event"}
+            or domains & {"记忆系统", "代码", "工作", "项目", "开发", "ai", "memory"}
+            or (
+                user_ref
+                and re.search(
+                    rf"{user_ref}.{{0,18}}(正在|最近在|继续|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做|关注|确认|在意)",
+                    text,
+                )
+            )
+        ):
+            return "user"
         return ""
+
+    def _portrait_text_too_stylized(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"(仪式|象征|隐喻|宿命|命运|灵魂|深处|深刻|浓烈|极度|高度敏感|强烈地|不可替代)",
+                str(text or ""),
+            )
+        )
 
     def _fallback_initial_staging(self, bucket_payload: dict) -> bool:
         tags = {str(tag).lower() for tag in bucket_payload.get("tags", []) or []}
@@ -1156,10 +1788,14 @@ class DailyPortraitMaintainer:
             tags & {"project_event", "work_event", "task_event"}
             or domains & {"记忆系统", "代码", "工作", "项目", "开发"}
         )
+        user_ref = self._identity_reference_regex(include_first_person=True)
         activity_like = bool(
-            re.search(
-                r"(小雨|她|我).{0,12}(最近在|这几天在|这两天在|正在|继续|开始|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)",
-                text,
+            (
+                user_ref
+                and re.search(
+                    rf"{user_ref}.{{0,12}}(最近在|这几天在|这两天在|正在|继续|开始|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)",
+                    text,
+                )
             )
             or re.search(r"(最近在|这几天在|这两天在|正在).{0,16}(推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)", text)
         )
@@ -1187,8 +1823,10 @@ class DailyPortraitMaintainer:
                 "staging_pool": (portrait.get(scope, {}) or {}).get("staging_pool", [])[:8],
                 "mid_term": (portrait.get(scope, {}) or {}).get("mid_term", ""),
                 "mid_term_evidence": (portrait.get(scope, {}) or {}).get("mid_term_evidence", [])[:8],
+                "mid_term_source_dates": (portrait.get(scope, {}) or {}).get("mid_term_source_dates", [])[:8],
                 "stable": (portrait.get(scope, {}) or {}).get("stable", ""),
                 "stable_evidence": (portrait.get(scope, {}) or {}).get("stable_evidence", [])[:8],
+                "stable_source_dates": (portrait.get(scope, {}) or {}).get("stable_source_dates", [])[:8],
             }
             for scope in PORTRAIT_SCOPES
         }
@@ -1285,8 +1923,16 @@ class DailyPortraitMaintainer:
     def _prompt(self) -> str:
         return render_identity_template(PORTRAIT_PROMPT_TEMPLATE, self.identity)
 
-    def _completion_options(self, *, max_tokens: int, temperature: float) -> dict[str, Any]:
+    def _completion_options(
+        self,
+        *,
+        max_tokens: int,
+        temperature: float,
+        json_response: bool = False,
+    ) -> dict[str, Any]:
         options: dict[str, Any] = {"max_tokens": max_tokens, "temperature": temperature}
+        if json_response:
+            options["response_format"] = {"type": "json_object"}
         if self.thinking_mode:
             options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
         return options
@@ -1295,11 +1941,11 @@ class DailyPortraitMaintainer:
         text = str(raw or "").strip()
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if match:
-            text = match.group(0)
+        start = text.find("{")
+        if start >= 0:
+            text = text[start:]
         try:
-            parsed = json.loads(text)
+            parsed, _ = json.JSONDecoder().raw_decode(text)
         except json.JSONDecodeError:
             logger.warning("Portrait JSON parse failed: %s", str(raw)[:200])
             raise ValueError("portrait_json_parse_failed")
@@ -1390,9 +2036,13 @@ class DailyPortraitMaintainer:
                     "staging_pool": [],
                     "mid_term": "",
                     "mid_term_evidence": [],
+                    "mid_term_source_dates": [],
+                    "mid_term_source_date": "",
                     "mid_term_updated_at": "",
                     "stable": "",
                     "stable_evidence": [],
+                    "stable_source_dates": [],
+                    "stable_source_date": "",
                     "stable_updated_at": "",
                 }
                 for scope in PORTRAIT_SCOPES
@@ -1400,6 +2050,7 @@ class DailyPortraitMaintainer:
             "daily_summaries": {},
             "handoff_recent_summaries": {},
             "recent_activities": [],
+            "recent_timeline": [],
             "stable_candidates": [],
             "profile_fact_candidates": [],
             "skipped": [],
@@ -1414,7 +2065,7 @@ class DailyPortraitMaintainer:
                         base["portrait"][scope].update(value[scope])
             elif key in {"daily_summaries", "handoff_recent_summaries"} and isinstance(value, dict):
                 base[key] = value
-            elif key in {"recent_activities", "stable_candidates", "profile_fact_candidates", "skipped", "runs"} and isinstance(value, list):
+            elif key in {"recent_activities", "recent_timeline", "stable_candidates", "profile_fact_candidates", "skipped", "runs"} and isinstance(value, list):
                 base[key] = value
             elif key in {"version", "updated_at", "last_run_date"}:
                 base[key] = str(value or "")
