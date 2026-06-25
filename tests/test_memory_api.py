@@ -724,6 +724,38 @@ async def test_read_bucket_returns_exact_content_without_touching(monkeypatch, b
 
 
 @pytest.mark.asyncio
+async def test_bucket_tools_accept_numeric_bucket_id_arguments(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    numeric_id = "771128335969"
+    await bucket_mgr.create(
+        content="这条记忆的 id 刚好全是数字。",
+        name="纯数字 ID",
+        bucket_id=numeric_id,
+        domain=["记忆"],
+    )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    payload = await server.read_bucket(int(numeric_id))
+    comment = await server.comment_bucket(
+        bucket_id=int(numeric_id),
+        content="数字 id 也能写年轮。",
+    )
+    trace_result = await server.trace(bucket_id=int(numeric_id), resolved=1)
+    bucket = await bucket_mgr.get(numeric_id)
+
+    assert payload["id"] == numeric_id
+    assert comment["status"] == "commented"
+    assert comment["id"] == numeric_id
+    assert f"已修改记忆桶 {numeric_id}" in trace_result
+    assert bucket["metadata"]["comment_count"] == 1
+    assert bucket["metadata"]["resolved"] is True
+
+
+@pytest.mark.asyncio
 async def test_api_moments_returns_bucket_layer_and_gate_debug(monkeypatch, bucket_mgr, test_config):
     import server
     from memory_moments import MemoryMomentStore
