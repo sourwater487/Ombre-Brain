@@ -9575,6 +9575,11 @@ async def api_config_get(request):
                 ),
                 True,
             ),
+            "evaluation_context_turns": getattr(
+                persona_engine,
+                "evaluation_context_turns",
+                _int_between(persona_cfg.get("evaluation_context_turns"), 3, 0, 8),
+            ),
             "api_key_masked": _mask_key(getattr(persona_engine, "api_key", "") or persona_cfg.get("api_key", "")),
             "api_ready": bool(getattr(persona_engine, "api_key", "") or persona_cfg.get("api_key", "")),
         },
@@ -10137,6 +10142,15 @@ async def api_config_update(request):
             persona_cfg["event_recording_enabled"] = bool(p["event_recording_enabled"])
             persona_gateway_payload["event_recording_enabled"] = persona_cfg["event_recording_enabled"]
             updated.append("persona.event_recording_enabled")
+        if "evaluation_context_turns" in p:
+            persona_cfg["evaluation_context_turns"] = _int_between(
+                p["evaluation_context_turns"],
+                3,
+                0,
+                8,
+            )
+            persona_gateway_payload["evaluation_context_turns"] = persona_cfg["evaluation_context_turns"]
+            updated.append("persona.evaluation_context_turns")
         for key in ("model", "base_url"):
             if key in p:
                 persona_cfg[key] = str(p[key] or "").strip()
@@ -10599,6 +10613,13 @@ async def api_config_update(request):
                 if "event_recording_enabled" in body["persona"]:
                     sc_persona["event_recording_enabled"] = bool(
                         body["persona"]["event_recording_enabled"]
+                    )
+                if "evaluation_context_turns" in body["persona"]:
+                    sc_persona["evaluation_context_turns"] = _int_between(
+                        body["persona"]["evaluation_context_turns"],
+                        3,
+                        0,
+                        8,
                     )
                 for key in ("model", "base_url"):
                     if key in body["persona"]:

@@ -699,6 +699,7 @@ class GatewayService:
             "event_recording_enabled": bool(
                 getattr(self.persona_engine, "event_recording_enabled", True)
             ),
+            "evaluation_context_turns": getattr(self.persona_engine, "evaluation_context_turns", 3),
             "api_ready": bool(getattr(self.persona_engine, "api_key", "")),
         }
 
@@ -1085,6 +1086,16 @@ class GatewayService:
         if "event_recording_enabled" in payload:
             persona_cfg["event_recording_enabled"] = bool(payload["event_recording_enabled"])
             updated.append("persona.event_recording_enabled")
+        if "evaluation_context_turns" in payload:
+            try:
+                context_turns = int(payload["evaluation_context_turns"])
+            except (TypeError, ValueError):
+                context_turns = 3
+            persona_cfg["evaluation_context_turns"] = max(
+                0,
+                min(8, context_turns),
+            )
+            updated.append("persona.evaluation_context_turns")
         for key in ("model", "base_url"):
             if key in payload:
                 persona_cfg[key] = str(payload[key] or "").strip()
@@ -1569,6 +1580,10 @@ class GatewayService:
                 current_user_query,
                 session_id,
             )
+            low_signal_auto_recall = (
+                not is_explicit_memory_intent
+                and self._auto_recall_low_signal_query(current_user_query)
+            )
             allow_query_planner = bool(is_explicit_memory_intent)
             allow_passive_recall = bool(
                 not is_explicit_memory_intent
@@ -1577,6 +1592,7 @@ class GatewayService:
                 and not skip_for_targeted_detail
                 and not needs_handoff_first
                 and not just_now_context_requested
+                and not low_signal_auto_recall
             )
             passive_query = self._passive_recall_query(current_user_query) if allow_passive_recall else ""
             if allow_passive_recall and not passive_query:
@@ -1610,6 +1626,7 @@ class GatewayService:
             query_planner_debug["passive_query"] = passive_query
             query_planner_debug["explicit_memory_recall"] = explicit_memory_recall
             query_planner_debug["memory_control_plane_query"] = memory_control_plane_query
+            query_planner_debug["low_signal_auto_recall"] = low_signal_auto_recall
             query_planner_debug["long_input_without_memory_intent"] = long_input_without_memory_intent
             query_planner_debug["direct_recall_allowed"] = direct_recall_allowed
             query_planner_debug["related_recall_allowed"] = related_recall_allowed
@@ -1630,6 +1647,7 @@ class GatewayService:
                 or needs_handoff_first
                 or just_now_context_requested
                 or memory_control_plane_query
+                or low_signal_auto_recall
                 or (is_large_pasted_content and not is_explicit_memory_intent)
             )
             if needs_handoff_first:
@@ -1704,6 +1722,8 @@ class GatewayService:
                         )
                     elif just_now_context_requested:
                         query_planner_debug["skip_reason"] = "just_now_context"
+                    elif low_signal_auto_recall:
+                        query_planner_debug["skip_reason"] = "low_signal_auto_recall"
                     elif skip_for_targeted_detail:
                         query_planner_debug["skip_reason"] = "targeted_memory_detail_query"
                     elif not allow_dynamic_seed_search:
@@ -3275,6 +3295,11 @@ class GatewayService:
             )
             return
         tool_summary = self._summarize_assistant_tool_calls(assistant_message)
+        recent_conversation_turns = self._recent_persona_conversation_turns(
+            session_id,
+            user_message,
+            assistant_response,
+        )
         try:
             await self.persona_engine.update_from_exchange(
                 session_id=session_id,
@@ -3282,9 +3307,52 @@ class GatewayService:
                 assistant_response=assistant_response,
                 recalled_memory_ids=recalled_ids,
                 tool_summary=tool_summary,
+                recent_conversation_turns=recent_conversation_turns,
             )
         except Exception as exc:
             logger.warning("Persona post-reply update failed | session=%s error=%s", session_id, exc)
+
+    def _recent_persona_conversation_turns(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_response: str,
+    ) -> list[dict[str, Any]]:
+        try:
+            max_turns = int(getattr(self.persona_engine, "evaluation_context_turns", 3))
+        except (TypeError, ValueError):
+            max_turns = 3
+        max_turns = max(0, min(8, max_turns))
+        if max_turns <= 0:
+            return []
+
+        profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
+        turns = self.state_store.list_recent_conversation_turns(
+            profile_id=profile_id,
+            session_id=session_id,
+            limit=max_turns + 4,
+            hours=12,
+        )
+        current_user = self._clean_conversation_turn_text(user_message)
+        current_assistant = self._clean_conversation_turn_text(assistant_response)
+        selected: list[dict[str, Any]] = []
+        for turn in turns:
+            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""))
+            assistant_text = self._clean_conversation_turn_text(turn.get("assistant_text", ""))
+            if user_text == current_user and assistant_text == current_assistant:
+                continue
+            if not user_text and not assistant_text:
+                continue
+            selected.append(
+                {
+                    "created_at": turn.get("created_at", ""),
+                    "user_text": user_text,
+                    "assistant_text": assistant_text,
+                }
+            )
+            if len(selected) >= max_turns:
+                break
+        return list(reversed(selected))
 
     async def _finalize_stream_turn(
         self,
@@ -4631,6 +4699,8 @@ class GatewayService:
         if self._query_requests_recent_context(query_text):
             return True
         if has_handoff_context:
+            return False
+        if self._auto_recall_low_signal_query(query_text):
             return False
         if self._auto_query_too_vague(query_text):
             return False
@@ -6937,6 +7007,43 @@ class GatewayService:
 
     def _auto_query_too_vague(self, query: str) -> bool:
         return self.recall_policy.is_auto_query_too_vague(query)
+
+    def _auto_recall_low_signal_query(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text:
+            return True
+        if self._query_requests_recent_context(text) or self._query_requests_just_now_context(text):
+            return False
+        if self._query_requests_date_persona_trace(text):
+            return False
+        if self._auto_query_too_vague(text):
+            return True
+        normalized = self._memory_search_query_text(text)
+        if self._extract_exact_anchor_terms(text, normalized):
+            return False
+        if self.recall_policy.requires_topic_evidence(text):
+            return False
+        if self._query_has_relevance_facet(text):
+            return False
+        if self.recall_policy.is_auto_concrete_topic_query(text):
+            return False
+
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text.lower())
+        if not compact:
+            return True
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", compact)
+        latin_words = re.findall(r"[a-z][a-z0-9_.:-]*", text.lower())
+        if not cjk_chars and latin_words and len(latin_words) <= 2 and len(compact) <= 16:
+            return True
+        if cjk_chars and len(cjk_chars) <= 4:
+            terms = [
+                term
+                for term in self._specific_query_terms(text)
+                if re.search(r"[\u4e00-\u9fffA-Za-z0-9]", str(term or ""))
+            ]
+            if not terms:
+                return True
+        return False
 
     def _recent_context_requires_topic_evidence(self, query: str) -> bool:
         return self._recall_query_plan(query).recent_context_requires_topic_evidence
