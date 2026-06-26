@@ -64,8 +64,6 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
@@ -288,84 +286,6 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8000,
 )
-HARD_HIDDEN_MCP_TOOLS = frozenset(
-    {"darkroom_enter", "darkroom_rooms", "darkroom_view", "darkroom_status", "darkroom_release"}
-)
-
-
-def _hard_hidden_mcp_tool_name(name: str) -> str:
-    return str(name or "").strip()
-
-
-def _hard_hidden_mcp_tool_message(name: str) -> str:
-    return f'MCP tool "{name}" is disabled in Lin production.'
-
-
-def _raise_if_hard_hidden_mcp_tool(name: str) -> None:
-    tool_name = _hard_hidden_mcp_tool_name(name)
-    if tool_name in HARD_HIDDEN_MCP_TOOLS:
-        raise ToolError(_hard_hidden_mcp_tool_message(tool_name))
-
-
-def _install_hard_hidden_mcp_tool_guard() -> None:
-    manager = getattr(mcp, "_tool_manager", None)
-    if manager is None:
-        return
-
-    tools = getattr(manager, "_tools", None)
-    if isinstance(tools, dict):
-        for tool_name in HARD_HIDDEN_MCP_TOOLS:
-            tools.pop(tool_name, None)
-
-    if not getattr(manager, "_ombre_hard_hidden_guard_installed", False):
-        original_list_tools = manager.list_tools
-        original_call_tool = manager.call_tool
-        original_get_tool = manager.get_tool
-
-        def guarded_list_tools():
-            return [
-                tool
-                for tool in original_list_tools()
-                if _hard_hidden_mcp_tool_name(getattr(tool, "name", "")) not in HARD_HIDDEN_MCP_TOOLS
-            ]
-
-        async def guarded_call_tool(name, arguments, context=None, convert_result=False):
-            _raise_if_hard_hidden_mcp_tool(name)
-            return await original_call_tool(
-                name,
-                arguments,
-                context=context,
-                convert_result=convert_result,
-            )
-
-        def guarded_get_tool(name):
-            if _hard_hidden_mcp_tool_name(name) in HARD_HIDDEN_MCP_TOOLS:
-                return None
-            return original_get_tool(name)
-
-        manager.list_tools = guarded_list_tools
-        manager.call_tool = guarded_call_tool
-        manager.get_tool = guarded_get_tool
-        manager._ombre_hard_hidden_guard_installed = True
-
-    if not getattr(mcp, "_ombre_hard_hidden_guard_installed", False):
-        original_mcp_list_tools = mcp.list_tools
-        original_mcp_call_tool = mcp.call_tool
-
-        async def guarded_mcp_list_tools():
-            return [
-                tool
-                for tool in await original_mcp_list_tools()
-                if _hard_hidden_mcp_tool_name(getattr(tool, "name", "")) not in HARD_HIDDEN_MCP_TOOLS
-            ]
-
-        async def guarded_mcp_call_tool(name, arguments):
-            _raise_if_hard_hidden_mcp_tool(name)
-            return await original_mcp_call_tool(name, arguments)
-
-        mcp.list_tools = guarded_mcp_list_tools
-        mcp.call_tool = guarded_mcp_call_tool
-        mcp._ombre_hard_hidden_guard_installed = True
 
 
 def _int_env(name: str, default: int) -> int:
@@ -1614,17 +1534,14 @@ def _format_handoff_darkroom_door() -> str:
         return ""
     count = int(status.get("count") or 0)
     last_entered = str(status.get("last_entered_at") or "").strip()
-    last_completeness = status.get("last_completeness")
     lines = [
         str(status.get("door") or "暗房存在。门口只显示状态，不显示未显影正文。"),
-        "Use darkroom_enter(note=...) for unfinished private reflection; use darkroom_release only when intentionally bringing a note out.",
+        "darkroom_enter opens a new room by default; use new_room=false only when explicitly continuing the current active room. Unreleased draft text stays private until darkroom_view allows it.",
     ]
     if count:
         detail = f"entries={count}"
         if last_entered:
             detail += f", last_entered={last_entered}"
-        if last_completeness is not None:
-            detail += f", last_completeness={last_completeness}"
         lines.append(detail)
     else:
         lines.append("entries=0")
@@ -7060,23 +6977,45 @@ async def hold(
 async def darkroom_enter(
     note: str,
     mode: str = "continue",
-    completeness: float = -1,
     mood: str = "",
     tags: str = "",
     source: str = "mcp",
+    visibility: str = "active",
+    lock_for: str = "",
+    new_room: bool = True,
 ) -> dict:
-    """写入一段未显影的私密反思；返回门口状态，不回显 note 正文。"""
+    """写入一段未显影的私密反思；默认第一人称，不用第三人称自述；默认新开房间，new_room=false 才续写当前 active 房间；写错要撤回已有房间时传 new_room=false + visibility="retracted"；不回显 note 正文。"""
     try:
         return darkroom_store.enter(
             note,
-            completeness=completeness,
             mood=mood,
             tags=tags,
             source=source,
             mode=mode,
+            visibility=visibility,
+            lock_for=lock_for,
+            new_room=new_room,
         )
     except ValueError as exc:
         return {"status": "error", "error": str(exc)}
+
+
+@mcp.tool()
+async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> dict:
+    """只读列出暗房门牌，不返回正文；默认列 active 房间，可传 visibility="all" 看全部门牌，用 room_id 再调用 darkroom_view。"""
+    try:
+        return darkroom_store.rooms(limit=limit, visibility=visibility)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@mcp.tool()
+async def darkroom_view(entry_id: str = "latest") -> dict:
+    """只读查看一条已解锁的暗房内容；未到锁门时间不返回正文。"""
+    try:
+        return darkroom_store.view(entry_id=entry_id)
+    except KeyError:
+        return {"status": "error", "error": "entry not found"}
 
 
 async def darkroom_status() -> dict:
@@ -7921,9 +7860,6 @@ async def dream() -> str:
     """兼容旧客户端。旧 dream() 已改名为 introspection(); 夜梦由后台小模型自动生成。"""
     result = await introspection()
     return "dream() 已改名为 introspection()。夜梦由后台小模型自动生成，不需要主动调用工具。\n\n" + result
-
-
-_install_hard_hidden_mcp_tool_guard()
 
 
 # =============================================================
