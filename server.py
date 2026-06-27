@@ -45,6 +45,7 @@ import logging
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json as _json_lib
 import math
 import re
@@ -286,6 +287,15 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8000,
 )
+
+
+_MCP_TOOL_SUPPORTS_STRUCTURED_OUTPUT = "structured_output" in inspect.signature(mcp.tool).parameters
+
+
+def _mcp_unstructured_tool():
+    if _MCP_TOOL_SUPPORTS_STRUCTURED_OUTPUT:
+        return mcp.tool(structured_output=False)
+    return mcp.tool()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -5803,7 +5813,7 @@ def _has_active_facets(facets: dict | None) -> bool:
 # With args: search by keyword + emotion coordinates
 # 有参数：按关键词+情感坐标检索记忆
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def breath(
     query: str = "",
     max_tokens: int = 10000,
@@ -6646,7 +6656,7 @@ async def resurface(max_results: int = 1, include_archive: bool = True, max_toke
 # Tool 1.5: read_bucket — exact archive-cabinet read
 # 工具 1.5：read_bucket — 按 ID 精确读桶
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def read_bucket(bucket_id: str) -> dict:
     """按 bucket_id 精确读取完整记忆桶；trace/comment 前先读。只读，不刷新活跃度。"""
     bucket_id = _coerce_memory_id(bucket_id)
@@ -6662,7 +6672,7 @@ async def read_bucket(bucket_id: str) -> dict:
 # Tool 1.6: comment_bucket — add a ring/comment to a memory
 # 工具 1.6：comment_bucket — 给记忆追加年轮
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def comment_bucket(
     bucket_id: str,
     content: str,
@@ -6805,7 +6815,7 @@ async def api_bucket_comment_delete(request):
 # Tool 2: hold — Hold on to this
 # 工具 2：hold — 握住，留下来
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def hold(
     content: str,
     tags: str = "",
@@ -6973,7 +6983,7 @@ async def hold(
 # Tool 2.5: darkroom — Private unfinished reflection
 # 工具 2.5：darkroom — 暗房，存放未显影的内在反思
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def darkroom_enter(
     note: str,
     mode: str = "continue",
@@ -7000,7 +7010,7 @@ async def darkroom_enter(
         return {"status": "error", "error": str(exc)}
 
 
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> dict:
     """只读列出暗房门牌，不返回正文；默认列 active 房间，可传 visibility="all" 看全部门牌，用 room_id 再调用 darkroom_view。"""
     try:
@@ -7009,7 +7019,7 @@ async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> dict:
         return {"status": "error", "error": str(exc)}
 
 
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def darkroom_view(entry_id: str = "latest") -> dict:
     """只读查看一条已解锁的暗房内容；未到锁门时间不返回正文。"""
     try:
@@ -7117,7 +7127,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
     return f"{gate_prefix}1条|新1合0\n📝{name or bucket_id}{related_note}"
 
 
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
     """把筛过的长片段拆成少量长期记忆；单条事实优先 hold，旧记忆补感受优先 comment_bucket。title 可选，短内容时传了就用你给的标题。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。"""
     await decay_engine.ensure_started()
@@ -7253,7 +7263,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
 # Tool 3.5: profile_fact — manually solidify a user/profile fact
 # 工具 3.5：profile_fact — 手动固化画像事实
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def profile_fact(
     fact: str,
     evidence_bucket_id: str,
@@ -7384,7 +7394,7 @@ def _profile_fact_name(fact: str) -> str:
 # Also handles deletion (delete=True)
 # 同时承接删除功能
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def trace(
     bucket_id: str,
     name: str = "",
@@ -7497,7 +7507,7 @@ async def trace(
 # Tool 5: pulse — Heartbeat, system status + memory listing
 # 工具 5：pulse — 脉搏，系统状态 + 记忆列表
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def pulse(include_archive: bool = False) -> str:
     """只读查看系统状态和记忆桶摘要；用于盘点和找 read_bucket/trace 候选。"""
     try:
@@ -7576,7 +7586,7 @@ async def pulse(include_archive: bool = False) -> str:
 # 读取最近新增的表层桶（≤10个），返回给 Claude 在提示词引导下自主思考。
 # Claude then decides: resolve some, write feels, or do nothing.
 # =============================================================
-@mcp.tool()
+@_mcp_unstructured_tool()
 async def introspection(
     limit: int = 10,
     offset: int = 0,
