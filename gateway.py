@@ -2058,7 +2058,10 @@ class GatewayService:
 
         forward_payload = deepcopy(payload)
         forward_payload["model"] = model
-        self._restore_cached_reasoning_content(session_id, forward_payload.get("messages"))
+        self._sanitize_tool_continuation_messages(
+            session_id,
+            forward_payload.get("messages"),
+        )
         forward_payload["messages"] = self._inject_context_messages(
             forward_payload["messages"],
             stable_context,
@@ -10321,6 +10324,96 @@ class GatewayService:
         else:
             updated["content"] = prefix
         return updated
+
+    OMBRE_MCP_TOOL_NAMES = frozenset(
+        {
+            "breath",
+            "read_bucket",
+            "comment_bucket",
+            "hold",
+            "darkroom_enter",
+            "darkroom_rooms",
+            "darkroom_view",
+            "grow",
+            "profile_fact",
+            "trace",
+            "pulse",
+            "introspection",
+        }
+    )
+
+    def _sanitize_tool_continuation_messages(self, session_id: str, messages: Any) -> None:
+        if not isinstance(messages, list):
+            return
+
+        latest_tool_call_ids = self._latest_tool_result_ids(messages)
+        if not latest_tool_call_ids:
+            return
+
+        target_message: dict[str, Any] | None = None
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_call in tool_calls:
+                tool_name = self._tool_call_function_name(tool_call)
+                if tool_name not in self.OMBRE_MCP_TOOL_NAMES:
+                    continue
+                tool_id = str(tool_call.get("id") or "").strip()
+                if tool_id in latest_tool_call_ids:
+                    target_message = message
+
+        if target_message is None:
+            return
+
+        stripped_content = 0
+        stripped_reasoning = 0
+        if target_message.get("content") not in (None, ""):
+            target_message["content"] = None
+            stripped_content += 1
+        if target_message.get("reasoning_content"):
+            target_message.pop("reasoning_content", None)
+            stripped_reasoning += 1
+
+        if stripped_content or stripped_reasoning:
+            logger.info(
+                "Gateway sanitized assistant tool-call continuation | session=%s "
+                "content_messages=%s reasoning_messages=%s",
+                session_id,
+                stripped_content,
+                stripped_reasoning,
+            )
+
+    @staticmethod
+    def _latest_tool_result_ids(messages: list[dict]) -> set[str]:
+        tool_call_ids: set[str] = set()
+        saw_tool_result = False
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                if saw_tool_result:
+                    break
+                continue
+            role = message.get("role")
+            if role == "system" and not saw_tool_result:
+                continue
+            if role != "tool":
+                break
+            saw_tool_result = True
+            tool_call_id = str(message.get("tool_call_id") or "").strip()
+            if tool_call_id:
+                tool_call_ids.add(tool_call_id)
+        return tool_call_ids
+
+    @staticmethod
+    def _tool_call_function_name(tool_call: Any) -> str:
+        if not isinstance(tool_call, dict):
+            return ""
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            return str(function.get("name") or "").strip()
+        return str(tool_call.get("name") or "").strip()
 
     def _restore_cached_reasoning_content(self, session_id: str, messages: Any) -> None:
         if not isinstance(messages, list) or not any(
