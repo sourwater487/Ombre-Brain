@@ -2856,7 +2856,6 @@ def _format_readonly_related_memory(bucket: dict) -> str:
         f"可能相关「{title}」[bucket_id:{bucket['id']}]{state}"
     )
 
-
 def _bucket_text_for_embedding(bucket: dict) -> str:
     meta = bucket.get("metadata", {})
     comments = meta.get("comments", [])
