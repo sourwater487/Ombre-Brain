@@ -2075,6 +2075,7 @@ class GatewayService:
             stable_context,
             dynamic_context,
         )
+        self._inject_ombre_write_tool_discipline(forward_payload)
         self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
         if include_debug:
@@ -2381,7 +2382,6 @@ class GatewayService:
         async def stream_body():
             finalized = False
             stream_state = self._new_stream_capture_state()
-            ombre_filter_state = self._new_ombre_write_sse_filter_state()
 
             async def finalize_once() -> None:
                 nonlocal finalized
@@ -2405,18 +2405,8 @@ class GatewayService:
                         self._consume_stream_capture_chunk(stream_state, chunk)
                         if stream_state.get("seen_done"):
                             await finalize_once()
-                        for filtered_chunk in self._filter_ombre_write_openai_sse_chunk(
-                            ombre_filter_state,
-                            chunk,
-                        ):
-                            yield filtered_chunk
+                        yield chunk
                 self._consume_stream_capture_chunk(stream_state, b"", final=True)
-                for filtered_chunk in self._filter_ombre_write_openai_sse_chunk(
-                    ombre_filter_state,
-                    b"",
-                    final=True,
-                ):
-                    yield filtered_chunk
                 await finalize_once()
             finally:
                 await upstream_response.aclose()
@@ -3852,7 +3842,6 @@ class GatewayService:
             next_block_index = 0
             text_block_index: int | None = None
             tool_blocks: dict[int, dict[str, Any]] = {}
-            ombre_filter_state = self._new_ombre_write_sse_filter_state()
 
             async def finalize_once() -> None:
                 nonlocal finalized
@@ -3976,21 +3965,10 @@ class GatewayService:
                     self._consume_stream_capture_chunk(stream_state, chunk)
                     if stream_state.get("seen_done"):
                         await finalize_once()
-                    for filtered_chunk in self._filter_ombre_write_openai_sse_chunk(
-                        ombre_filter_state,
-                        chunk,
-                    ):
-                        for outgoing in anthropic_chunks_from_openai_chunk(filtered_chunk):
-                            yield outgoing
+                    for outgoing in anthropic_chunks_from_openai_chunk(chunk):
+                        yield outgoing
 
                 self._consume_stream_capture_chunk(stream_state, b"", final=True)
-                for filtered_chunk in self._filter_ombre_write_openai_sse_chunk(
-                    ombre_filter_state,
-                    b"",
-                    final=True,
-                ):
-                    for outgoing in anthropic_chunks_from_openai_chunk(filtered_chunk):
-                        yield outgoing
                 await finalize_once()
                 if text_block_index is not None:
                     yield self._anthropic_sse(
@@ -10371,240 +10349,42 @@ class GatewayService:
             "trace",
         }
     )
-    OMBRE_PREFACE_BUFFER_CHARS = 600
-    OMBRE_PREFACE_BUFFER_EVENTS = 80
+    OMBRE_WRITE_TOOL_DISCIPLINE = (
+        "If you decide to call one of these Ombre write tools "
+        "(hold, grow, comment_bucket, profile_fact, trace, darkroom_enter), "
+        "the assistant message that contains the tool_call must contain no visible text/content. "
+        "Call the tool only; after the tool result is returned, respond to the user normally."
+    )
 
-    def _new_ombre_write_sse_filter_state(self) -> dict[str, Any]:
-        return {
-            "decoder": codecs.getincrementaldecoder("utf-8")(),
-            "buffer": "",
-            "mode": "pending",
-            "pending_events": [],
-            "pending_text_chars": 0,
-            "tool_names": {},
-            "saw_tool_call": False,
+    def _inject_ombre_write_tool_discipline(self, payload: dict[str, Any]) -> None:
+        if not self._payload_exposes_ombre_write_tool(payload):
+            return
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return
+        instruction = {
+            "role": "system",
+            "content": self.OMBRE_WRITE_TOOL_DISCIPLINE,
         }
+        insert_at = self._after_leading_system_index(messages)
+        messages.insert(insert_at, instruction)
 
-    def _filter_ombre_write_openai_sse_chunk(
-        self,
-        state: dict[str, Any],
-        chunk: bytes,
-        *,
-        final: bool = False,
-    ) -> list[bytes]:
-        output: list[bytes] = []
-        decoder = state["decoder"]
-        if chunk:
-            state["buffer"] += decoder.decode(chunk)
-        if final:
-            state["buffer"] += decoder.decode(b"", final=True)
-
-        buffer = state["buffer"].replace("\r\n", "\n")
-        while "\n\n" in buffer:
-            event_text, buffer = buffer.split("\n\n", 1)
-            self._process_ombre_write_sse_event(state, event_text, output)
-
-        if final and buffer.strip():
-            self._process_ombre_write_sse_event(state, buffer, output)
-            buffer = ""
-        state["buffer"] = buffer
-
-        if final:
-            output.extend(
-                self._flush_ombre_write_sse_pending(
-                    state,
-                    drop_text=state.get("mode") == "suppress",
-                )
-            )
-        return output
-
-    def _process_ombre_write_sse_event(
-        self,
-        state: dict[str, Any],
-        event_text: str,
-        output: list[bytes],
-    ) -> None:
-        raw_event = self._sse_event_bytes(event_text)
-        payload = self._sse_event_data_payload(event_text)
-        if not payload:
-            if state.get("mode") == "pending" and state.get("pending_events"):
-                state["pending_events"].append((event_text, None))
-            else:
-                output.append(raw_event)
-            return
-
-        if payload == "[DONE]":
-            output.extend(
-                self._flush_ombre_write_sse_pending(
-                    state,
-                    drop_text=state.get("mode") == "suppress",
-                )
-            )
-            output.append(raw_event)
-            return
-
-        try:
-            body = json.loads(payload)
-        except json.JSONDecodeError:
-            if state.get("mode") == "pending" and state.get("pending_events"):
-                state["pending_events"].append((event_text, None))
-            else:
-                output.append(raw_event)
-            return
-
-        mode = state.get("mode")
-        if mode == "suppress":
-            filtered = self._openai_sse_event_without_content(body)
-            if filtered:
-                output.append(filtered)
-            return
-        if mode == "pass":
-            output.append(raw_event)
-            return
-
-        state["pending_events"].append((event_text, body))
-        self._observe_ombre_write_sse_body(state, body)
-        if state.get("mode") == "suppress":
-            output.extend(self._flush_ombre_write_sse_pending(state, drop_text=True))
-            return
-        if state.get("mode") == "pass":
-            output.extend(self._flush_ombre_write_sse_pending(state, drop_text=False))
-            return
-        if (
-            not state.get("saw_tool_call")
-            and (
-                int(state.get("pending_text_chars") or 0) >= self.OMBRE_PREFACE_BUFFER_CHARS
-                or len(state.get("pending_events") or []) >= self.OMBRE_PREFACE_BUFFER_EVENTS
-            )
-        ):
-            state["mode"] = "pass"
-            output.extend(self._flush_ombre_write_sse_pending(state, drop_text=False))
-
-    def _observe_ombre_write_sse_body(self, state: dict[str, Any], body: Any) -> None:
-        if not isinstance(body, dict):
-            return
-        choices = body.get("choices")
-        if not isinstance(choices, list):
-            return
-
-        finish_reasons = []
-        for choice in choices:
-            if not isinstance(choice, dict):
+    def _payload_exposes_ombre_write_tool(self, payload: dict[str, Any]) -> bool:
+        tools = payload.get("tools")
+        if not isinstance(tools, list):
+            return False
+        for tool in tools:
+            if not isinstance(tool, dict):
                 continue
-            finish_reason = choice.get("finish_reason")
-            if finish_reason:
-                finish_reasons.append(str(finish_reason))
-
-            for source_key in ("delta", "message"):
-                source = choice.get(source_key)
-                if not isinstance(source, dict):
-                    continue
-                content = source.get("content")
-                if isinstance(content, str):
-                    state["pending_text_chars"] = int(state.get("pending_text_chars") or 0) + len(content)
-                tool_calls = source.get("tool_calls")
-                if isinstance(tool_calls, list) and tool_calls:
-                    state["saw_tool_call"] = True
-                    for fallback_index, tool_call in enumerate(tool_calls):
-                        if not isinstance(tool_call, dict):
-                            continue
-                        index = str(tool_call.get("index", fallback_index))
-                        name_part = self._tool_call_function_name(tool_call)
-                        if name_part:
-                            tool_names = state.setdefault("tool_names", {})
-                            tool_names[index] = str(tool_names.get(index, "")) + name_part
-                            if tool_names[index] in self.OMBRE_WRITE_MCP_TOOL_NAMES:
-                                state["mode"] = "suppress"
-                                return
-
-        if state.get("saw_tool_call"):
-            names = [
-                str(name)
-                for name in (state.get("tool_names") or {}).values()
-                if str(name or "").strip()
-            ]
-            if names and all(not self._tool_name_maybe_ombre_write(name) for name in names):
-                state["mode"] = "pass"
-                return
-            if any(reason in {"tool_calls", "function_call"} for reason in finish_reasons):
-                state["mode"] = "pass"
-            return
-
-        if any(reason in {"stop", "length", "content_filter"} for reason in finish_reasons):
-            state["mode"] = "pass"
-
-    def _tool_name_maybe_ombre_write(self, name: str) -> bool:
-        text = str(name or "").strip()
-        if not text:
-            return True
-        return any(tool_name.startswith(text) for tool_name in self.OMBRE_WRITE_MCP_TOOL_NAMES)
-
-    def _flush_ombre_write_sse_pending(self, state: dict[str, Any], *, drop_text: bool) -> list[bytes]:
-        pending = state.get("pending_events") or []
-        state["pending_events"] = []
-        output: list[bytes] = []
-        for event_text, body in pending:
-            if drop_text and isinstance(body, dict):
-                filtered = self._openai_sse_event_without_content(body)
-                if filtered:
-                    output.append(filtered)
-                continue
-            output.append(self._sse_event_bytes(event_text))
-        return output
-
-    @staticmethod
-    def _sse_event_bytes(event_text: str) -> bytes:
-        return (event_text + "\n\n").encode("utf-8")
-
-    @staticmethod
-    def _sse_event_data_payload(event_text: str) -> str:
-        data_lines = []
-        for raw_line in str(event_text or "").split("\n"):
-            line = raw_line.strip()
-            if line.startswith("data:"):
-                data_lines.append(line[5:].strip())
-        return "\n".join(data_lines).strip()
-
-    def _openai_sse_event_without_content(self, body: dict[str, Any]) -> bytes | None:
-        updated = self._openai_body_without_assistant_content(body)
-        if not self._openai_sse_body_has_payload(updated):
-            return None
-        return (
-            "data: "
-            + json.dumps(updated, ensure_ascii=False, separators=(",", ":"))
-            + "\n\n"
-        ).encode("utf-8")
-
-    def _openai_body_without_assistant_content(self, body: dict[str, Any]) -> dict[str, Any]:
-        updated = deepcopy(body)
-        choices = updated.get("choices")
-        if not isinstance(choices, list):
-            return updated
-        kept_choices = []
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            for source_key in ("delta", "message"):
-                source = choice.get(source_key)
-                if isinstance(source, dict) and "content" in source:
-                    source.pop("content", None)
-            delta = choice.get("delta")
-            message = choice.get("message")
-            if (
-                choice.get("finish_reason") is not None
-                or (isinstance(delta, dict) and bool(delta))
-                or (isinstance(message, dict) and bool(message))
-            ):
-                kept_choices.append(choice)
-        updated["choices"] = kept_choices
-        return updated
-
-    @staticmethod
-    def _openai_sse_body_has_payload(body: dict[str, Any]) -> bool:
-        if isinstance(body.get("usage"), dict):
-            return True
-        choices = body.get("choices")
-        return isinstance(choices, list) and bool(choices)
+            name = ""
+            function = tool.get("function")
+            if isinstance(function, dict):
+                name = str(function.get("name") or "")
+            if not name:
+                name = str(tool.get("name") or "")
+            if name.strip() in self.OMBRE_WRITE_MCP_TOOL_NAMES:
+                return True
+        return False
 
     def _strip_ombre_write_tool_call_content_from_response(
         self,
