@@ -4981,7 +4981,7 @@ def test_gateway_hook_recall_returns_cards_without_upstream(
         importance=6,
         domain=["日常"],
     )
-    app, _, _, captured = _build_service(
+    app, service, _, captured = _build_service(
         monkeypatch,
         _gateway_config(
             test_config,
@@ -4993,6 +4993,11 @@ def test_gateway_hook_recall_returns_cards_without_upstream(
         bucket_mgr,
         embedding_results=[(bucket_id, 0.96)],
     )
+
+    async def fail_prepare_payload(*args, **kwargs):
+        raise AssertionError("hook recall must use the fast path")
+
+    monkeypatch.setattr(service, "prepare_payload", fail_prepare_payload)
 
     with TestClient(app) as client:
         response = client.post(

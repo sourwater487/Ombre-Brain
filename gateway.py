@@ -2149,24 +2149,38 @@ class GatewayService:
         include_debug = self._truthy_header(
             str(body.get("include_debug")) if body.get("include_debug") is not None else None
         )
+        allow_semantic = self._truthy_header(
+            str(body.get("allow_semantic")) if body.get("allow_semantic") is not None else None
+        )
+        allow_query_planner = self._truthy_header(
+            str(body.get("allow_query_planner")) if body.get("allow_query_planner") is not None else None
+        )
+        allow_semantic_session_dedupe = self._truthy_header(
+            str(body.get("allow_semantic_session_dedupe"))
+            if body.get("allow_semantic_session_dedupe") is not None
+            else None
+        )
+        allow_rerank = self._truthy_header(
+            str(body.get("allow_rerank")) if body.get("allow_rerank") is not None else None
+        )
 
         try:
-            _forward_payload, recalled_ids, debug_payload = await self.prepare_payload(
-                {"model": model, "messages": messages, "stream": False},
+            cards, recalled_ids, debug_payload = await self._hook_recall_fast_cards(
+                query,
                 session_id,
-                include_debug=True,
+                max_cards=max_cards,
+                max_chars=max_chars,
+                include_diffused=include_diffused,
+                allow_semantic=allow_semantic,
+                allow_query_planner=allow_query_planner,
+                allow_semantic_session_dedupe=allow_semantic_session_dedupe,
+                allow_rerank=allow_rerank,
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
 
-        cards = self._hook_recall_cards_from_debug(
-            debug_payload,
-            max_cards=max_cards,
-            max_chars=max_chars,
-            include_diffused=include_diffused,
-        )
         response: dict[str, Any] = {
             "ok": True,
             "query": query,
@@ -12174,6 +12188,8 @@ class GatewayService:
         required_terms: list[str] | None = None,
         planner_query: dict[str, Any] | None = None,
         allow_semantic: bool = True,
+        allow_semantic_session_dedupe: bool = True,
+        allow_rerank: bool = True,
         timing_debug: dict[str, Any] | None = None,
         timing_prefix: str = "candidate",
     ) -> tuple[list[dict], list[dict]]:
@@ -12397,7 +12413,8 @@ class GatewayService:
         )
         mark("sort_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
-        scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
+        if allow_rerank:
+            scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
         mark("rerank_bucket_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
         hard_excluded_ids = self._session_hard_exclude_bucket_ids(session_id)
@@ -12456,12 +12473,15 @@ class GatewayService:
             suppressed_candidates = session_suppressed_candidates + retry_suppressed
         mark("admit_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
-        admitted_pool, semantic_dedupe_suppressed = await self._filter_semantic_session_deduped_bucket_items(
-            query,
-            session_id,
-            admitted_pool,
-            all_buckets,
-        )
+        if allow_semantic_session_dedupe:
+            admitted_pool, semantic_dedupe_suppressed = await self._filter_semantic_session_deduped_bucket_items(
+                query,
+                session_id,
+                admitted_pool,
+                all_buckets,
+            )
+        else:
+            semantic_dedupe_suppressed = []
         suppressed_candidates.extend(semantic_dedupe_suppressed)
         mark("semantic_session_dedupe", stage_started_at)
         admitted_pool = self._boost_explicit_relation_edge_bucket_items(query, admitted_pool)
@@ -12476,6 +12496,10 @@ class GatewayService:
         *,
         search_query: str = "",
         include_query_planner_debug: bool = False,
+        allow_semantic: bool = True,
+        allow_query_planner: bool = True,
+        allow_semantic_session_dedupe: bool = True,
+        allow_rerank: bool = True,
     ) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], dict[str, Any]]:
         planner_debug = self._query_planner_debug_base(query)
         timing_debug = planner_debug.setdefault("timing_ms", {})
@@ -12495,7 +12519,9 @@ class GatewayService:
             session_id,
             all_buckets,
             search_query=search_query,
-            allow_semantic=True,
+            allow_semantic=allow_semantic,
+            allow_semantic_session_dedupe=allow_semantic_session_dedupe,
+            allow_rerank=allow_rerank,
             timing_debug=timing_debug,
             timing_prefix="direct",
         )
@@ -12510,7 +12536,7 @@ class GatewayService:
         stage_started_at = time.perf_counter()
         trigger_reason = self._query_planner_trigger_reason(query, direct_selected)
         self._add_timing_ms(timing_debug, "query_planner_trigger_check", stage_started_at)
-        if trigger_reason:
+        if trigger_reason and allow_query_planner:
             planner_debug["triggered"] = True
             planner_debug["trigger_reason"] = trigger_reason
             stage_started_at = time.perf_counter()
@@ -12541,7 +12567,9 @@ class GatewayService:
                             search_query=short_search_query,
                             required_terms=must_terms,
                             planner_query=planner_query,
-                            allow_semantic=self.query_planner_supplemental_semantic,
+                            allow_semantic=allow_semantic and self.query_planner_supplemental_semantic,
+                            allow_semantic_session_dedupe=allow_semantic_session_dedupe,
+                            allow_rerank=allow_rerank,
                             timing_debug=timing_debug,
                             timing_prefix=f"supplemental_{index}",
                         )
@@ -12592,6 +12620,8 @@ class GatewayService:
                         self._add_timing_ms(timing_debug, "supplemental.pick_cards", stage_started_at)
                 else:
                     planner_debug["skip_reason"] = "planner_returned_no_search"
+        elif trigger_reason:
+            planner_debug["skip_reason"] = "query_planner_disabled_for_hook_fast_path"
         elif self.query_planner_enabled:
             planner_debug["skip_reason"] = "direct_recall_ok_or_query_short"
 
@@ -14328,6 +14358,153 @@ class GatewayService:
     @staticmethod
     def _extract_bucket_ids_from_context(text: str) -> list[str]:
         return list(dict.fromkeys(re.findall(r"\[bucket_id:([^\]\s]+)\]", str(text or ""))))
+
+    async def _hook_recall_fast_cards(
+        self,
+        query: str,
+        session_id: str,
+        *,
+        max_cards: int,
+        max_chars: int,
+        include_diffused: bool,
+        allow_semantic: bool,
+        allow_query_planner: bool,
+        allow_semantic_session_dedupe: bool,
+        allow_rerank: bool,
+    ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+        memory_sentinel_debug = self._memory_sentinel_debug_base(query)
+        memory_sentinel_debug["searchable_residue_terms"] = self._memory_sentinel_searchable_residue_terms(query)
+        query_planner_debug = self._query_planner_debug_base(query)
+        if max_cards <= 0:
+            return [], [], {
+                "query_preview": self._clip_text(query, 500),
+                "query_planner_debug": query_planner_debug,
+                "memory_sentinel_debug": memory_sentinel_debug,
+                "recalled_bucket_ids": [],
+                "recalled_moment_debug": [],
+                "diffused_moment_debug": [],
+                "hook_recall_debug": {"mode": "fast", "skip_reason": "max_cards_zero"},
+            }
+
+        all_buckets = await self.bucket_mgr.list_all(include_archive=False)
+        search_query = self._dynamic_recall_search_query(query, memory_sentinel_debug)
+        selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
+            query,
+            session_id,
+            all_buckets,
+            search_query=search_query,
+            include_query_planner_debug=True,
+            allow_semantic=allow_semantic,
+            allow_query_planner=allow_query_planner,
+            allow_semantic_session_dedupe=allow_semantic_session_dedupe,
+            allow_rerank=allow_rerank,
+        )
+        selected_buckets = self._with_explicit_source_record_buckets(
+            query,
+            selected_buckets,
+            all_buckets,
+        )
+
+        cards: list[dict[str, Any]] = []
+        recalled_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for bucket in selected_buckets:
+            if len(cards) >= max_cards:
+                break
+            card = self._hook_recall_card_from_bucket(bucket, query=query, max_chars=max_chars)
+            if not card:
+                continue
+            bucket_id = str(card.get("bucket_id") or "")
+            if not bucket_id or bucket_id in seen_ids:
+                continue
+            seen_ids.add(bucket_id)
+            recalled_ids.append(bucket_id)
+            cards.append(card)
+
+        debug_payload = {
+            "query_preview": self._clip_text(query, 500),
+            "query_planner_debug": query_planner_debug,
+            "memory_sentinel_debug": memory_sentinel_debug,
+            "recalled_bucket_ids": recalled_ids,
+            "recalled_moment_ids": [],
+            "diffused_bucket_ids": [],
+            "diffused_moment_ids": [],
+            "recalled_moment_debug": [],
+            "diffused_moment_debug": [],
+            "suppressed_bucket_candidates": [
+                self._format_suppressed_bucket_debug(item, query=query)
+                for item in (suppressed_buckets or [])[:20]
+            ],
+            "hook_recall_debug": {
+                "mode": "fast_bucket",
+                "search_query": search_query,
+                "allow_semantic": allow_semantic,
+                "allow_query_planner": allow_query_planner,
+                "allow_semantic_session_dedupe": allow_semantic_session_dedupe,
+                "allow_rerank": allow_rerank,
+                "include_diffused_requested": include_diffused,
+                "diffused_skipped_reason": "hook_fast_path_uses_direct_bucket_cards",
+            },
+        }
+        return cards, recalled_ids, debug_payload
+
+    def _hook_recall_card_from_bucket(
+        self,
+        bucket: dict[str, Any],
+        *,
+        query: str,
+        max_chars: int,
+    ) -> dict[str, Any] | None:
+        if not isinstance(bucket, dict):
+            return None
+        bucket_id = str(bucket.get("id") or "")
+        if not bucket_id:
+            return None
+        metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        title = str(metadata.get("name") or bucket.get("name") or bucket_id).strip()
+        text = bucket_content_for_recall(bucket)
+        if title and self._compact_lookup_key(title) not in self._compact_lookup_key(text):
+            text = f"{title}\n{text}".strip()
+        if not str(text or "").strip():
+            return None
+
+        signal = bucket.get("_recall_signal") if isinstance(bucket.get("_recall_signal"), dict) else {}
+        reliable = bool(
+            signal.get("planner_lexical_match")
+            or signal.get("exact_anchor_match")
+            or signal.get("rare_name_match")
+            or self._is_high_confidence_match(
+                self._safe_float(signal.get("semantic_score"), 0.0),
+                self._safe_float(signal.get("keyword_score"), 0.0),
+            )
+        )
+        note = {
+            "use": "background",
+            "why": "Gateway selected this memory for the current message.",
+            "reliability": "direct_match" if reliable else "weak_context",
+            "mention_policy": "do_not_mention_unless_user_asks",
+            "conflict_rule": "current_user_message_wins",
+            "canonical_domain": "",
+            "kind": "",
+            "status_view": "",
+            "flags": [],
+        }
+        row = {
+            "bucket_id": bucket_id,
+            "bucket_name": title,
+            "content_preview": self._clip_text(text, max_chars),
+            "reading_note": note,
+        }
+        return self._hook_recall_card(
+            source="direct",
+            bucket_id=bucket_id,
+            moment_id="",
+            title=title,
+            text=text,
+            render_shape="bucket_brief",
+            row=row,
+            max_chars=max_chars,
+        )
 
     def _hook_recall_cards_from_debug(
         self,
