@@ -5110,6 +5110,41 @@ def test_gateway_hook_recall_uses_word_map_terms_from_original_query(
     assert "笔友" in word_map_debug["terms"]
 
 
+def test_gateway_hook_recall_skips_empty_cards(monkeypatch, test_config, bucket_mgr):
+    _app, service, _transport, _captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=500,
+            related_memory_budget=0,
+        ),
+        bucket_mgr,
+    )
+    cards = service._hook_recall_cards_from_debug(
+        {
+            "recalled_memory": (
+                "[bucket_id:filled] [moment_id:m1]\n"
+                "usable note\n"
+                "[bucket_id:empty] [moment_id:m2]\n"
+            ),
+            "recalled_moment_debug": [
+                {"bucket_id": "filled", "moment_id": "m1", "bucket_name": "Filled"},
+                {"bucket_id": "empty", "moment_id": "m2", "bucket_name": "Empty"},
+            ],
+        },
+        max_cards=3,
+        max_chars=500,
+        include_diffused=False,
+    )
+
+    assert [card["bucket_id"] for card in cards] == ["filled"]
+    assert cards[0]["text"] == "usable note"
+    additional_context = service._render_hook_recall_additional_context(cards)
+    assert "[reading_note id=ombre:filled#m1]" in additional_context
+    assert "ombre:empty#m2" not in additional_context
+
+
 def test_gateway_direct_event_date_tag_suppresses_created_tag(
     monkeypatch,
     test_config,

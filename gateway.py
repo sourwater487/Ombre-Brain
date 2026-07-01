@@ -14290,6 +14290,8 @@ class GatewayService:
                 return
             if card.get("use_mode") == "ignore":
                 return
+            if not str(card.get("text") or "").strip():
+                return
             key = (str(card.get("bucket_id") or ""), str(card.get("moment_id") or ""))
             if key in seen:
                 return
