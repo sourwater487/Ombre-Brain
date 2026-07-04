@@ -4727,6 +4727,8 @@ def test_gateway_operit_context_rewrite_splits_text_attachment_when_enabled(
         ' <attachment id="message_insert_extra_bundle_177757652229" '
         'filename="Time:02:58 01/2026/6" type="text/plain" size="104">'
         "【角色卡】\nHaven 会读取固定角色设定。\n\n"
+        "【Persona】\n当前口吻会随这一轮对话变化。\n\n"
+        "【照顾备忘】\n今晚提醒小雨早点休息；这不是长期规则。\n\n"
         "【当前时间】\n2026-06-01 02:58:42 时区: Asia/Shanghai\n\n"
         "【相关记忆】 查询: 猫咪最近又干了什么？\n"
         "快照: - 上限: 3 命中数量: 0 当前没有命中的记忆"
@@ -4748,12 +4750,23 @@ def test_gateway_operit_context_rewrite_splits_text_attachment_when_enabled(
     messages = captured[0]["json"]["messages"]
     joined = _joined_message_content(messages)
     user_content = next(str(message["content"]) for message in messages if message.get("role") == "user")
+    stable_content = next(
+        str(message.get("content") or "")
+        for message in messages
+        if isinstance(message, dict) and "Operit Stable Context" in str(message.get("content") or "")
+    )
     assert "Recalled Memory" in joined
     assert "小橘床边玩具" in joined
     assert "Operit Stable Context" in joined
     assert "角色卡" in joined
     assert "固定角色设定" in joined
+    assert "Persona" not in stable_content
+    assert "照顾备忘" not in stable_content
     assert "Operit Activity Context" in user_content
+    assert "Persona" in user_content
+    assert "当前口吻会随这一轮对话变化" in user_content
+    assert "照顾备忘" in user_content
+    assert "早点休息" in user_content
     assert "当前时间" in user_content
     assert "相关记忆" in user_content
     assert "工作区结构无变化" in user_content
@@ -4871,6 +4884,61 @@ def test_gateway_operit_context_rewrite_skips_current_tool_continuation(
     assert response.status_code == 200
     joined = _joined_message_content(captured[0]["json"]["messages"])
     assert "message_insert_extra_bundle_177757652241" in joined
+    assert "Operit Activity Context" not in joined
+
+
+def test_gateway_operit_context_rewrite_skips_multimodal_content(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            operit_context_rewrite_enabled=True,
+            recent_context_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results=[],
+    )
+    operit_extra = (
+        ' <attachment id="message_insert_extra_bundle_177757652242" '
+        'filename="Time:02:58 01/2026/6" type="text/plain" size="104">'
+        "【当前时间】\n2026-06-01 02:58:42 时区: Asia/Shanghai\n"
+        "</attachment>"
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-operit-multimodal-skip",
+            },
+            json={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "看一下这张图" + operit_extra},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,aGVsbG8="},
+                            },
+                        ],
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    messages = captured[0]["json"]["messages"]
+    joined = _joined_message_content(messages)
+    user_message = next(message for message in messages if message.get("role") == "user")
+    assert isinstance(user_message.get("content"), list)
+    assert "message_insert_extra_bundle_177757652242" in joined
     assert "Operit Activity Context" not in joined
 
 

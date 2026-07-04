@@ -562,35 +562,58 @@ EXTERNAL_CONTEXT_BLOCK_TITLES = {
     "当前电量",
     "当前天气",
     "当前位置",
+    "当前任务",
+    "当前页面",
+    "当前文件",
+    "当前状态",
+    "当前人设",
+    "当前角色设定",
+    "当前项目状态",
     "当前屏幕应用",
     "应用使用时长",
     "最近通知",
+    "最近上下文",
+    "近期上下文",
     "相关记忆",
+    "工作区",
+    "工作区结构",
+    "工具结果",
+    "工具返回",
+    "关系天气",
+    "照顾备忘",
+    "照顾提醒",
     "屏幕文本",
+    "Persona",
+    "Recent Context",
+    "Relationship Weather",
+    "Care Memo",
+    "Care Reminder",
 }
 OPERIT_STABLE_CONTEXT_TITLES = {
-    "人设",
     "角色卡",
     "角色设定",
     "固定规则",
     "长期规则",
+    "记忆规则",
+    "长期偏好",
+    "固定偏好",
     "系统提示",
     "工具说明",
     "工具列表",
     "工具栏",
     "使用说明",
-    "Persona",
     "System Prompt",
 }
 OPERIT_STABLE_CONTEXT_KEYWORDS = (
     "角色卡",
-    "角色设定",
     "固定规则",
     "长期规则",
+    "记忆规则",
+    "固定偏好",
+    "长期偏好",
     "工具说明",
     "工具列表",
     "system prompt",
-    "persona",
 )
 MOMENT_SECTION_LABELS = {
     "body": "body",
@@ -16437,6 +16460,8 @@ class GatewayService:
     @staticmethod
     def _operit_section_is_stable(title: str, body: str) -> bool:
         title_text = str(title or "").strip()
+        if title_text in EXTERNAL_CONTEXT_BLOCK_TITLES:
+            return False
         if title_text in OPERIT_STABLE_CONTEXT_TITLES:
             return True
         haystack = f"{title_text}\n{body}".lower()
