@@ -6599,6 +6599,14 @@ def test_gateway_injection_debug_exposes_diffused_chain_bundle(
     assert target_debug["recall_why"]["stage"] == "diffusion_candidate"
     assert target_debug["recall_why"]["admission"]["reason"] == ""
     assert any(source["source"] == "diffusion" for source in target_debug["recall_why"]["sources"])
+    why_entry = debug_payload["recall_why_summary"]["by_bucket_id"][target_id]
+    assert why_entry["final_status"] == "injected"
+    assert why_entry["injected"] is True
+    assert "diffusion" in why_entry["stages"]
+    assert "diffusion" in why_entry["sources"]
+    diffusion_evidence = next(item for item in why_entry["evidence"] if item["stage"] == "diffusion")
+    assert diffusion_evidence["diffusion"]["path_trace"].count("context_of") == 2
+    assert diffusion_evidence["diffusion"]["final"]["status"] == "injected"
     assert "链路目标温度锚点" in target_debug["temperature_context"][0]["text_preview"]
 
 
@@ -10152,6 +10160,13 @@ def test_gateway_low_confidence_candidate_does_not_leak_through_recent_context(
     assert suppressed_bucket["recall_policy_debug"]["has_topic_evidence"] is False
     assert suppressed_bucket["recall_policy_debug"]["auto"] is True
     assert "情书里写过" in suppressed_bucket["content_preview"]
+    why_entry = payload["recall_why_summary"]["by_bucket_id"][romance_id]
+    assert why_entry["final_status"] == "suppressed"
+    assert why_entry["injected"] is False
+    assert "suppressed_bucket" in why_entry["stages"]
+    assert "semantic" in why_entry["sources"]
+    assert "query_topic_evidence_missing" in why_entry["admission_reasons"]
+    assert any(entry["bucket_id"] == romance_id for entry in payload["recall_why_summary"]["suppressed"])
 
 
 def test_gateway_comment_only_topic_evidence_does_not_promote_bucket_body(
@@ -11447,8 +11462,14 @@ def test_entity_edge_boost_prefers_configured_user_preference(
         related_memory_budget=0,
         word_map_hint_enabled=False,
         query_planner_enabled=False,
+        retrieval_mode="bucket",
         first_card_min_score=0.1,
         second_card_min_score=0.1,
+        recalled_memory_budget=500,
+        inject_total_budget=1600,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
     )
     cfg["identity"] = {
         "ai_name": "Haven",
@@ -11496,6 +11517,19 @@ def test_entity_edge_boost_prefers_configured_user_preference(
     why = service._recall_why_debug(liked_item, status="admitted", stage="bucket_candidate")
     assert why["primary_source"] == "entity_edge"
     assert any(source["source"] == "entity_edge" for source in why["sources"])
+    _payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "我喜欢的故事"}]},
+            "sess-entity-edge-summary",
+            include_debug=True,
+        )
+    )
+    assert liked_id in recalled_ids
+    why_entry = debug["recall_why_summary"]["by_bucket_id"][liked_id]
+    assert why_entry["final_status"] == "injected"
+    assert why_entry["injected"] is True
+    assert "direct" in why_entry["stages"]
+    assert "entity_edge" in why_entry["sources"]
     direct_why = service._recall_why_debug(
         {"source": "bucket", "semantic_score": 0.8},
         status="injected_direct",
@@ -12167,6 +12201,12 @@ def test_low_signal_gate_keeps_exact_short_code_recall(
     assert "k9alpha 测试锚点" in injected
     assert debug["prepare_timing_debug"]["low_signal_auto_recall"] is False
     assert debug["query_planner_debug"]["exact_anchor_hints"]["bucket_ids"] == [target_id]
+    why_entry = debug["recall_why_summary"]["by_bucket_id"][target_id]
+    assert why_entry["final_status"] == "injected"
+    assert why_entry["injected"] is True
+    assert "direct" in why_entry["stages"]
+    assert "exact_anchor" in why_entry["sources"]
+    assert why_entry["evidence"][0]["primary_source"] == "exact_anchor"
 
 
 def test_exact_anchor_ignores_configured_identity_name_alone(

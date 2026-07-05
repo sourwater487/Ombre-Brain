@@ -15597,6 +15597,162 @@ class GatewayService:
         )
         return payload
 
+    def _build_recall_why_summary(
+        self,
+        *,
+        injected_bucket_ids: list[str],
+        direct_rows: list[dict[str, Any]],
+        diffused_rows: list[dict[str, Any]],
+        suppressed_bucket_rows: list[dict[str, Any]],
+        suppressed_moment_rows: list[dict[str, Any]],
+        favorite_bucket_ids: list[str],
+        date_recall_bucket_ids: list[str],
+        targeted_bucket_ids: list[str],
+        dream_source_bucket_ids: list[str],
+    ) -> dict[str, Any]:
+        by_bucket_id: dict[str, dict[str, Any]] = {}
+
+        def ensure_entry(bucket_id: str, bucket_name: str = "") -> dict[str, Any]:
+            bucket_id = str(bucket_id or "").strip()
+            if not bucket_id:
+                return {}
+            entry = by_bucket_id.setdefault(
+                bucket_id,
+                {
+                    "bucket_id": bucket_id,
+                    "bucket_name": "",
+                    "final_status": "candidate",
+                    "injected": False,
+                    "suppressed": False,
+                    "stages": [],
+                    "sources": [],
+                    "admission_reasons": [],
+                    "evidence": [],
+                },
+            )
+            if bucket_name and not entry["bucket_name"]:
+                entry["bucket_name"] = bucket_name
+            return entry
+
+        def append_unique(items: list[str], value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in items:
+                items.append(text)
+
+        def add_evidence(
+            row: dict[str, Any],
+            *,
+            stage: str,
+            injected: bool = False,
+            suppressed: bool = False,
+        ) -> None:
+            bucket_id = str(row.get("bucket_id") or "").strip()
+            if not bucket_id:
+                return
+            entry = ensure_entry(bucket_id, str(row.get("bucket_name") or ""))
+            if not entry:
+                return
+            append_unique(entry["stages"], stage)
+            entry["injected"] = bool(entry["injected"] or injected)
+            entry["suppressed"] = bool(entry["suppressed"] or suppressed)
+
+            why = row.get("recall_why") if isinstance(row.get("recall_why"), dict) else {}
+            sources = [
+                str(source.get("source") or "").strip()
+                for source in (why.get("sources") or [])
+                if isinstance(source, dict) and str(source.get("source") or "").strip()
+            ]
+            for source in sources:
+                append_unique(entry["sources"], source)
+            admission = why.get("admission") if isinstance(why.get("admission"), dict) else {}
+            admission_reason = str(
+                admission.get("reason")
+                or row.get("admission_reason")
+                or row.get("suppression_reason")
+                or ""
+            ).strip()
+            append_unique(entry["admission_reasons"], admission_reason)
+            evidence: dict[str, Any] = {
+                "stage": stage,
+                "status": str(why.get("status") or row.get("status") or ""),
+                "primary_source": str(why.get("primary_source") or ""),
+                "sources": sources,
+                "admission_reason": admission_reason,
+                "score": why.get("score") if isinstance(why.get("score"), dict) else {},
+            }
+            trace = row.get("diffusion_trace") if isinstance(row.get("diffusion_trace"), dict) else {}
+            if trace:
+                evidence["diffusion"] = {
+                    "why": str(trace.get("why") or row.get("why") or ""),
+                    "path_trace": str(trace.get("path_trace") or ""),
+                    "gate": trace.get("gate") if isinstance(trace.get("gate"), dict) else {},
+                    "final": trace.get("final") if isinstance(trace.get("final"), dict) else {},
+                }
+            entry["evidence"].append(evidence)
+
+        def add_plain_stage(bucket_id: str, stage: str, source: str) -> None:
+            entry = ensure_entry(bucket_id)
+            if not entry:
+                return
+            append_unique(entry["stages"], stage)
+            append_unique(entry["sources"], source)
+            entry["injected"] = True
+            entry["evidence"].append(
+                {
+                    "stage": stage,
+                    "status": "injected",
+                    "primary_source": source,
+                    "sources": [source],
+                    "admission_reason": "",
+                    "score": {},
+                }
+            )
+
+        for row in direct_rows:
+            add_evidence(row, stage="direct", injected=True)
+        for row in diffused_rows:
+            add_evidence(
+                row,
+                stage="diffusion",
+                injected=bool(row.get("injected")),
+                suppressed=not bool(row.get("injected")),
+            )
+        for row in suppressed_bucket_rows:
+            add_evidence(row, stage="suppressed_bucket", suppressed=True)
+        for row in suppressed_moment_rows:
+            add_evidence(row, stage="suppressed_moment", suppressed=True)
+
+        for bucket_id in favorite_bucket_ids:
+            add_plain_stage(bucket_id, "favorite_memory", "favorite_memory")
+        for bucket_id in date_recall_bucket_ids:
+            add_plain_stage(bucket_id, "date_recall", "date_recall")
+        for bucket_id in targeted_bucket_ids:
+            add_plain_stage(bucket_id, "targeted_memory_detail", "targeted_memory_detail")
+        for bucket_id in dream_source_bucket_ids:
+            add_plain_stage(bucket_id, "dream_context", "dream_context")
+        for bucket_id in injected_bucket_ids:
+            entry = ensure_entry(bucket_id)
+            if entry:
+                entry["injected"] = True
+
+        for entry in by_bucket_id.values():
+            if entry["injected"]:
+                entry["final_status"] = "injected"
+            elif entry["suppressed"]:
+                entry["final_status"] = "suppressed"
+
+        injected = [entry for entry in by_bucket_id.values() if entry["injected"]]
+        suppressed = [
+            entry
+            for entry in by_bucket_id.values()
+            if entry["suppressed"] and not entry["injected"]
+        ]
+        return {
+            "by_bucket_id": by_bucket_id,
+            "injected": injected,
+            "suppressed": suppressed,
+        }
+
     def _build_injection_debug_payload(
         self,
         *,
@@ -15704,6 +15860,52 @@ class GatewayService:
             for bucket in all_buckets
             if isinstance(bucket, dict) and bucket.get("id") and not self._is_self_anchor_recall_excluded_bucket(bucket)
         }
+        recalled_moment_debug_rows = [
+            self._format_moment_debug(
+                moment,
+                explicit_lookup=explicit_lookup,
+                include_text=True,
+                query=query,
+                direct_render=self._direct_bucket_render_debug(
+                    bucket_map.get(str(moment.get("bucket_id") or "")),
+                    moment,
+                    self.recalled_budget,
+                    query_text=query,
+                ),
+                status="injected_direct",
+            )
+            for moment in recalled_moments[:20]
+        ]
+        diffused_moment_debug_rows = diffused_debug_rows[:20]
+        suppressed_bucket_debug_rows = [
+            self._format_suppressed_bucket_debug(
+                item,
+                explicit_lookup=explicit_lookup,
+                query=query,
+            )
+            for item in (suppressed_buckets or [])[:20]
+        ]
+        suppressed_moment_debug_rows = [
+            self._format_moment_debug(
+                moment,
+                explicit_lookup=explicit_lookup,
+                include_text=True,
+                query=query,
+                status="suppressed",
+            )
+            for moment in (suppressed_moments or [])[:20]
+        ]
+        recall_why_summary = self._build_recall_why_summary(
+            injected_bucket_ids=injected_bucket_ids,
+            direct_rows=recalled_moment_debug_rows,
+            diffused_rows=diffused_moment_debug_rows,
+            suppressed_bucket_rows=suppressed_bucket_debug_rows,
+            suppressed_moment_rows=suppressed_moment_debug_rows,
+            favorite_bucket_ids=favorite_ids,
+            date_recall_bucket_ids=date_recall_bucket_ids,
+            targeted_bucket_ids=targeted_bucket_ids,
+            dream_source_bucket_ids=dream_source_bucket_ids,
+        )
         return {
             "model": model,
             "query_preview": self._clip_text(query, 500),
@@ -15733,44 +15935,14 @@ class GatewayService:
             "recalled_bucket_ids": recalled_bucket_ids,
             "diffused_bucket_ids": diffused_bucket_ids,
             "diffused_candidate_bucket_ids": diffused_candidate_bucket_ids,
+            "recall_why_summary": recall_why_summary,
             "recalled_moment_ids": recalled_moment_ids,
-            "recalled_moment_debug": [
-                self._format_moment_debug(
-                    moment,
-                    explicit_lookup=explicit_lookup,
-                    include_text=True,
-                    query=query,
-                    direct_render=self._direct_bucket_render_debug(
-                        bucket_map.get(str(moment.get("bucket_id") or "")),
-                        moment,
-                        self.recalled_budget,
-                        query_text=query,
-                    ),
-                    status="injected_direct",
-                )
-                for moment in recalled_moments[:20]
-            ],
+            "recalled_moment_debug": recalled_moment_debug_rows,
             "diffused_moment_ids": diffused_moment_ids,
             "diffused_candidate_moment_ids": diffused_candidate_moment_ids,
-            "diffused_moment_debug": diffused_debug_rows[:20],
-            "suppressed_bucket_candidates": [
-                self._format_suppressed_bucket_debug(
-                    item,
-                    explicit_lookup=explicit_lookup,
-                    query=query,
-                )
-                for item in (suppressed_buckets or [])[:20]
-            ],
-            "suppressed_candidates": [
-                self._format_moment_debug(
-                    moment,
-                    explicit_lookup=explicit_lookup,
-                    include_text=True,
-                    query=query,
-                    status="suppressed",
-                )
-                for moment in (suppressed_moments or [])[:20]
-            ],
+            "diffused_moment_debug": diffused_moment_debug_rows,
+            "suppressed_bucket_candidates": suppressed_bucket_debug_rows,
+            "suppressed_candidates": suppressed_moment_debug_rows,
             "context_mode": context_mode,
             "recalled_memory": recalled_memory,
             "just_now_context": just_now_context,
