@@ -221,6 +221,7 @@ domain_taxonomy:
   domains:
     - { key: "relationship", label_zh: "关系" }
     - { key: "intimacy", label_zh: "亲密" }
+    - { key: "inner", label_zh: "内心" }
     - { key: "life", label_zh: "生活" }
     - { key: "project", label_zh: "项目" }
     - { key: "general", label_zh: "通用" }

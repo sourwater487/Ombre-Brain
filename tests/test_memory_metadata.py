@@ -1,4 +1,4 @@
-from memory_metadata import normalize_memory_metadata
+from memory_metadata import normalize_domain_key, normalize_memory_metadata
 
 
 def test_normalize_memory_metadata_splits_domain_kind_status_and_flags():
@@ -66,6 +66,58 @@ def test_normalize_memory_metadata_keeps_scene_out_of_domain():
     assert view["kind"] == "event"
     assert view["status_view"] == "active"
     assert view["legacy_domain"] == ["亲密", "代码"]
+
+
+def test_transaction_legacy_domain_maps_to_project():
+    bucket = {
+        "metadata": {
+            "domain": ["事务"],
+            "tags": [],
+            "type": "dynamic",
+        }
+    }
+
+    view = normalize_memory_metadata(bucket)
+
+    assert normalize_domain_key("事务") == "project"
+    assert view["canonical_domain"] == "project"
+    assert view["domain_label"] == "项目"
+
+
+def test_inner_legacy_domain_is_canonical():
+    bucket = {
+        "metadata": {
+            "domain": ["内心"],
+            "tags": [],
+            "type": "dynamic",
+        }
+    }
+
+    view = normalize_memory_metadata(bucket)
+
+    assert normalize_domain_key("内心") == "inner"
+    assert normalize_domain_key("情绪") == "inner"
+    assert normalize_domain_key("feel") == "inner"
+    assert normalize_domain_key("reflection") == "inner"
+    assert view["canonical_domain"] == "inner"
+    assert view["domain_label"] == "内心"
+
+
+def test_self_anchor_domain_is_not_normalized_as_inner():
+    bucket = {
+        "metadata": {
+            "domain": ["自我"],
+            "tags": [],
+            "type": "dynamic",
+        }
+    }
+
+    view = normalize_memory_metadata(bucket)
+
+    assert normalize_domain_key("自我") == ""
+    assert normalize_domain_key("self_anchor") == ""
+    assert view["canonical_domain"] == "general"
+    assert "self_anchor" in view["flags"]
 
 
 def test_self_anchor_is_not_inferred_from_self_words_inside_tags():

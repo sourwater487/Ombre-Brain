@@ -122,6 +122,7 @@ async def test_dehydrator_analyze_uses_canonical_domain_prompt_and_normalizes(te
     assert result["domain"] == ["project"]
     assert result["tags"] == ["Ombre", "代码"]
     assert "project" in system_prompt
+    assert "inner" in system_prompt
     assert "project.companion_system" not in system_prompt
     assert "日常:" not in system_prompt
     assert "数字:" not in system_prompt
