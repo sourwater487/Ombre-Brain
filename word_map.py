@@ -86,6 +86,35 @@ DEFAULT_WORD_MAP_STOPWORDS = {
 }
 
 DEFAULT_STOPWORD_PREFIXES = ("flavor_", "profile_", "predicate_", "task_")
+STANDALONE_TIME_TERMS = {
+    "一点",
+    "一点点",
+    "今天",
+    "今晚",
+    "今早",
+    "明天",
+    "明晚",
+    "明早",
+    "昨天",
+    "昨晚",
+    "前天",
+    "后天",
+    "刚才",
+    "刚刚",
+    "现在",
+    "目前",
+    "当时",
+    "那天",
+    "这天",
+    "当天",
+    "凌晨",
+    "早上",
+    "上午",
+    "中午",
+    "下午",
+    "晚上",
+    "夜里",
+}
 DEFAULT_WORD_MAP_OVERVIEW_STOPWORDS = {
     "ai",
     "boundary_setting",
@@ -639,6 +668,8 @@ class WordMapStore:
                     "variant_terms": [],
                     "neighbor_terms": [],
                     "anchor_terms": [],
+                    "low_frequency_terms": [],
+                    "low_frequency_sources": [],
                     "rare_name_terms": [],
                     "rare_name_sources": [],
                 },
@@ -669,6 +700,18 @@ class WordMapStore:
                 card_source = str(row["source"] or "")
                 if card_source and card_source not in bucket_evidence["rare_name_sources"]:
                     bucket_evidence["rare_name_sources"].append(card_source)
+            if self._is_low_frequency_match(
+                term,
+                source_kind=str(source_info.get("kind") or ""),
+                card_source=str(row["source"] or ""),
+                bucket_count=int(row["bucket_count"] or 1),
+            ):
+                row_payload["low_frequency_match"] = True
+                if term not in bucket_evidence["low_frequency_terms"]:
+                    bucket_evidence["low_frequency_terms"].append(term)
+                card_source = str(row["source"] or "")
+                if card_source and card_source not in bucket_evidence["low_frequency_sources"]:
+                    bucket_evidence["low_frequency_sources"].append(card_source)
             bucket_evidence["terms"].append(row_payload)
             source_kind = str(source_info.get("kind") or "")
             if source_kind == "direct":
@@ -911,6 +954,8 @@ class WordMapStore:
             return ""
         if term in self.stopwords or term in self.private_terms:
             return ""
+        if _is_standalone_time_term(term):
+            return ""
         if any(term.startswith(prefix) for prefix in self.stopword_prefixes):
             return ""
         if len(term) < self.min_term_len or len(term) > 40:
@@ -971,6 +1016,38 @@ class WordMapStore:
         if source not in RARE_NAME_CARD_SOURCES:
             return False
         if bucket_count > self.rare_name_max_bucket_count:
+            return False
+        normalized = _normalize_term(term)
+        if (
+            not normalized
+            or normalized in self.weak_hint_terms
+            or normalized in self.stopwords
+            or normalized in self.private_terms
+            or normalized in self.overview_stopwords
+        ):
+            return False
+        if re.fullmatch(r"[a-f0-9]{8,40}", normalized):
+            return False
+        if re.fullmatch(r"[\d.:-]+", normalized):
+            return False
+        if source == "title_keyword" and re.fullmatch(r"[\u4e00-\u9fff]{1,2}", normalized):
+            return False
+        return True
+
+    def _is_low_frequency_match(
+        self,
+        term: str,
+        *,
+        source_kind: str,
+        card_source: str,
+        bucket_count: int,
+    ) -> bool:
+        if source_kind != "direct":
+            return False
+        if bucket_count > self.rare_name_max_bucket_count:
+            return False
+        source = str(card_source or "").strip()
+        if source == "domain":
             return False
         normalized = _normalize_term(term)
         if (
@@ -1292,6 +1369,24 @@ def _normalize_term(value: Any) -> str:
 
 def _compact_term(value: Any) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+
+
+def _is_standalone_time_term(value: Any) -> bool:
+    term = _normalize_term(value)
+    key = _compact_term(term)
+    if not key:
+        return False
+    if key in STANDALONE_TIME_TERMS:
+        return True
+    if re.fullmatch(r"(?:[01]?\d|2[0-3])[:：][0-5]\d", term):
+        return True
+    time_prefix = r"(?:凌晨|早上|上午|中午|下午|晚上|夜里)?"
+    time_value = r"(?:[0-2]?\d|[零〇一二两三四五六七八九十]{1,3})"
+    if re.fullmatch(time_prefix + time_value + r"点(?:半|多|钟|[0-5]?\d分?)?", key):
+        return True
+    if re.fullmatch(r"(?:早上|上午|中午|下午|晚上|凌晨|夜里)?[0-2]?\d时(?:[0-5]?\d分?)?", key):
+        return True
+    return False
 
 
 def _compact_title_recall_term(value: Any) -> str:

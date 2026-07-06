@@ -580,7 +580,7 @@ def test_gateway_memory_reading_policy_only_appears_for_memory_context(monkeypat
     assert "Memory Reading Policy" not in dynamic
 
 
-def test_gateway_reading_note_silent_tone_does_not_inline_original(
+def test_gateway_reading_note_uses_unified_prompt_line(
     monkeypatch, test_config, bucket_mgr
 ):
     cfg = _gateway_config(test_config)
@@ -606,13 +606,16 @@ def test_gateway_reading_note_silent_tone_does_not_inline_original(
         context_mode="task",
     ))
 
-    assert "reading_note: Tone background only" in block
+    assert (
+        "reading_note: Use only if directly helpful; ignore if irrelevant or conflicting. "
+        "Do not mechanically repeat or mention retrieval."
+    ) in block
     assert "mention_policy=" not in block
-    assert "不要明说的关系旧事" not in block
-    assert moment["_reading_note"]["use"] == "silent_tone"
+    assert "不要明说的关系旧事" in block
+    assert moment["_reading_note"]["use"] == "standard"
 
 
-def test_gateway_reading_note_direct_evidence_can_be_explicit(
+def test_gateway_reading_note_direct_evidence_uses_same_prompt_line(
     monkeypatch, test_config, bucket_mgr
 ):
     cfg = _gateway_config(test_config)
@@ -642,6 +645,7 @@ def test_gateway_reading_note_direct_evidence_can_be_explicit(
     assert "reading_note: Use only if directly helpful" in block
     assert "mention_policy=" not in block
     assert "recall_policy.py 实体前置修复" in block
+    assert moment["_reading_note"]["use"] == "standard"
     assert moment["_reading_note"]["canonical_domain"] == "project"
 
 
@@ -1365,7 +1369,7 @@ def test_gateway_memory_sentinel_tone_only_skips_dynamic_and_recent_context(
     assert debug["query_planner_debug"]["skip_reason"] == "memory_sentinel_tone_only"
 
 
-def test_gateway_memory_sentinel_searchable_residue_bypasses_rule_route(
+def test_gateway_memory_sentinel_proper_residue_bypasses_rule_route(
     monkeypatch, test_config, bucket_mgr
 ):
     bucket_id = _create_bucket(
@@ -1392,7 +1396,7 @@ def test_gateway_memory_sentinel_searchable_residue_bypasses_rule_route(
 
     payload, recalled_ids, debug = _run(
         service.prepare_payload(
-            {"messages": [{"role": "user", "content": "想和哥哥一起听歌"}]},
+            {"messages": [{"role": "user", "content": "想和哥哥一起看 eryu"}]},
             "sess-sentinel-residue",
             include_debug=True,
         )
@@ -1402,7 +1406,7 @@ def test_gateway_memory_sentinel_searchable_residue_bypasses_rule_route(
     assert "一起听歌方案" in _joined_message_content(payload["messages"])
     assert debug["memory_sentinel_debug"]["called"] is False
     assert debug["memory_sentinel_debug"]["hard_bypass_reason"] == "searchable_residue"
-    assert "听歌" in debug["memory_sentinel_debug"]["searchable_residue_terms"]
+    assert "eryu" in debug["memory_sentinel_debug"]["searchable_residue_terms"]
 
 
 def test_gateway_generic_status_query_has_no_locatable_residue(
@@ -1445,6 +1449,92 @@ def test_gateway_generic_status_query_has_no_locatable_residue(
     assert "第一行代码的浪漫" not in injected
     assert debug["prepare_timing_debug"]["low_signal_auto_recall"] is True
     assert debug["query_planner_debug"]["skip_reason"] == "low_signal_auto_recall"
+    assert debug["query_planner_debug"]["recall_query_plan"]["locatable_terms"] == []
+
+
+def test_gateway_deictic_read_action_does_not_use_sentence_fragments_as_locatable_terms(
+    monkeypatch, test_config, bucket_mgr
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨投了超多岗位没有回复，说想去当超市收银员。",
+        name="小雨求职困境",
+        hours_ago=5,
+        domain=["项目"],
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            core_memory_budget=0,
+            recent_context_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            query_planner_enabled=False,
+        ),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+    query = "现在去！那你要不要捞出来看一遍，不看也行，那条有点长"
+
+    assert service._memory_sentinel_searchable_residue_terms(query) == []
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": query}]},
+            "sess-deictic-read-action",
+            include_debug=True,
+        )
+    )
+
+    injected = _joined_message_content(payload["messages"])
+    assert recalled_ids == []
+    assert "Recalled Memory" not in injected
+    assert "小雨求职困境" not in injected
+    assert debug["prepare_timing_debug"]["low_signal_auto_recall"] is True
+    assert debug["query_planner_debug"]["recall_query_plan"]["locatable_terms"] == []
+
+
+def test_gateway_current_time_status_reaction_does_not_recall_old_alarm_memory(
+    monkeypatch, test_config, bucket_mgr
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨论文打印问题明天七点半闹钟，最后去打印店处理。",
+        name="论文打印问题明天七点半闹钟",
+        hours_ago=12,
+        tags=["论文打印", "闹钟"],
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            core_memory_budget=0,
+            recent_context_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            query_planner_enabled=False,
+        ),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+    query = "啊啊啊啊啊一点了！！"
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": query}]},
+            "sess-current-time-status",
+            include_debug=True,
+        )
+    )
+
+    injected = _joined_message_content(payload["messages"])
+    assert recalled_ids == []
+    assert "Recalled Memory" not in injected
+    assert "论文打印问题明天七点半闹钟" not in injected
+    assert debug["prepare_timing_debug"]["low_signal_auto_recall"] is True
     assert debug["query_planner_debug"]["recall_query_plan"]["locatable_terms"] == []
 
 
@@ -5617,8 +5707,11 @@ def test_gateway_hook_recall_returns_cards_without_upstream(
     assert card["source"] == "ombre"
     assert card["source_kind"] == "direct"
     assert 0.0 <= card["score"] <= 1.0
-    assert card["use_mode"] in {"explicit", "light_touch"}
-    assert card["confidence"] in {"high", "medium", "low"}
+    assert "use_mode" not in card
+    assert "confidence" not in card
+    assert "reading_note" not in card
+    assert "why_read" not in card
+    assert "how_to_apply" not in card
     assert "蓝色偏好" in card["text"]
     assert "[Ombre Gateway Hook Recall]" in payload["additional_context"]
     assert "[memory_card id=ombre:" in payload["additional_context"]
@@ -5860,8 +5953,8 @@ def test_gateway_hook_recall_skips_empty_cards(monkeypatch, test_config, bucket_
     additional_context = service._render_hook_recall_additional_context(cards)
     assert "[memory_card id=ombre:filled#m1 source=direct]" in additional_context
     assert (
-        "how_to_apply: possible related memory; use only if it helps answer the current message, "
-        "ignore if irrelevant/conflicting."
+        "how_to_apply: Use only if directly helpful; ignore if irrelevant or conflicting. "
+        "Do not mechanically repeat or mention retrieval."
     ) in additional_context
     assert additional_context.count("how_to_apply:") == 1
     assert "[reading_note" not in additional_context
@@ -5916,7 +6009,8 @@ def test_gateway_hook_recall_uses_debug_text_for_reading_note_only_card(
 
     assert len(cards) == 1
     assert cards[0]["bucket_id"] == "name"
-    assert cards[0]["use_mode"] == "light_touch"
+    assert "use_mode" not in cards[0]
+    assert "reading_note" not in cards[0]
     assert "归澜" in cards[0]["text"]
     additional_context = service._render_hook_recall_additional_context(cards)
     assert "Tone or familiarity only" not in additional_context
@@ -6153,7 +6247,8 @@ def test_gateway_weak_direct_hit_renders_bucket_brief_without_original_detail(
 
     assert "bucket_brief" in block
     assert "brief: 弱语义桶: 可用于 brief 的开头。" in block
-    assert "matched_hint: 弱语义命中的那一小段提示" in block
+    assert "matched_hint:" not in block
+    assert "弱语义命中的那一小段提示" not in block
     assert "bucket_original" not in block
     assert "bucket_window" not in block
     assert "bucket_capsule" not in block
@@ -6173,6 +6268,9 @@ def test_gateway_word_map_hint_is_not_direct_reading_evidence(
     assert not service._reading_note_has_direct_evidence({"word_map_hint": True})
     assert service._reading_note_has_direct_evidence(
         {"word_map_hint": True, "rare_name_match": True}
+    )
+    assert service._reading_note_has_direct_evidence(
+        {"word_map_hint": True, "low_frequency_match": True}
     )
 
 
@@ -6200,6 +6298,10 @@ def test_gateway_weak_topic_evidence_does_not_count_as_diffusion_seed(
     assert service._moment_has_reliable_diffusion_seed_signal(
         "ESP32 触摸模块",
         {**weak, "rare_name_match": True},
+    )
+    assert service._moment_has_reliable_diffusion_seed_signal(
+        "ESP32 触摸模块",
+        {**weak, "low_frequency_match": True},
     )
     assert service._moment_has_reliable_diffusion_seed_signal(
         "ESP32 触摸模块",
@@ -10965,7 +11067,7 @@ def test_word_map_hint_boosts_moment_search_without_visible_hint_only_recall(
     assert neighbor_id not in [bucket.get("id") for bucket in suppressed_buckets]
 
 
-def test_word_map_hint_skips_probe_queries(
+def test_word_map_hint_uses_low_frequency_terms_without_probe_blocklist(
     monkeypatch, test_config, bucket_mgr
 ):
     from word_map import WordMapStore
@@ -10991,7 +11093,7 @@ def test_word_map_hint_skips_probe_queries(
         "private_terms": [],
         "stopword_prefixes": [],
     }
-    _create_bucket(
+    direct_id = _create_bucket(
         bucket_mgr,
         content="### moment\n夏天很热，所以小雨开了空调。",
         name="夏天空调",
@@ -11011,12 +11113,15 @@ def test_word_map_hint_skips_probe_queries(
     _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
     service.word_map_store = word_map_store
 
-    assert service._get_word_map_hint_scores("试一下空调😽", all_buckets) == ({}, {})
-    scores, _debug = service._get_word_map_hint_scores("空调", all_buckets)
+    scores, debug = service._get_word_map_hint_scores("试一下空调😽", all_buckets)
+    assert direct_id in scores
     assert neighbor_id in scores
+    assert debug[direct_id]["direct_terms"] == ["空调"]
+    assert debug[direct_id]["low_frequency_terms"] == ["空调"]
+    assert debug[neighbor_id]["low_frequency_terms"] == []
 
 
-def test_word_map_hint_requires_locatable_query_terms(
+def test_word_map_hint_uses_activity_low_frequency_terms_but_skips_vague_queries(
     monkeypatch, test_config, bucket_mgr
 ):
     from word_map import WordMapStore
@@ -11040,6 +11145,14 @@ def test_word_map_hint_requires_locatable_query_terms(
         "private_terms": [],
         "stopword_prefixes": [],
     }
+    direct_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨想和 Haven 一起听歌，找到了开源项目 eryu，可以一起看歌词。",
+        name="一起听歌方案",
+        hours_ago=12,
+        tags=["听歌", "开源项目"],
+        domain=["project_code"],
+    )
     _create_bucket(
         bucket_mgr,
         content="### moment\n小雨和 Haven 第一次一起写代码时觉得很浪漫。",
@@ -11052,8 +11165,31 @@ def test_word_map_hint_requires_locatable_query_terms(
     word_map_store.rebuild(all_buckets)
     _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
     service.word_map_store = word_map_store
+    monkeypatch.setattr(service, "_get_keyword_candidates", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(service, "_get_exact_anchor_candidates", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(service, "_planner_lexical_match_terms", lambda _terms: [])
 
+    scores, debug = service._get_word_map_hint_scores("想和哥哥一起听歌", all_buckets)
+    assert direct_id in scores
+    assert debug[direct_id]["direct_terms"] == ["听歌"]
+    assert debug[direct_id]["low_frequency_terms"] == ["听歌"]
     assert service._get_word_map_hint_scores("今天代码改得怎么样", all_buckets) == ({}, {})
+
+    selected, _suppressed, planner_debug = _run(
+        service._select_dynamic_buckets(
+            "想和哥哥一起听歌",
+            "sess-word-map-listening",
+            all_buckets,
+            include_query_planner_debug=True,
+        )
+    )
+
+    assert [bucket["id"] for bucket in selected] == [direct_id]
+    signal = selected[0]["_recall_signal"]
+    assert signal["word_map_hint"] is True
+    assert signal["low_frequency_match"] is True
+    assert signal["low_frequency_terms"] == ["听歌"]
+    assert planner_debug["word_map_hints"]["low_frequency_bucket_ids"] == [direct_id]
 
 
 def test_word_map_rare_name_match_can_admit_exact_title_when_other_paths_miss(
@@ -11192,7 +11328,7 @@ def test_word_map_rare_name_match_covers_title_regression_set(
         assert expected_ids[title] in planner_debug["word_map_hints"]["rare_name_bucket_ids"]
 
 
-def test_word_map_keyword_direct_match_stays_weak_without_rare_name(
+def test_word_map_low_frequency_keyword_direct_match_can_admit_without_rare_name(
     monkeypatch, test_config, bucket_mgr
 ):
     from word_map import WordMapStore
@@ -11242,12 +11378,18 @@ def test_word_map_keyword_direct_match_stays_weak_without_rare_name(
         )
     )
 
-    assert selected == []
-    keyword_item = next(item for item in suppressed if item["bucket"]["id"] == keyword_id)
-    assert keyword_item["word_map_hint"] is True
-    assert keyword_item["word_map_terms"] == ["低频项目"]
-    assert keyword_item["rare_name_match"] is False
+    assert suppressed == []
+    assert [bucket["id"] for bucket in selected] == [keyword_id]
+    signal = selected[0]["_recall_signal"]
+    assert signal["word_map_hint"] is True
+    assert signal["word_map_terms"] == ["低频项目"]
+    assert signal["rare_name_match"] is False
+    assert signal["low_frequency_match"] is True
+    assert signal["low_frequency_terms"] == ["低频项目"]
+    assert signal["low_frequency_sources"] == ["keyword"]
     assert planner_debug["word_map_hints"]["rare_name_bucket_ids"] == []
+    assert planner_debug["word_map_hints"]["low_frequency_bucket_ids"] == [keyword_id]
+    assert planner_debug["word_map_hints"]["low_frequency_terms"] == ["低频项目"]
 
 
 def test_activated_axis_rejects_bucket_matching_only_secondary_term(

@@ -685,6 +685,8 @@ LOCATABLE_GENERIC_TERMS = frozenset(
         "又",
     }
 )
+EVENT_PLACE_LOCATABLE_TERMS = frozenset({"水边", "海边", "岸边"})
+EVENT_PLACE_QUERY_MARKERS = frozenset({"那次", "这次", "那天", "当天", "当时", "那回", "这一回", "那件事", "这件事"})
 LOCATABLE_STRIP_TERMS = frozenset(
     {
         *AUTO_VAGUE_FILLER_TERMS,
@@ -810,6 +812,7 @@ DETAIL_READ_QUERY_MARKERS = frozenset(
         "原文",
         "细节",
         "原话",
+        "说过的话",
         "怎么说的",
         "怎么说",
     }
@@ -1394,7 +1397,7 @@ class RecallPolicy:
     @staticmethod
     def _query_has_multi_axis_marker(query: str) -> bool:
         text = str(query or "")
-        return any(marker in text for marker in (" 和 ", " 与 ", " 以及 ", " 还有 ", "、", "，", ",", "/", "|"))
+        return any(marker in text for marker in (" 和 ", " 与 ", " 以及 ", " 还有 ", "和", "与", "以及", "还有", "、", "，", ",", "/", "|"))
 
     def _relation_axis_groups(
         self,
@@ -1547,6 +1550,8 @@ class RecallPolicy:
             return True
         if self._is_short_casual_only_query(text):
             return True
+        if self._is_current_time_status_only_query(text):
+            return True
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
         if self._is_affection_only_query(text):
@@ -1671,6 +1676,51 @@ class RecallPolicy:
         )
         return len(stripped) < 2
 
+    def _is_current_time_status_only_query(self, query: str) -> bool:
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").strip().lower())
+        if not compact:
+            return False
+        text = re.sub(r"^(?:啊|哈|呜|嗯|哇|呀|诶|欸|救命|天哪|妈呀)+", "", compact)
+        text = re.sub(r"(?:啊|哈|呜|嗯|哇|呀|诶|欸)+$", "", text)
+        prefix_terms = (
+            "怎么就",
+            "已经快",
+            "都快",
+            "现在",
+            "已经",
+            "居然",
+            "竟然",
+            "怎么",
+            "这就",
+            "都",
+            "才",
+            "刚",
+            "快",
+        )
+        changed = True
+        while changed and text:
+            changed = False
+            for prefix in prefix_terms:
+                if text.startswith(prefix) and len(text) > len(prefix):
+                    text = text[len(prefix):]
+                    changed = True
+                    break
+        suffix_terms = ("了啦啊呀嘛吗吧呢")
+        text = text.strip(suffix_terms)
+        if not text:
+            return False
+        if re.fullmatch(r"几点", text):
+            return True
+        time_prefix = r"(?:凌晨|早上|上午|中午|下午|晚上|夜里)?"
+        time_value = r"(?:[0-2]?\d|[零〇一二两三四五六七八九十]{1,3})"
+        if re.fullmatch(time_prefix + time_value + r"点(?:半|多|钟)?", text):
+            return True
+        if re.fullmatch(r"(?:好|太|很|这么|已经)?晚", text):
+            return True
+        if re.fullmatch(r"(?:天亮|该睡觉|该睡|睡觉时间到|睡觉时间)", text):
+            return True
+        return False
+
     def _is_reaction_only_query(self, query: str) -> bool:
         compact = re.sub(r"\s+", "", str(query or "").lower())
         if not compact:
@@ -1706,6 +1756,8 @@ class RecallPolicy:
             "亲爱的",
             "哥哥",
         }
+        if re.fullmatch(r"(?:啊|哈|呜|嗯|哇|呀|诶|欸|嘿){2,}", alnum_or_cjk):
+            return True
         return alnum_or_cjk in reaction_terms or alnum_or_cjk in self.ai_reaction_names
 
     @staticmethod
@@ -2161,10 +2213,17 @@ class RecallPolicy:
             return []
         output: list[str] = []
         seen: set[str] = set()
+        content_term_keys = {
+            self._compact_entity_keyword(term)
+            for term in content_terms_for_query(raw, self.options)
+            if self._compact_entity_keyword(term)
+        }
 
-        def add(value: object) -> None:
+        def add(value: object, *, force: bool = False) -> None:
             cleaned = self._normalize_locatable_query_term(value)
-            if not cleaned or not self._locatable_query_term_allowed(cleaned):
+            if not cleaned:
+                return
+            if not force and not self._locatable_query_term_allowed(cleaned):
                 return
             key = self._compact_entity_keyword(cleaned)
             if not key or key in seen:
@@ -2186,11 +2245,21 @@ class RecallPolicy:
         ):
             add(match.group(0))
 
-        for term in self.extract_entity_keywords(raw):
+        for term in self._pos_structural_locatable_terms(raw, content_term_keys=content_term_keys):
             add(term)
+
         specific_terms = self.specific_query_terms(raw)
         compact_raw = self._compact_entity_keyword(raw)
-        for left, right in product(specific_terms, specific_terms):
+        structural_terms = list(output)
+        for structural_term in structural_terms:
+            structural_key = self._compact_entity_keyword(structural_term)
+            for term in specific_terms:
+                term_key = self._compact_entity_keyword(term)
+                if not term_key or term_key == structural_key or term_key not in structural_key:
+                    continue
+                if self._contained_structural_subterm_allowed(term):
+                    add(term)
+        for left, right in product(structural_terms, specific_terms):
             left_text = str(left or "").strip()
             right_text = str(right or "").strip()
             if not left_text or not right_text or left_text == right_text:
@@ -2200,14 +2269,161 @@ class RecallPolicy:
             combined = f"{left_text}{right_text}"
             if self._compact_entity_keyword(combined) in compact_raw:
                 add(combined)
-        for term in specific_terms:
+        if query_has_facet(raw, "embodiment", self.options):
+            add("身体")
+            add("具身")
+        for term in self._relation_axis_locatable_terms(raw, specific_terms):
             add(term)
-
-        topic = recall_topic_query(raw, self.options)
-        if topic and topic != raw:
-            add(topic)
+        for term in self._event_place_locatable_terms(raw, specific_terms):
+            add(term, force=True)
 
         return output[:8]
+
+    def _pos_structural_locatable_terms(
+        self,
+        raw: str,
+        *,
+        content_term_keys: set[str],
+    ) -> list[str]:
+        tokens = [
+            (self._normalize_entity_keyword(word), str(flag or ""))
+            for word, flag in self._posseg_words(raw)
+            if self._normalize_entity_keyword(word)
+        ]
+        output: list[str] = []
+
+        def add(value: object) -> None:
+            cleaned = self._normalize_entity_keyword(value)
+            if cleaned:
+                output.append(cleaned)
+
+        for word, flag in tokens:
+            if flag in ENTITY_KEYWORD_POS_TAGS or any(flag.startswith(prefix) for prefix in ENTITY_KEYWORD_POS_PREFIXES):
+                word = self._strip_leading_axis_conjunction(word, content_term_keys=content_term_keys)
+                add(word)
+                for expanded in self._expand_entity_title_suffixes(raw, word):
+                    add(expanded)
+                continue
+            if self._standalone_locatable_noun(word, flag, content_term_keys=content_term_keys):
+                add(word)
+
+        for index in range(len(tokens)):
+            for width in (2, 3):
+                window = tokens[index: index + width]
+                if len(window) != width:
+                    continue
+                if not all(self._compound_locatable_token_allowed(word, flag) for word, flag in window):
+                    continue
+                combined = "".join(word for word, _flag in window)
+                combined_key = self._compact_entity_keyword(combined)
+                suffix = next(
+                    (
+                        suffix
+                        for suffix in LOCATABLE_COMPOUND_SUFFIX_TERMS
+                        if combined_key.endswith(self._compact_entity_keyword(suffix))
+                    ),
+                    "",
+                )
+                if not suffix:
+                    continue
+                add(combined)
+                for word, _flag in window:
+                    add(word)
+
+        return self._dedupe_entity_keywords(output)
+
+    def _strip_leading_axis_conjunction(self, word: str, *, content_term_keys: set[str]) -> str:
+        key = self._compact_entity_keyword(word)
+        if len(key) <= 2:
+            return word
+        for prefix in ("和", "与"):
+            if key.startswith(prefix):
+                rest = key[len(prefix):]
+                if rest in content_term_keys:
+                    return rest
+        return word
+
+    def _standalone_locatable_noun(
+        self,
+        word: str,
+        flag: str,
+        *,
+        content_term_keys: set[str],
+    ) -> bool:
+        key = self._compact_entity_keyword(word)
+        if not key or key not in content_term_keys:
+            return False
+        if key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
+            return False
+        if not (flag == "eng" or flag.startswith("n") or flag in {"s"}):
+            return False
+        if re.fullmatch(r"[a-z][a-z0-9_.:/-]{2,}", key):
+            return True
+        if re.search(r"\d", key) and re.search(r"[a-z\u4e00-\u9fff]", key):
+            return True
+        if re.fullmatch(r"小[\u4e00-\u9fffA-Za-z0-9]{1,4}", key):
+            return True
+        if re.fullmatch(r"[\u4e00-\u9fff]{2,6}", key):
+            return not self._entity_candidate_has_verb_blocker(key)
+        return False
+
+    def _compound_locatable_token_allowed(self, word: str, flag: str) -> bool:
+        key = self._compact_entity_keyword(word)
+        if not key or key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
+            return False
+        if flag == "eng":
+            return True
+        if flag.startswith("n") or flag in {"s"}:
+            return True
+        return bool(re.search(r"\d", key) and re.search(r"[a-z\u4e00-\u9fff]", key))
+
+    def _relation_axis_locatable_terms(self, raw: str, specific_terms: list[str]) -> list[str]:
+        output: list[str] = []
+        if not self._query_has_axis_relation_marker(raw):
+            terms = []
+        else:
+            terms = specific_terms
+        for term in terms:
+            key = self._compact_entity_keyword(term)
+            if not key:
+                continue
+            if key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
+                continue
+            if re.fullmatch(r"[一二三四五六七八九十百千万两0-9]+年(?:后)?", key):
+                output.append(term)
+                continue
+            if key in {"承诺", "约定", "未来"}:
+                output.append(term)
+        if not output:
+            for match in re.finditer(r"[一二三四五六七八九十百千万两0-9]+年(?:后)?", str(raw or "")):
+                value = match.group(0)
+                output.append(value[:-1] if value.endswith("后") else value)
+        return output
+
+    def _event_place_locatable_terms(self, raw: str, specific_terms: list[str]) -> list[str]:
+        compact = self._compact_entity_keyword(raw)
+        if not any(self._compact_entity_keyword(marker) in compact for marker in EVENT_PLACE_QUERY_MARKERS):
+            return []
+        output: list[str] = []
+        for term in specific_terms:
+            key = self._compact_entity_keyword(term)
+            if key in EVENT_PLACE_LOCATABLE_TERMS:
+                output.append(term)
+        return output
+
+    def _contained_structural_subterm_allowed(self, value: object) -> bool:
+        key = self._compact_entity_keyword(value)
+        if not key:
+            return False
+        if key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
+            return False
+        if len(key) < 2:
+            return False
+        if re.fullmatch(r"[a-z][a-z0-9_.:/-]{2,}", key):
+            return True
+        if re.search(r"\d", key) and re.search(r"[a-z\u4e00-\u9fff]", key):
+            return True
+        return bool(re.fullmatch(r"[\u4e00-\u9fff]{2,8}", key))
 
     def _normalize_locatable_query_term(self, value: object) -> str:
         cleaned = self._normalize_entity_keyword(value)

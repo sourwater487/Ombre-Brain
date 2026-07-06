@@ -351,13 +351,26 @@ def test_locatable_terms_gate_light_chat_and_generic_status_queries():
 
     assert policy.locatable_query_terms("宝宝想你了") == []
     assert policy.plan_query("宝宝想你了").long_term_route == "skip"
+    vague_read = policy.plan_query("现在去！那你要不要捞出来看一遍，不看也行，那条有点长")
+    assert vague_read.locatable_terms == ()
+    assert vague_read.activated_axis_groups == ()
+    assert vague_read.long_term_route == "skip"
+    assert vague_read.skip_reason == "auto_vague_query"
+
+    for query in ("啊啊啊啊啊", "啊啊啊啊啊一点了！！", "一点了！！", "现在几点了", "啊啊啊好晚了"):
+        plan = policy.plan_query(query)
+        assert plan.locatable_terms == ()
+        assert plan.long_term_route == "skip"
+        assert plan.skip_reason == "auto_vague_query"
+
+    assert not policy.is_auto_query_too_vague("明天七点半闹钟")
 
     esp_terms = [term.lower() for term in policy.locatable_query_terms("ESP32触摸模块后来怎么跑通的")]
     assert "esp32" in esp_terms
     assert any("触摸" in term for term in esp_terms)
 
     assert "小机数据库" in policy.locatable_query_terms("小机数据库是什么来着")
-    assert "海边神庙" in policy.locatable_query_terms("宝宝你还记得海边神庙吗")
+    assert "神庙" in policy.locatable_query_terms("宝宝你还记得海边神庙吗")
     assert "种子项目" in policy.locatable_query_terms("亲亲，种子项目现在怎样")
     assert policy.locatable_query_terms("小橘昨晚又怎么折腾了") == ["小橘"]
     assert policy.plan_query("水边").activated_axis_groups == ()

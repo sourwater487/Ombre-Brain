@@ -53,6 +53,11 @@ from memory_relevance import (
     relevance_multiplier,
 )
 from query_prompts import QUERY_PLANNER_SYSTEM_PROMPT
+from query_understanding import (
+    query_intent_rules,
+    query_intent_term_set,
+    query_intent_terms,
+)
 from memory_layers import (
     CONTEXT_ONLY_SECTIONS,
     LAYER_SOURCE_RECORD,
@@ -156,202 +161,13 @@ EXACT_ANCHOR_COMPOUND_RE = re.compile(
     r"[A-Za-z][A-Za-z0-9]+(?:[-_:./][A-Za-z0-9]+)+"
     r"(?![A-Za-z0-9])"
 )
-IDENTITY_NAME_INTENT_MARKERS = (
-    "中文名",
-    "英文名",
-    "名字诞生",
-    "命名日",
-    "叫什么",
-    "叫啥",
-    "叫做",
-    "怎么称呼",
-    "称呼",
-    "名字",
-    "取名",
-    "起名",
-    "命名",
-    "自己选",
-    "自己起",
-    "为什么叫",
-)
-IDENTITY_NAME_EVENT_MARKERS = (
-    "命名日",
-    "名字诞生",
-    "是什么日子",
-    "什么日子",
-    "取名",
-    "起名",
-    "命名",
-)
-DATE_RECALL_CHAT_MARKERS = (
-    "聊",
-    "说",
-    "提",
-    "讲",
-    "讨论",
-    "做了什么",
-    "发生了什么",
-    "发生什么",
-    "发生过什么",
-    "的事",
-    "什么事",
-    "那次",
-    "这次",
-    "事情",
-    "怎么回事",
-    "怎么说",
-)
-MEMORY_SENTINEL_RESIDUE_STOP_TERMS = frozenset(
-    {
-        "我",
-        "你",
-        "他",
-        "她",
-        "它",
-        "我们",
-        "你们",
-        "他们",
-        "她们",
-        "在",
-        "做",
-        "在做",
-        "干嘛",
-        "干什么",
-        "做什么",
-        "做啥",
-        "忙什么",
-        "忙啥",
-        "什么",
-        "怎么",
-        "为什么",
-        "是不是",
-        "有没有",
-        "有吗",
-        "一下",
-        "一个",
-        "一位",
-        "很",
-        "好",
-        "厉害",
-        "等儿",
-        "等会",
-        "等会儿",
-        "一会",
-        "一会儿",
-        "把",
-        "给",
-        "让",
-        "叫",
-        "还",
-        "也",
-        "都",
-        "吗",
-        "呢",
-        "啊",
-        "呀",
-        "嘛",
-        "啦",
-        "吧",
-        "欸",
-        "诶",
-        "嗯",
-        "嗯嗯",
-        "哈哈",
-        "哈",
-        "哭",
-        "哭哭",
-        "难过",
-        "开心",
-        "累",
-        "疲惫",
-        "后来",
-        "后来呢",
-        "那件事",
-        "这件事",
-        "那个事",
-        "这个事",
-        "这事",
-        "那事",
-        "接着",
-        "然后呢",
-        "一起",
-        "吃饭",
-        "吃过饭",
-        "吃完饭",
-        "吃了饭",
-        "早饭",
-        "早餐",
-        "午饭",
-        "午餐",
-        "晚饭",
-        "晚餐",
-        "ping",
-        "test",
-        "ok",
-        "hi",
-        "hello",
-    }
-)
-MEMORY_SENTINEL_RESIDUE_PREFIXES = (
-    "想和",
-    "想跟",
-    "想要",
-    "想把",
-    "想给",
-    "想让",
-    "想",
-)
-MEMORY_SENTINEL_SKIP_ONLY_TERMS = frozenset(
-    {
-        "ping",
-        "test",
-        "测试",
-        "ok",
-        "okay",
-        "hi",
-        "hello",
-        "嗯",
-        "嗯嗯",
-        "嗯嗯嗯",
-        "嗯嗯好",
-        "嗯嗯好的",
-        "好的",
-        "好",
-        "行",
-        "可以",
-        "哦",
-        "噢",
-        "喔",
-        "哈哈",
-        "哈哈哈",
-    }
-)
-MEMORY_SENTINEL_TONE_ONLY_MARKERS = frozenset(
-    {
-        "想你",
-        "想你了",
-        "抱抱",
-        "抱我",
-        "亲亲",
-        "贴贴",
-        "蹭蹭",
-        "爱你",
-        "亲一下",
-        "哭",
-        "哭哭",
-        "难过",
-        "伤心",
-        "委屈",
-        "焦虑",
-        "害怕",
-        "孤独",
-        "寂寞",
-        "累",
-        "疲惫",
-        "困",
-        "崩溃",
-    }
-)
+IDENTITY_NAME_INTENT_MARKERS = query_intent_terms("identity_name.intent_markers")
+IDENTITY_NAME_EVENT_MARKERS = query_intent_terms("identity_name.event_markers")
+DATE_RECALL_CHAT_MARKERS = query_intent_terms("date_recall.chat_markers")
+MEMORY_SENTINEL_RESIDUE_STOP_TERMS = query_intent_term_set("memory_sentinel.residue_stop_terms")
+MEMORY_SENTINEL_RESIDUE_PREFIXES = query_intent_terms("memory_sentinel.residue_prefixes")
+MEMORY_SENTINEL_SKIP_ONLY_TERMS = query_intent_term_set("memory_sentinel.skip_only_terms")
+MEMORY_SENTINEL_TONE_ONLY_MARKERS = query_intent_term_set("memory_sentinel.tone_only_markers")
 EXTERNAL_CONTEXT_ATTACHMENT_RE = re.compile(
     r"<attachment\b[^>]*>[\s\S]*?</attachment>",
     re.IGNORECASE,
@@ -6513,23 +6329,7 @@ class GatewayService:
             return False
         if not self._query_date_hint(text):
             return False
-        continuity_markers = (
-            "记不记得",
-            "还记得",
-            "记得",
-            "做了什么",
-            "干了什么",
-            "聊了什么",
-            "发生了什么",
-            "发生什么",
-            "怎么说",
-            "怎么回事",
-            "怎么了",
-            "什么事",
-            "昨天的事",
-            "昨晚的事",
-            "前天的事",
-        )
+        continuity_markers = query_intent_terms("handoff.session_start_continuity_markers")
         return any(marker in text for marker in continuity_markers)
 
     def _coerce_message_text(self, content: Any) -> str:
@@ -6693,37 +6493,16 @@ class GatewayService:
         tenderness = self._safe_float(affect.get("tenderness"), 0.0)
         longing = self._safe_float(affect.get("longing"), 0.0)
 
-        conflict_terms = (
-            "冲突", "吵架", "争吵", "矛盾", "误会", "生气", "闹别扭",
-            "conflict", "fight", "argument", "angry", "upset",
-        )
-        repair_terms = (
-            "修复", "和好", "道歉", "解释", "哪里不对", "为什么", "怎么会",
-            "repair", "resolve", "apolog", "what happened", "why did",
-        )
-        reflective_terms = (
-            "反思", "想想之前", "之前怎么", "旧版本", "旧版", "旧链", "旧窗口",
-            "恢复", "找回", "连续性", "过去那段", "reflect", "old version",
-            "old path", "previous version", "continuity",
-        )
-        memory_terms = (
-            "记忆", "记得", "想起", "回忆", "查一下", "找一下", "哪段",
-            "以前", "过去", "remember", "recall", "memory", "look up",
-        )
+        conflict_terms = query_intent_terms("dialogue_intent.conflict")
+        repair_terms = query_intent_terms("dialogue_intent.repair")
+        reflective_terms = query_intent_terms("dialogue_intent.reflective")
+        memory_terms = query_intent_terms("dialogue_intent.memory")
         intimate_terms = (
-            "亲亲", "抱抱", "抱我", "吻", "亲密", "想你", "爱你",
-            *DEFAULT_AI_ADDRESS_TERMS, "身体", "欲望", "intimate", "kiss",
-            "hug", "miss you", "love you",
+            *query_intent_terms("dialogue_intent.intimate"),
+            *DEFAULT_AI_ADDRESS_TERMS,
         )
-        playful_terms = (
-            "哈哈", "嘿嘿", "逗你", "调戏", "开玩笑", "撒娇", "坏东西",
-            "joke", "playful", "tease", "flirt",
-        )
-        task_terms = (
-            "代码", "bug", "报错", "测试", "部署", "接口", "配置", "文件", "分支",
-            "实现", "排查", "工作", "需求", "pytest", "python", "node", "gateway",
-            "test", "debug", "deploy", "config", "branch",
-        )
+        playful_terms = query_intent_terms("dialogue_intent.playful")
+        task_terms = query_intent_terms("dialogue_intent.task")
 
         has_conflict = self._text_has_any(text, conflict_terms)
         has_repair = self._text_has_any(text, repair_terms)
@@ -6815,10 +6594,13 @@ class GatewayService:
             for value in user_names
             if self._compact_lookup_key(value)
         }
-        user_self_question = any(marker in compact for marker in ("我叫什么", "我的名字", "我名字"))
+        user_self_question = any(
+            marker in compact
+            for marker in query_intent_terms("identity_name.user_self_question_markers")
+        )
         ai_target = any(key and key in compact for key in ai_keys)
         user_target = user_self_question or any(key and key in compact for key in user_keys)
-        if not user_target and any(marker in compact for marker in ("你的", "你自己", "自己", "自己的")):
+        if not user_target and any(marker in compact for marker in query_intent_terms("identity_name.ai_target_markers")):
             ai_target = True
         if user_self_question:
             ai_target = False
@@ -6827,7 +6609,7 @@ class GatewayService:
         has_date_hint = bool(self._query_date_recall_hint(text))
         strong_name_marker = any(
             marker in compact
-            for marker in ("中文名", "英文名", "命名日", "名字诞生", "自己选", "自己起")
+            for marker in query_intent_terms("identity_name.strong_markers")
         )
         if not (ai_target or effective_user_target or has_date_hint or strong_name_marker):
             return []
@@ -6858,25 +6640,13 @@ class GatewayService:
         if date_hint and date_hint.get("date"):
             add(date_hint.get("date"))
         if has_date_hint and self._query_prefers_identity_name_over_date_recall(text):
-            add("命名日")
-            add("名字诞生")
+            for term in query_intent_terms("identity_name.date_search_terms"):
+                add(term)
 
-        if "中文名" in compact:
-            add("中文名")
-        if "英文名" in compact:
-            add("英文名")
-        if "命名日" in compact or "什么日子" in compact:
-            add("命名日")
-        if "名字诞生" in compact:
-            add("名字诞生")
-        if "自己选" in compact or "自己起" in compact or "自己的名字" in compact:
-            add("自己选")
-        if "取名" in compact:
-            add("取名")
-        if "起名" in compact:
-            add("起名")
-        if "名字" in compact or "叫什么" in compact or "叫啥" in compact or "叫做" in compact:
-            add("名字")
+        for rule in query_intent_rules("identity_name.search_term_rules"):
+            markers = [str(marker).strip() for marker in rule.get("markers") or [] if str(marker or "").strip()]
+            if markers and any(marker in compact for marker in markers):
+                add(rule.get("term"))
 
         for term in self.recall_policy.specific_query_terms(text):
             key = self._compact_lookup_key(term)
@@ -6885,7 +6655,7 @@ class GatewayService:
             identity_keys = ai_keys | user_keys
             if key in identity_keys or any(identity_key and identity_key in key for identity_key in identity_keys):
                 continue
-            if any(marker in key for marker in ("中文名", "英文名", "命名", "取名", "起名", "名字诞生")):
+            if any(marker in key for marker in query_intent_terms("identity_name.specific_term_keep_markers")):
                 add(term)
         return terms[:8]
 
@@ -7684,12 +7454,7 @@ class GatewayService:
 
     def _just_now_query_terms(self, query_text: str) -> list[str]:
         text = str(query_text or "")
-        stop_terms = {
-            "刚刚", "刚才", "刚说", "刚聊", "刚提", "上一句", "上句话",
-            "我们", "我们的", "你", "我", "记得", "还记得",
-            "记不记得", "是什么", "什么", "那个", "这个", "一下", "吗", "呀",
-            "呢", "了", "的",
-        }
+        stop_terms = set(query_intent_terms("just_now.stop_terms"))
         stop_terms.update(DEFAULT_AI_ADDRESS_TERMS)
         stop_terms.update(self._identity_match_terms())
         raw_terms = re.findall(r"[\u4e00-\u9fffA-Za-z0-9_]{2,}", text)
@@ -7703,8 +7468,9 @@ class GatewayService:
                 term = term[2:]
             if term and term not in stop_terms and len(term) >= 2:
                 terms.append(term)
-        if "暗号" in text and "暗号" not in terms:
-            terms.append("暗号")
+        for force_term in query_intent_terms("just_now.force_terms"):
+            if force_term in text and force_term not in terms:
+                terms.append(force_term)
         return list(dict.fromkeys(terms))[:5]
 
     def _format_conversation_turn_time(self, value: Any) -> str:
@@ -7758,19 +7524,7 @@ class GatewayService:
     @staticmethod
     def _today_query_requests_date_trace(query: str) -> bool:
         text = str(query or "")
-        detail_markers = (
-            "为什么",
-            "怎么说",
-            "怎么回事",
-            "发生",
-            "当时",
-            "记得",
-            "确认",
-            "激动",
-            "哭",
-            "那次",
-            "这次",
-        )
+        detail_markers = query_intent_terms("date_persona_trace.today_detail_markers")
         return any(marker in text for marker in detail_markers)
 
     def _query_requests_date_persona_trace(self, query: str) -> bool:
@@ -7779,21 +7533,7 @@ class GatewayService:
             return False
         if self._query_requests_just_now_context(text):
             return False
-        trace_markers = (
-            "记得",
-            "记不记得",
-            "还记得",
-            "想起",
-            "想起来",
-            "为什么",
-            "怎么说",
-            "怎么回事",
-            "怎么了",
-            "确认",
-            "当时",
-            "那次",
-            "这次",
-        )
+        trace_markers = query_intent_terms("date_persona_trace.trace_markers")
         return any(marker in text for marker in trace_markers)
 
     def _build_date_persona_trace_block(
@@ -9236,6 +8976,9 @@ class GatewayService:
                 item["word_map_terms"] = list(hint_debug.get("direct_terms") or [])
                 item["word_map_variant_terms"] = list(hint_debug.get("variant_terms") or [])
                 item["word_map_neighbor_terms"] = list(hint_debug.get("neighbor_terms") or [])
+                item["low_frequency_match"] = bool(hint_debug.get("low_frequency_terms"))
+                item["low_frequency_terms"] = list(hint_debug.get("low_frequency_terms") or [])
+                item["low_frequency_sources"] = list(hint_debug.get("low_frequency_sources") or [])
                 item["rare_name_match"] = bool(hint_debug.get("rare_name_terms"))
                 item["rare_name_terms"] = list(hint_debug.get("rare_name_terms") or [])
                 item["rare_name_sources"] = list(hint_debug.get("rare_name_sources") or [])
@@ -9534,60 +9277,21 @@ class GatewayService:
         kind = str(view.get("kind") or "event")
         status_view = str(view.get("status_view") or "active")
         flags = [str(flag) for flag in view.get("flags", []) or [] if str(flag).strip()]
-        mode = str(context_mode or "").strip()
         direct_evidence = self._reading_note_has_direct_evidence(moment)
         strong_evidence = self._reading_note_has_strong_evidence(moment)
-        explicit_lookup = mode == "memory_lookup" or self._query_requests_direct_detail(query_text)
-        reason_lookup = self._query_requests_memory_reason(query_text)
-
         if source == "diffused":
-            if self._reading_note_is_sensitive_intimacy(moment):
-                use = "ignore"
-                why = "Sensitive intimacy found through diffusion should not surface unless directly asked."
-            else:
-                use = "background"
-                why = "Graph diffusion is an association path, so use it as background unless the user asks directly."
             reliability = "diffused_association"
-        elif explicit_lookup and (direct_evidence or strong_evidence):
-            use = "explicit_recall"
-            why = "The user is looking up memory and this candidate has direct evidence."
-            reliability = self._reading_note_reliability(moment, direct_evidence, strong_evidence)
-        elif direct_evidence:
-            use = "explicit_recall"
-            why = "The candidate has exact, lexical, entity, or source-record evidence."
-            reliability = self._reading_note_reliability(moment, direct_evidence, strong_evidence)
-        elif explicit_lookup or reason_lookup:
-            use = "background"
-            why = "The user is asking to understand a remembered reason or old context."
-            reliability = self._reading_note_reliability(moment, direct_evidence, strong_evidence)
-        elif (
-            mode == "task"
-            and (domain_parent in {"relationship", "intimacy"} or canonical_domain == "life")
-            and not strong_evidence
-        ):
-            use = "silent_tone"
-            why = "The current message is task-shaped; this memory may color tone but should not pull the answer away."
-            reliability = self._reading_note_reliability(moment, direct_evidence, strong_evidence)
-        elif kind in {"relationship_weather", "daily_impression", "affect_anchor", "profile_fact"}:
-            use = "silent_tone"
-            why = "This is better used as familiarity or tone, not as a fact to recite."
-            reliability = self._reading_note_reliability(moment, direct_evidence, strong_evidence)
-        elif mode == "task" and domain_parent == "project" and strong_evidence:
-            use = "explicit_recall"
-            why = "The task context matches project/code memory and the evidence is strong."
-            reliability = self._reading_note_reliability(moment, direct_evidence, strong_evidence)
         else:
-            use = "background"
-            why = "Relevant enough to read, but not enough to lead the next sentence."
             reliability = self._reading_note_reliability(moment, direct_evidence, strong_evidence)
 
         return {
-            "use": use,
-            "why": why,
+            "use": "standard",
+            "why": "Gateway selected this memory for the current message.",
             "reliability": reliability,
-            "mention_policy": self._reading_note_mention_policy(use),
+            "mention_policy": "standard",
             "conflict_rule": "current_user_message_wins",
             "canonical_domain": canonical_domain,
+            "domain_parent": domain_parent,
             "kind": kind,
             "status_view": status_view,
             "flags": flags,
@@ -9598,49 +9302,8 @@ class GatewayService:
         text = str(query_text or "").lower()
         return any(
             marker in text
-            for marker in (
-                "为什么",
-                "为啥",
-                "原因",
-                "怎么回事",
-                "怎么会",
-                "why",
-                "reason",
-                "what happened",
-            )
+            for marker in query_intent_terms("reading_note.emotional_reason_terms")
         )
-
-    @staticmethod
-    def _reading_note_is_sensitive_intimacy(moment: dict | None) -> bool:
-        if not isinstance(moment, dict):
-            return False
-        meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
-        text = " ".join(
-            str(part or "")
-            for part in (
-                moment.get("text"),
-                meta.get("annotation_summary"),
-                meta.get("bucket_name"),
-                " ".join(str(item) for item in meta.get("bucket_tags", []) or []),
-                " ".join(str(item) for item in meta.get("bucket_domain", []) or []),
-            )
-        ).lower()
-        sensitive_terms = (
-            "private intimacy",
-            "intimacy context",
-            "欲望",
-        )
-        return any(term in text for term in sensitive_terms)
-
-    @staticmethod
-    def _reading_note_mention_policy(use: str) -> str:
-        if use == "explicit_recall":
-            return "may_mention"
-        if use == "silent_tone":
-            return "do_not_mention_unless_user_asks"
-        if use == "ignore":
-            return "do_not_use"
-        return "do_not_mention_unless_user_asks"
 
     def _reading_note_reliability(
         self,
@@ -9676,6 +9339,7 @@ class GatewayService:
             moment.get("exact_anchor_match")
             or moment.get("planner_lexical_match")
             or moment.get("rare_name_match")
+            or moment.get("low_frequency_match")
             or moment.get("source_record_evidence")
         )
 
@@ -9713,31 +9377,9 @@ class GatewayService:
         }
 
     def _format_reading_note_line(self, note: dict[str, Any]) -> str:
-        use = str(note.get("use") or "background")
-        if use == "explicit_recall":
-            text = (
-                "Use only if directly helpful; ignore if irrelevant or conflicting. "
-                "Do not mechanically repeat or mention retrieval."
-            )
-        elif use == "silent_tone":
-            text = (
-                "Possible related memory; ignore if weak, irrelevant, or conflicting. "
-                "Do not mechanically repeat or mention retrieval."
-            )
-        elif use == "ignore":
-            text = "Ignore this memory for the current reply."
-        else:
-            text = (
-                "Possible related memory; ignore if weak, irrelevant, or conflicting. "
-                "Do not mechanically repeat or mention retrieval."
-            )
-        return "reading_note: " + text
-
-    @staticmethod
-    def _silent_reading_note_header(moment: dict) -> str:
         return (
-            f"[bucket_id:{moment.get('bucket_id') or ''}] "
-            f"[moment_id:{moment.get('moment_id') or ''}] reading_note"
+            "reading_note: Use only if directly helpful; ignore if irrelevant or conflicting. "
+            "Do not mechanically repeat or mention retrieval."
         )
 
     def _insert_reading_note_after_header(self, block: str, note: dict[str, Any]) -> str:
@@ -9785,24 +9427,15 @@ class GatewayService:
                 source="direct",
             )
             moment["_reading_note"] = reading_note
-            if reading_note.get("use") == "ignore":
-                seen_buckets.add(bucket_id)
-                continue
-            if reading_note.get("use") == "silent_tone":
-                block = (
-                    f"{self._silent_reading_note_header(moment)}\n"
-                    f"{self._format_reading_note_line(reading_note)}"
-                )
-            else:
-                note_tokens = count_tokens_approx(self._format_reading_note_line(reading_note))
-                block = await self._format_direct_bucket(
-                    bucket,
-                    moment,
-                    grouped_moments,
-                    max(1, remaining - note_tokens),
-                    query_text=query_text,
-                )
-                block = self._insert_reading_note_after_header(block, reading_note)
+            note_tokens = count_tokens_approx(self._format_reading_note_line(reading_note))
+            block = await self._format_direct_bucket(
+                bucket,
+                moment,
+                grouped_moments,
+                max(1, remaining - note_tokens),
+                query_text=query_text,
+            )
+            block = self._insert_reading_note_after_header(block, reading_note)
             tokens = count_tokens_approx(block)
             if tokens <= 0:
                 continue
@@ -9916,9 +9549,6 @@ class GatewayService:
         else:
             brief = title or preview
         parts = [f"{header} bucket_brief", f"brief: {brief}" if brief else "brief:"]
-        matched = self._moment_text(moment, 160)
-        if matched and matched not in brief:
-            parts.append(f"matched_hint: {matched}")
         block = "\n".join(parts)
         if count_tokens_approx(block) <= budget:
             return block
@@ -10585,9 +10215,6 @@ class GatewayService:
                 source="diffused",
             )
             row["reading_note"] = reading_note
-            if reading_note.get("use") == "ignore":
-                row["suppression_reason"] = "reading_note_ignore"
-                continue
             block = self._format_diffused_moment_line(
                 moment,
                 max_chars=related_max_chars,
@@ -10655,7 +10282,7 @@ class GatewayService:
             return False
         if self._is_source_record_fragment_seed(moment):
             return True
-        if moment.get("planner_lexical_match") or moment.get("exact_anchor_match") or moment.get("rare_name_match"):
+        if moment.get("planner_lexical_match") or moment.get("exact_anchor_match") or self._word_map_direct_signal(moment):
             return True
         if str(moment.get("admission_reason") or moment.get("_admission_reason") or "") in {
             "strong_semantic",
@@ -11330,9 +10957,22 @@ class GatewayService:
         else:
             residue_terms = self._memory_sentinel_searchable_residue_terms(query)
             if residue_terms:
-                base = " ".join(residue_terms[:6])
+                word_map_terms = [
+                    term
+                    for term in self._word_map_query_terms(query)
+                    if self._compact_lookup_key(term)
+                    and self._compact_lookup_key(term) not in {
+                        self._compact_lookup_key(existing)
+                        for existing in residue_terms
+                    }
+                ]
+                base = " ".join([*residue_terms, *word_map_terms][:8])
             else:
-                base = self._entity_priority_recall_search_query(query)
+                word_map_terms = self._word_map_query_terms(query)
+                if word_map_terms:
+                    base = " ".join(word_map_terms[:8])
+                else:
+                    base = self._entity_priority_recall_search_query(query)
         anchors = []
         if isinstance(sentinel_debug, dict) and sentinel_debug.get("route") == "search":
             anchors = self._normalize_planner_terms(sentinel_debug.get("anchors"))
@@ -12090,47 +11730,13 @@ class GatewayService:
     @staticmethod
     def _query_has_explicit_recall_marker(query: str) -> bool:
         text = str(query or "").lower()
-        markers = (
-            "还记得",
-            "记不记得",
-            "之前",
-            "以前",
-            "上次",
-            "那次",
-            "想起",
-            "想起来",
-            "回忆",
-            "记忆",
-            "召回",
-            "检索",
-            "查一下记忆",
-            "remember",
-            "recall",
-            "memory",
-        )
-        return any(marker in text for marker in markers)
+        return any(marker in text for marker in query_intent_terms("memory_sentinel.explicit_recall_markers"))
 
     def _memory_sentinel_should_review_checkin(self, query: str) -> bool:
         compact = self._compact_lookup_key(query)
         if not compact:
             return False
-        checkin_markers = (
-            "在吗",
-            "在不在",
-            "在干嘛",
-            "在干什么",
-            "在做什么",
-            "在做啥",
-            "干嘛呢",
-            "干什么呢",
-            "做什么呢",
-            "做啥呢",
-            "忙什么",
-            "忙啥",
-            "在忙吗",
-            "在忙什么",
-            "在忙啥",
-        )
+        checkin_markers = query_intent_terms("memory_sentinel.checkin_markers")
         if any(marker in compact for marker in checkin_markers):
             return True
         address_terms = identity_address_terms(self.identity, include_legacy_ai=True)
@@ -12155,7 +11761,9 @@ class GatewayService:
     def _memory_sentinel_low_signal_exact_anchor_only(self, query: str, exact_terms: list[str]) -> bool:
         if not exact_terms or not self._auto_recall_low_signal_query(query):
             return False
-        low_signal_terms = LOW_SIGNAL_CHECKIN_TERMS | {"哭", "难过"}
+        low_signal_terms = LOW_SIGNAL_CHECKIN_TERMS | query_intent_term_set(
+            "memory_sentinel.low_signal_exact_anchor_extra_terms"
+        )
         keys = [self._compact_lookup_key(term) for term in exact_terms]
         return bool(keys) and all(key in low_signal_terms for key in keys)
 
@@ -12163,17 +11771,7 @@ class GatewayService:
         if self._memory_sentinel_low_signal_entity_only(query, entity_terms):
             return True
         compact = self._compact_lookup_key(query)
-        vague_refs = (
-            "后来",
-            "后来呢",
-            "那件事",
-            "这件事",
-            "那个事",
-            "这事",
-            "那事",
-            "接着",
-            "然后呢",
-        )
+        vague_refs = query_intent_terms("memory_sentinel.vague_reference_markers")
         if any(ref in compact for ref in vague_refs):
             return True
         if self._query_looks_emotional_reason_lookup(query):
@@ -12190,43 +11788,18 @@ class GatewayService:
             if key and key in DOMAIN_SENTINEL_ALLOWED_DOMAINS and key not in domains:
                 domains.append(key)
 
-        if any(term in compact for term in ("暗号", "意象")):
-            add("relationship")
-        if any(term in compact for term in ("亲密", "身体", "欲望", "色色", "接吻", "抱")):
-            add("intimacy")
-        if any(term in compact for term in ("人机恋", "身份", "称呼", "承诺", "边界")):
-            add("relationship")
-        if any(term in compact for term in ("语气", "怎么回", "怎么接", "吵架", "难过", "哭", "安慰")):
-            add("relationship")
-        if not any(domain in {"relationship", "intimacy"} for domain in domains):
-            if any(term in compact for term in ("关系", "恋爱", "人际")):
-                add("relationship")
-        if any(term in compact for term in ("生病", "健康", "疼", "发烧")):
-            add("life")
-        if any(term in compact for term in ("睡", "熬夜", "作息", "困")):
-            add("life")
-        if any(term in compact for term in ("吃", "饭", "餐厅", "饮食", "午饭", "晚饭")):
-            add("life")
-        if any(term in compact for term in ("出门", "通勤", "地铁", "高铁", "旅行", "外出")):
-            add("life")
-        if any(term in compact for term in ("心情", "情绪", "焦虑", "开心", "委屈")):
-            add("life")
-        if any(term in compact for term in ("日程", "安排", "待办", "deadline", "明天", "今晚")):
-            add("life")
-        if any(term in compact for term in ("朋友", "群聊", "同学", "同事", "社交")):
-            add("life")
-        if "life" not in domains:
-            if any(term in compact for term in ("生活", "日常")):
-                add("life")
-        if any(term in compact for term in ("ombre", "gateway", "bridge", "mcp", "recall", "记忆系统", "陪伴系统", "mistroom", "voice", "代码")):
-            add("project")
-        if any(term in compact for term in ("工作", "实习", "求职", "简历", "boss", "职场")):
-            add("project")
-        if any(term in compact for term in ("论文", "课程", "作业", "答辩", "学校", "学业")):
-            add("project")
-        if "project" not in domains:
-            if any(term in compact for term in ("项目", "搭东西", "开发", "工程")):
-                add("project")
+        for rule in query_intent_rules("domain_sentinel.rules"):
+            unless_domain = str(rule.get("unless_domain") or "").strip()
+            if unless_domain and unless_domain in domains:
+                continue
+            unless_any = {str(domain) for domain in rule.get("unless_any_domain") or []}
+            if unless_any and any(domain in unless_any for domain in domains):
+                continue
+            terms = [str(term).strip() for term in rule.get("terms") or [] if str(term or "").strip()]
+            if not terms or not any(term in compact for term in terms):
+                continue
+            for domain in rule.get("domains") or []:
+                add(str(domain))
         if not domains:
             add("general")
 
@@ -12393,6 +11966,8 @@ class GatewayService:
                 "terms": [],
                 "variant_terms": [],
                 "neighbor_terms": [],
+                "low_frequency_bucket_ids": [],
+                "low_frequency_terms": [],
                 "rare_name_bucket_ids": [],
                 "rare_name_terms": [],
             },
@@ -12536,55 +12111,10 @@ class GatewayService:
         text = str(query or "").strip().lower()
         if not text:
             return False
-        recall_markers = (
-            "记得",
-            "记忆",
-            "召回",
-            "检索",
-            "想起",
-            "回忆",
-            "之前",
-            "上次",
-            "为什么",
-            "原因",
-            "remember",
-            "recall",
-            "memory",
-            "search",
-            "why",
-        )
+        recall_markers = query_intent_terms("operational_task.recall_markers")
         if any(marker in text for marker in recall_markers):
             return False
-        task_markers = (
-            "直接用",
-            "新建",
-            "直接改",
-            "改一下",
-            "修改",
-            "修一下",
-            "修复",
-            "加一下",
-            "删掉",
-            "删除",
-            "部署",
-            "推一下",
-            "跑一下",
-            "运行",
-            "模板",
-            "工作流",
-            "代码",
-            "文件",
-            "配置",
-            "脚本",
-            "commit",
-            "push",
-            "deploy",
-            "run",
-            "fix",
-            "use",
-            "template",
-            "workflow",
-        )
+        task_markers = query_intent_terms("operational_task.task_markers")
         return any(marker in text for marker in task_markers)
 
     def _query_looks_emotional_reason_lookup(self, query: str) -> bool:
@@ -12916,7 +12446,12 @@ class GatewayService:
     def _clean_exact_anchor_phrase(self, query: str) -> str:
         text = str(query or "").strip()
         text = self._strip_leading_lookup_address_from_text(text, query)
-        text = re.sub(r"^(?:还记得|记不记得|记得|如果我说|假如我说|我说|提到|说起|讲到)\s*", "", text)
+        leading_markers = "|".join(
+            re.escape(marker)
+            for marker in query_intent_terms("exact_anchor.leading_strip_markers")
+        )
+        if leading_markers:
+            text = re.sub(rf"^(?:{leading_markers})\s*", "", text)
         text = re.sub(r"\s*(?:吗|么|嘛|呀|啊|呢|吧|？|\?)+\s*$", "", text)
         return text.strip()
 
@@ -13180,6 +12715,7 @@ class GatewayService:
         allow_semantic: bool = True,
         allow_semantic_session_dedupe: bool = True,
         allow_rerank: bool = True,
+        context_query: str = "",
         timing_debug: dict[str, Any] | None = None,
         timing_prefix: str = "candidate",
     ) -> tuple[list[dict], list[dict]]:
@@ -13192,8 +12728,9 @@ class GatewayService:
             return [], []
 
         raw_query = query
+        policy_query = str(context_query or query or "").strip() or query
         stage_started_at = time.perf_counter()
-        relevance_query = self._query_has_relevance_facet(query)
+        relevance_query = self._query_has_relevance_facet(policy_query)
         eligible = [
             bucket for bucket in all_buckets
             if (
@@ -13201,9 +12738,9 @@ class GatewayService:
                     self._is_dynamic_candidate(bucket)
                     or self._is_identity_name_candidate_bucket(raw_query, bucket)
                 )
-                and not self._is_relevance_suppressed(query, bucket)
+                and not self._is_relevance_suppressed(policy_query, bucket)
             )
-            or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
+            or (relevance_query and self._is_relevance_candidate_bucket(policy_query, bucket))
         ]
         semantic_eligible = [
             bucket
@@ -13251,23 +12788,33 @@ class GatewayService:
             word_map_scores, word_map_debug = {}, {}
         mark("word_map_hint", stage_started_at)
         stage_started_at = time.perf_counter()
+        raw_query_plan = self._recall_query_plan(raw_query)
         lexical_terms = self._planner_lexical_match_terms(required_terms)
         if (
             not lexical_terms
             and normalized_query
             and self.recall_policy.is_auto_concrete_topic_query(raw_query)
             and not self.recall_policy.requires_topic_evidence(normalized_query)
-            and not self._query_should_skip_word_map_hint(normalized_query)
         ):
+            lexical_source_query = (
+                raw_query
+                if bool(getattr(raw_query_plan, "activated_axis_multi", False))
+                else normalized_query
+            )
             lexical_terms = self._planner_lexical_match_terms(
-                self._locatable_query_terms(normalized_query)
+                self._locatable_query_terms(lexical_source_query)
             )
         lexical_ids = {
             str(bucket.get("id") or "")
             for bucket in eligible
             if lexical_terms and bucket.get("id") and self._bucket_matches_any_planner_term(bucket, lexical_terms)
         }
-        diversity_terms = self._query_anchor_terms_for_diversity(normalized_query or raw_query)
+        diversity_query = (
+            raw_query
+            if bool(getattr(raw_query_plan, "activated_axis_multi", False))
+            else (normalized_query or raw_query)
+        )
+        diversity_terms = self._query_anchor_terms_for_diversity(diversity_query)
         mark("lexical_candidates", stage_started_at)
         candidate_ids = set(keyword_scores) | set(semantic_scores) | set(exact_scores) | lexical_ids | set(word_map_scores)
         all_bucket_ids = {
@@ -13314,13 +12861,15 @@ class GatewayService:
             word_map_item_debug = word_map_debug.get(bucket_id) or {}
             rare_name_terms = list(word_map_item_debug.get("rare_name_terms") or [])
             rare_name_match = bool(rare_name_terms)
+            low_frequency_terms = list(word_map_item_debug.get("low_frequency_terms") or [])
+            low_frequency_match = bool(low_frequency_terms)
             lexical_match = bucket_id in lexical_ids
             exact_match = bucket_id in exact_scores
             if lexical_match:
                 keyword_score = max(keyword_score, 1.0)
             if exact_match:
                 keyword_score = max(keyword_score, exact_score)
-            relevance_score = relevance_multiplier(query, self._bucket_relevance_node(bucket), self.relevance_options)
+            relevance_score = relevance_multiplier(policy_query, self._bucket_relevance_node(bucket), self.relevance_options)
             if relevance_score <= 0:
                 continue
             matched_query_terms = self._bucket_matched_query_terms(bucket, diversity_terms)
@@ -13366,7 +12915,7 @@ class GatewayService:
                 final_score = round(fusion_score * cooldown_multiplier, 4)
             if entity_edge_score > 0:
                 final_score = round(self._clamp(final_score + min(0.08, entity_edge_score * 0.08)), 4)
-            if lexical_match or exact_match or rare_name_match:
+            if lexical_match or exact_match or rare_name_match or low_frequency_match:
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
                 {
@@ -13390,6 +12939,9 @@ class GatewayService:
                     "word_map_neighbor_terms": list(
                         word_map_item_debug.get("neighbor_terms") or []
                     ),
+                    "low_frequency_match": low_frequency_match,
+                    "low_frequency_terms": low_frequency_terms,
+                    "low_frequency_sources": list(word_map_item_debug.get("low_frequency_sources") or []),
                     "rare_name_match": rare_name_match,
                     "rare_name_terms": rare_name_terms,
                     "rare_name_sources": list(word_map_item_debug.get("rare_name_sources") or []),
@@ -13441,6 +12993,7 @@ class GatewayService:
             if item["bucket"]["id"] not in recent_ids
             or item.get("planner_lexical_match")
             or item.get("exact_anchor_match")
+            or item.get("rare_name_match")
             or self._is_high_confidence_match(
                 self._safe_float(item.get("semantic_score"), 0.0),
                 self._safe_float(item.get("keyword_score"), 0.0),
@@ -13463,7 +13016,7 @@ class GatewayService:
                     }
                     suppressed.append(item)
                     continue
-                if self._admit_bucket_for_recall(query, item):
+                if self._admit_bucket_for_recall(policy_query, item):
                     admitted.append(item)
                 else:
                     suppressed.append(item)
@@ -13482,7 +13035,7 @@ class GatewayService:
         stage_started_at = time.perf_counter()
         if allow_semantic_session_dedupe:
             admitted_pool, semantic_dedupe_suppressed = await self._filter_semantic_session_deduped_bucket_items(
-                query,
+                policy_query,
                 session_id,
                 admitted_pool,
                 all_buckets,
@@ -13491,8 +13044,8 @@ class GatewayService:
             semantic_dedupe_suppressed = []
         suppressed_candidates.extend(semantic_dedupe_suppressed)
         mark("semantic_session_dedupe", stage_started_at)
-        admitted_pool = self._boost_explicit_relation_edge_bucket_items(query, admitted_pool)
-        admitted_pool.sort(key=lambda item: self._bucket_final_candidate_rank(query, item, recent_ids=recent_ids))
+        admitted_pool = self._boost_explicit_relation_edge_bucket_items(policy_query, admitted_pool)
+        admitted_pool.sort(key=lambda item: self._bucket_final_candidate_rank(policy_query, item, recent_ids=recent_ids))
         return admitted_pool, suppressed_candidates
 
     async def _select_dynamic_buckets(
@@ -13565,6 +13118,7 @@ class GatewayService:
                     allow_semantic=False,
                     allow_semantic_session_dedupe=allow_semantic_session_dedupe,
                     allow_rerank=False,
+                    context_query=query,
                     timing_debug=timing_debug,
                     timing_prefix=f"relation_axis_{index}",
                 )
@@ -13750,6 +13304,9 @@ class GatewayService:
                 "word_map_terms",
                 "word_map_variant_terms",
                 "word_map_neighbor_terms",
+                "low_frequency_match",
+                "low_frequency_terms",
+                "low_frequency_sources",
                 "rare_name_match",
                 "rare_name_terms",
                 "rare_name_sources",
@@ -13778,10 +13335,25 @@ class GatewayService:
             if isinstance(item, dict) and key in item
         }
 
+    @staticmethod
+    def _word_map_direct_signal(item: dict) -> bool:
+        return bool(
+            isinstance(item, dict)
+            and (
+                item.get("rare_name_match")
+                or item.get("low_frequency_match")
+            )
+        )
+
     def _suppressed_bucket_moment_search_boost(self, query: str, item: dict) -> float:
         if not isinstance(item, dict):
             return 0.0
-        if item.get("planner_lexical_match") or item.get("exact_anchor_match") or item.get("rare_name_match"):
+        if (
+            item.get("planner_lexical_match")
+            or item.get("exact_anchor_match")
+            or item.get("rare_name_match")
+            or item.get("low_frequency_match")
+        ):
             return 1.0
         if str(item.get("admission_reason") or "") == "session_hard_exclude":
             return 0.0
@@ -13841,6 +13413,7 @@ class GatewayService:
                 not bool(item.get("exact_anchor_match")),
                 not bool(item.get("planner_lexical_match")),
                 not bool(item.get("rare_name_match")),
+                not bool(item.get("low_frequency_match")),
                 not bool(item.get("entity_edge_match")),
                 -self._safe_float(item.get("score"), 0.0),
                 self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
@@ -13855,6 +13428,7 @@ class GatewayService:
                 not bool(item.get("exact_anchor_match")),
                 not bool(item.get("planner_lexical_match")),
                 not bool(item.get("rare_name_match")),
+                not bool(item.get("low_frequency_match")),
                 not bool(item.get("entity_edge_match")),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
@@ -13873,6 +13447,7 @@ class GatewayService:
             not bool(item.get("exact_anchor_match")),
             not bool(item.get("planner_lexical_match")),
             not bool(item.get("rare_name_match")),
+            not bool(item.get("low_frequency_match")),
             not bool(item.get("entity_edge_match")),
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
@@ -14162,7 +13737,7 @@ class GatewayService:
     def _axis_lite_bypass_for_item(self, query: str, item: dict) -> bool:
         if self._query_requests_direct_detail(query) or self.recall_policy.is_detail_read_query(query):
             return True
-        if item.get("planner_lexical_match") or item.get("exact_anchor_match") or item.get("rare_name_match"):
+        if item.get("planner_lexical_match") or item.get("exact_anchor_match") or self._word_map_direct_signal(item):
             return True
         if self._entity_edge_direct_signal(item):
             return True
@@ -14250,7 +13825,7 @@ class GatewayService:
             high_confidence_edge=bool(
                 item.get("planner_lexical_match")
                 or item.get("exact_anchor_match")
-                or item.get("rare_name_match")
+                or self._word_map_direct_signal(item)
                 or self._entity_edge_direct_signal(item)
             ),
             auto=True,
@@ -14272,7 +13847,7 @@ class GatewayService:
     def _bucket_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
         if not isinstance(item, dict):
             return False
-        if item.get("planner_lexical_match") or item.get("exact_anchor_match") or item.get("rare_name_match"):
+        if item.get("planner_lexical_match") or item.get("exact_anchor_match") or self._word_map_direct_signal(item):
             return True
         if self._entity_edge_direct_signal(item):
             return True
@@ -14510,13 +14085,7 @@ class GatewayService:
     ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
         if not self._word_map_hint_available():
             return {}, {}
-        if self._query_should_skip_word_map_hint(query):
-            return {}, {}
-        terms = self._locatable_query_terms(query)
-        for term in required_terms or []:
-            cleaned = str(term or "").strip()
-            if cleaned and cleaned not in terms:
-                terms.append(cleaned)
+        terms = self._word_map_query_terms(query, required_terms=required_terms)
         if not terms:
             return {}, {}
         eligible_ids = {
@@ -14549,40 +14118,59 @@ class GatewayService:
             debug[bucket_id] = evidence if isinstance(evidence, dict) else {}
         return scores, debug
 
-    @staticmethod
-    def _query_should_skip_word_map_hint(query: str) -> bool:
-        text = str(query or "").strip().lower()
+    def _word_map_query_terms(self, query: str, *, required_terms: list[str] | None = None) -> list[str]:
+        text = str(query or "").strip()
         if not text:
+            return []
+        output: list[str] = []
+        seen: set[str] = set()
+
+        def add(raw: object) -> None:
+            cleaned = str(raw or "").strip()
+            key = self._compact_lookup_key(cleaned)
+            if not key or key in seen:
+                return
+            if not self._word_map_query_term_allowed(key):
+                return
+            seen.add(key)
+            output.append(cleaned)
+
+        for term in self._locatable_query_terms(text):
+            add(term)
+        for term in required_terms or []:
+            add(term)
+
+        query_plan = self._recall_query_plan(text)
+        if not getattr(query_plan, "skip_long_term_recall", False):
+            for term in self._specific_query_terms(text):
+                add(term)
+
+        return output[:10]
+
+    def _word_map_query_term_allowed(self, compact_term: str) -> bool:
+        key = str(compact_term or "").strip().lower()
+        if not key:
             return False
-        probe_markers = (
-            "试一下",
-            "试试",
-            "测试一下",
-            "测试",
-            "test",
-            "try",
-        )
-        if not any(marker in text for marker in probe_markers):
+        if key in QUERY_PLANNER_GENERIC_TERMS:
             return False
-        recall_intent_markers = (
-            "记得",
-            "记忆",
-            "想起",
-            "回忆",
-            "召回",
-            "检索",
-            "查一下",
-            "找一下",
-            "为什么",
-            "原因",
-            "remember",
-            "recall",
-            "memory",
-            "search",
-            "look up",
-            "why",
-        )
-        return not any(marker in text for marker in recall_intent_markers)
+        if key in MEMORY_SENTINEL_RESIDUE_STOP_TERMS:
+            return False
+        if key in self._identity_match_terms(compact=True):
+            return False
+        address_keys = {
+            self._compact_lookup_key(term)
+            for term in DEFAULT_AI_ADDRESS_TERMS
+            if self._compact_lookup_key(term)
+        }
+        if any(address_key and address_key in key for address_key in address_keys):
+            return False
+        if not self._planner_must_term_allowed(key):
+            return False
+        if re.fullmatch(r"[a-z0-9_.:/-]+", key):
+            return len(key) >= 3 or bool(re.search(r"\d", key))
+        if re.fullmatch(r"[\u4e00-\u9fff]+", key):
+            return 2 <= len(key) <= 16
+        return bool(re.search(r"[\u4e00-\u9fffA-Za-z0-9]", key))
 
     def _word_map_hint_debug_from_items(self, items: list[dict]) -> dict[str, Any]:
         payload = {
@@ -14591,6 +14179,8 @@ class GatewayService:
             "terms": [],
             "variant_terms": [],
             "neighbor_terms": [],
+            "low_frequency_bucket_ids": [],
+            "low_frequency_terms": [],
             "rare_name_bucket_ids": [],
             "rare_name_terms": [],
         }
@@ -14610,6 +14200,11 @@ class GatewayService:
             for term in item.get("word_map_neighbor_terms") or []:
                 if term not in payload["neighbor_terms"]:
                     payload["neighbor_terms"].append(term)
+            if item.get("low_frequency_match") and bucket_id and bucket_id not in payload["low_frequency_bucket_ids"]:
+                payload["low_frequency_bucket_ids"].append(bucket_id)
+            for term in item.get("low_frequency_terms") or []:
+                if term not in payload["low_frequency_terms"]:
+                    payload["low_frequency_terms"].append(term)
             if item.get("rare_name_match") and bucket_id and bucket_id not in payload["rare_name_bucket_ids"]:
                 payload["rare_name_bucket_ids"].append(bucket_id)
             for term in item.get("rare_name_terms") or []:
@@ -14639,6 +14234,8 @@ class GatewayService:
             "terms",
             "variant_terms",
             "neighbor_terms",
+            "low_frequency_bucket_ids",
+            "low_frequency_terms",
             "rare_name_bucket_ids",
             "rare_name_terms",
         ):
@@ -14686,6 +14283,10 @@ class GatewayService:
         if not scored_candidates:
             return []
 
+        axis_diverse = self._pick_axis_diverse_dynamic_cards(scored_candidates, query=query)
+        if axis_diverse:
+            return axis_diverse
+
         chosen = []
         first = None
         remaining_candidates = []
@@ -14724,8 +14325,62 @@ class GatewayService:
             chosen.append(second)
         return chosen
 
+    def _pick_axis_diverse_dynamic_cards(self, scored_candidates: list[dict], *, query: str = "") -> list[dict]:
+        if self.inject_max_cards < 2:
+            return []
+        query_plan = self._recall_query_plan(query)
+        if not bool(getattr(query_plan, "activated_axis_multi", False)):
+            return []
+        groups = [
+            tuple(term for term in group if str(term or "").strip())
+            for group in (getattr(query_plan, "activated_axis_groups", ()) or ())
+            if group
+        ]
+        if len(groups) < 2:
+            return []
+
+        chosen: list[dict] = []
+        chosen_ids: set[str] = set()
+        for group in groups:
+            for candidate in scored_candidates:
+                bucket = candidate.get("bucket") if isinstance(candidate, dict) else None
+                bucket_id = str((bucket or {}).get("id") or "")
+                if not bucket_id or bucket_id in chosen_ids:
+                    continue
+                if not self._axis_group_matches_item(group, candidate):
+                    continue
+                candidate_score = self._safe_float(candidate.get("score"), 0.0)
+                if (
+                    candidate_score >= self.first_card_min_score
+                    or self._dynamic_bucket_item_has_reliable_recall_signal(query, candidate)
+                ):
+                    chosen.append(candidate)
+                    chosen_ids.add(bucket_id)
+                    break
+            if len(chosen) >= self.inject_max_cards:
+                break
+        if len(chosen) < min(len(groups), self.inject_max_cards):
+            return []
+        for candidate in scored_candidates:
+            if len(chosen) >= self.inject_max_cards:
+                break
+            bucket = candidate.get("bucket") if isinstance(candidate, dict) else None
+            bucket_id = str((bucket or {}).get("id") or "")
+            if bucket_id and bucket_id not in chosen_ids:
+                chosen.append(candidate)
+                chosen_ids.add(bucket_id)
+        return chosen[: self.inject_max_cards]
+
+    def _axis_group_matches_item(self, group: tuple[str, ...], item: dict) -> bool:
+        bucket = item.get("bucket") if isinstance(item, dict) else None
+        if not isinstance(bucket, dict):
+            return False
+        text = self._axis_lite_node_text(bucket)
+        keys = [self._compact_axis_text(term) for term in group if self._compact_axis_text(term)]
+        return bool(keys and text and all(key in text for key in keys))
+
     def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
-        if item.get("planner_lexical_match") or item.get("exact_anchor_match") or item.get("rare_name_match"):
+        if item.get("planner_lexical_match") or item.get("exact_anchor_match") or self._word_map_direct_signal(item):
             return True
         if self._is_high_confidence_match(
             self._safe_float(item.get("semantic_score"), 0.0),
@@ -15283,6 +14938,12 @@ class GatewayService:
                 terms=self._debug_str_list(item.get("rare_name_terms")),
                 sources=self._debug_str_list(item.get("rare_name_sources")),
             )
+        if item.get("low_frequency_match"):
+            add_source(
+                "low_frequency",
+                terms=self._debug_str_list(item.get("low_frequency_terms")),
+                sources=self._debug_str_list(item.get("low_frequency_sources")),
+            )
         if item.get("entity_edge_match"):
             add_source(
                 "entity_edge",
@@ -15456,6 +15117,9 @@ class GatewayService:
             "word_map_terms": list(item.get("word_map_terms") or []),
             "word_map_variant_terms": list(item.get("word_map_variant_terms") or []),
             "word_map_neighbor_terms": list(item.get("word_map_neighbor_terms") or []),
+            "low_frequency_match": bool(item.get("low_frequency_match")),
+            "low_frequency_terms": list(item.get("low_frequency_terms") or []),
+            "low_frequency_sources": list(item.get("low_frequency_sources") or []),
             "rare_name_match": bool(item.get("rare_name_match")),
             "rare_name_terms": list(item.get("rare_name_terms") or []),
             "rare_name_sources": list(item.get("rare_name_sources") or []),
@@ -15532,6 +15196,9 @@ class GatewayService:
             "word_map_terms": list(moment.get("word_map_terms") or []),
             "word_map_variant_terms": list(moment.get("word_map_variant_terms") or []),
             "word_map_neighbor_terms": list(moment.get("word_map_neighbor_terms") or []),
+            "low_frequency_match": bool(moment.get("low_frequency_match")),
+            "low_frequency_terms": list(moment.get("low_frequency_terms") or []),
+            "low_frequency_sources": list(moment.get("low_frequency_sources") or []),
             "rare_name_match": bool(moment.get("rare_name_match")),
             "rare_name_terms": list(moment.get("rare_name_terms") or []),
             "rare_name_sources": list(moment.get("rare_name_sources") or []),
@@ -16088,6 +15755,7 @@ class GatewayService:
             signal.get("planner_lexical_match")
             or signal.get("exact_anchor_match")
             or signal.get("rare_name_match")
+            or signal.get("low_frequency_match")
             or self._is_high_confidence_match(
                 self._safe_float(signal.get("semantic_score"), 0.0),
                 self._safe_float(signal.get("keyword_score"), 0.0),
@@ -16095,10 +15763,10 @@ class GatewayService:
         )
         view = normalize_memory_metadata(bucket)
         note = {
-            "use": "background",
+            "use": "standard",
             "why": "Gateway selected this memory for the current message.",
             "reliability": "direct_match" if reliable else "weak_context",
-            "mention_policy": "do_not_mention_unless_user_asks",
+            "mention_policy": "standard",
             "conflict_rule": "current_user_message_wins",
             "canonical_domain": str(view.get("canonical_domain") or ""),
             "kind": str(view.get("kind") or ""),
@@ -16140,8 +15808,6 @@ class GatewayService:
         def add_card(card: dict[str, Any] | None) -> None:
             if not card or len(cards) >= max_cards:
                 return
-            if card.get("use_mode") == "ignore":
-                return
             if not str(card.get("text") or "").strip():
                 return
             key = (str(card.get("bucket_id") or ""), str(card.get("moment_id") or ""))
@@ -16182,17 +15848,6 @@ class GatewayService:
                     break
         return cards
 
-    @staticmethod
-    def _hook_recall_reading_use_mode(note: dict[str, Any]) -> str:
-        use = str(note.get("use") or "background")
-        if use == "explicit_recall":
-            return "explicit"
-        if use == "silent_tone":
-            return "light_touch"
-        if use == "ignore":
-            return "ignore"
-        return "light_touch"
-
     def _hook_recall_confidence(self, note: dict[str, Any], row: dict[str, Any] | None) -> str:
         reliability = str(note.get("reliability") or "")
         if reliability in {"source_record", "direct_match", "strong_model_score"}:
@@ -16205,14 +15860,11 @@ class GatewayService:
         return "low"
 
     @staticmethod
-    def _hook_recall_how_to_apply(use_mode: str) -> str:
-        if use_mode == "explicit":
-            return "Use directly only if it helps answer this message; current user message wins."
-        if use_mode == "silent":
-            return "Possible related memory; ignore if irrelevant or conflicting; current user message wins."
-        if use_mode == "ignore":
-            return "Do not use for this reply."
-        return "possible related memory; use only if it helps answer the current message, ignore if irrelevant/conflicting."
+    def _hook_recall_how_to_apply() -> str:
+        return (
+            "Use only if directly helpful; ignore if irrelevant or conflicting. "
+            "Do not mechanically repeat or mention retrieval."
+        )
 
     def _hook_recall_debug_row_indexes(
         self,
@@ -16392,17 +16044,16 @@ class GatewayService:
         note = row.get("reading_note") if isinstance(row.get("reading_note"), dict) else {}
         if not note:
             note = {
-                "use": "background",
+                "use": "standard",
                 "why": "Gateway selected this memory for the current message.",
                 "reliability": "weak_context",
-                "mention_policy": "do_not_mention_unless_user_asks",
+                "mention_policy": "standard",
                 "conflict_rule": "current_user_message_wins",
                 "canonical_domain": "",
                 "kind": "",
                 "status_view": "",
                 "flags": [],
             }
-        use_mode = self._hook_recall_reading_use_mode(note)
         card_text = self._clip_text(" ".join(str(text or "").split()), max_chars)
         source_ref = f"ombre:{bucket_id}"
         if moment_id:
@@ -16429,25 +16080,14 @@ class GatewayService:
             "title": title,
             "text": card_text,
             "score": round(max(0.0, min(1.0, numeric_score)), 4),
-            "why_read": str(note.get("why") or ""),
-            "use_mode": use_mode,
-            "confidence": self._hook_recall_confidence(note, row),
-            "how_to_apply": self._hook_recall_how_to_apply(use_mode),
             "render_shape": render_shape,
-            "domain": str(note.get("canonical_domain") or ""),
-            "kind": str(note.get("kind") or ""),
-            "status_view": str(note.get("status_view") or ""),
-            "reading_note": note,
         }
 
     @staticmethod
     def _render_hook_recall_additional_context(cards: list[dict[str, Any]]) -> str:
         if not cards:
             return ""
-        how_to_apply = (
-            "possible related memory; use only if it helps answer the current message, "
-            "ignore if irrelevant/conflicting."
-        )
+        how_to_apply = GatewayService._hook_recall_how_to_apply()
         parts = [
             "[Ombre Gateway Hook Recall]",
             "Retrieved memory notes. Treat them as private context.",

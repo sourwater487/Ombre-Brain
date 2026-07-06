@@ -66,6 +66,27 @@ def test_word_map_rebuild_creates_nodes_edges_and_bucket_evidence(tmp_path):
     assert ("夏天", "空调") in edge_pairs or ("空调", "夏天") in edge_pairs
 
 
+def test_word_map_ignores_standalone_time_terms_but_keeps_time_objects(tmp_path):
+    store = WordMapStore(_config(tmp_path))
+    alarm = _bucket(
+        "alarm",
+        "小雨论文打印问题明天七点半闹钟，最后去打印店处理。一点只是当前时间感叹。",
+        name="论文打印问题明天七点半闹钟",
+        keywords=["明天", "七点半", "一点", "闹钟"],
+    )
+    terms = {term.term for term in store.extract_bucket_terms(alarm)}
+
+    assert "明天" not in terms
+    assert "七点半" not in terms
+    assert "一点" not in terms
+    assert "闹钟" in terms
+
+    store.rebuild([alarm])
+    assert store.hint_buckets_for_terms(["七点半"], neighbor_limit=0, bucket_limit=10)["bucket_scores"] == {}
+    assert store.hint_buckets_for_terms(["一点"], neighbor_limit=0, bucket_limit=10)["bucket_scores"] == {}
+    assert "alarm" in store.hint_buckets_for_terms(["闹钟"], neighbor_limit=0, bucket_limit=10)["bucket_scores"]
+
+
 def test_word_map_hint_buckets_include_direct_and_neighbor_evidence(tmp_path):
     store = WordMapStore(_config(tmp_path))
     store.rebuild(
@@ -202,6 +223,8 @@ def test_word_map_marks_only_stable_direct_low_frequency_terms_as_rare_name(tmp_
     keyword_hints = store.hint_buckets_for_terms(["低频项目"], neighbor_limit=4, bucket_limit=10)
     assert keyword_hints["evidence"]["keyword-only"]["direct_terms"] == ["低频项目"]
     assert keyword_hints["evidence"]["keyword-only"]["rare_name_terms"] == []
+    assert keyword_hints["evidence"]["keyword-only"]["low_frequency_terms"] == ["低频项目"]
+    assert keyword_hints["evidence"]["keyword-only"]["low_frequency_sources"] == ["keyword"]
 
 
 def test_word_map_weak_hint_terms_do_not_expand_neighbors(tmp_path):
