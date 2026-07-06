@@ -1717,18 +1717,16 @@ class ReflectionEngine:
         return summaries
 
     def _daily_chat_memory_model_client(self, *, candidate: bool) -> tuple[Any, str, bool]:
+        if self.daily_chat_memory_client:
+            client = self.daily_chat_memory_client
+            model = self.daily_chat_memory_candidate_model if candidate else self.daily_chat_memory_summary_model
+            return client, str(model or "").strip(), True
         dehy_client = self._daily_dehydration_client()
         if dehy_client and self.dehydration_model:
-            return dehy_client, self.dehydration_model, False
-        client = self.daily_chat_memory_client or self.client
-        if not client:
-            return None, "", False
-        use_daily_client = client is self.daily_chat_memory_client
-        if use_daily_client:
-            model = self.daily_chat_memory_candidate_model if candidate else self.daily_chat_memory_summary_model
-        else:
-            model = self.model
-        return client, str(model or "").strip(), use_daily_client
+            return dehy_client, str(self.dehydration_model or "").strip(), False
+        if self.client:
+            return self.client, str(self.model or "").strip(), False
+        return None, "", False
 
     def _reflect_model_client(self) -> tuple[Any, str, bool]:
         dehy_client = self._daily_dehydration_client()
