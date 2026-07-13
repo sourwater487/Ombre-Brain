@@ -10,15 +10,15 @@ _SPACE_RE = re.compile(r"\s+")
 _TRACE_TZ = ZoneInfo("Asia/Shanghai")
 
 _DROP_TERMS = (
-    "小雨",
-    "池又雨",
+    "Lin",
+    "Che",
     "宝宝",
     "宝贝",
+    "亲爱的",
+    "小乖",
     "老婆",
     "老公",
     "哥哥",
-    "Haven",
-    "haven",
     "今天",
     "昨天",
     "昨晚",

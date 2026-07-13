@@ -8,6 +8,7 @@ tests/
 .claude/hooks/__pycache__/
 .vscode/
 config.yaml
+config.lin.production.yaml
 compose.local.yml
 connection_guide.txt
 start_mobile.sh

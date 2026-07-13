@@ -125,6 +125,15 @@ GENERIC_LEXICAL_STOPWORD_KEYS = frozenset(
     if str(term or "").strip()
 )
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
+OMBRE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+MEMO_CONTEXT_RE = re.compile(
+    r"<memo_context>\s*(.*?)\s*</memo_context>",
+    re.IGNORECASE | re.DOTALL,
+)
+LEADING_OMBRE_LIVE_CONTEXT_RE = re.compile(
+    r"^\s*<ombre_live_context>[\s\S]*?</ombre_live_context>",
+    re.IGNORECASE,
+)
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
 DUPLICATE_CONVERSATION_TURN_WINDOW_SECONDS = 120
 DOMAIN_SENTINEL_ALLOWED_DOMAINS = frozenset(
@@ -652,6 +661,7 @@ class GatewayService:
             float(self.gateway_cfg.get("bucket_list_cache_ttl_seconds", 300)),
         )
         self._bucket_list_cache: dict[bool, dict[str, Any]] = {}
+        self._pending_tool_turns: dict[str, dict[str, Any]] = {}
         self.diffusion_options = diffusion_options_from_config(config)
         self.diffusion_inject_max_items = max(
             0,
@@ -1028,6 +1038,14 @@ class GatewayService:
             "chain_min_confidence": options.chain_min_confidence,
             "chain_min_relation_priority": options.chain_min_relation_priority,
             "chain_max_frontier": options.chain_max_frontier,
+        }
+
+    def _embedding_config_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(getattr(self.embedding_engine, "enabled", False)),
+            "model": getattr(self.embedding_engine, "model", ""),
+            "base_url": getattr(self.embedding_engine, "base_url", ""),
+            "api_ready": bool(getattr(self.embedding_engine, "api_key", "")),
         }
 
     def _reranker_config_payload(self) -> dict[str, Any]:
@@ -1619,6 +1637,31 @@ class GatewayService:
             self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url("")
         if not str(self.gateway_cfg.get("domain_sentinel_api_key") or "").strip():
             self.domain_sentinel_api_key = self._resolve_domain_sentinel_api_key("")
+        if updated and (
+            not str(self.embedding_cfg.get("api_key") or "").strip()
+            or not str(self.embedding_cfg.get("base_url") or "").strip()
+        ):
+            self.embedding_engine = EmbeddingEngine(self.config)
+        return updated
+
+    def _apply_embedding_config(self, payload: dict[str, Any]) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        embedding_cfg = self.config.setdefault("embedding", {})
+        updated: list[str] = []
+        if "enabled" in payload:
+            embedding_cfg["enabled"] = self._bool_config_value(payload["enabled"], True)
+            updated.append("embedding.enabled")
+        for key in ("model", "base_url"):
+            if key in payload:
+                embedding_cfg[key] = str(payload[key] or "").strip()
+                updated.append(f"embedding.{key}")
+        if "api_key" in payload and payload["api_key"]:
+            embedding_cfg["api_key"] = str(payload["api_key"])
+            updated.append("embedding.api_key")
+        if updated:
+            self.embedding_cfg = embedding_cfg
+            self.embedding_engine = EmbeddingEngine(self.config)
         return updated
 
     def _apply_reranker_config(self, payload: dict[str, Any]) -> list[str]:
@@ -1750,6 +1793,7 @@ class GatewayService:
         if request.method == "GET":
             return JSONResponse({
                 "gateway": self._gateway_memory_config_payload(),
+                "embedding": self._embedding_config_payload(),
                 "memory_diffusion": self._memory_diffusion_config_payload(),
                 "reranker": self._reranker_config_payload(),
                 "persona": self._persona_config_payload(),
@@ -1765,6 +1809,7 @@ class GatewayService:
 
         gateway_payload = body.get("gateway")
         dehydration_payload = body.get("dehydration")
+        embedding_payload = body.get("embedding")
         diffusion_payload = body.get("memory_diffusion")
         reranker_payload = body.get("reranker")
         persona_payload = body.get("persona")
@@ -1772,6 +1817,7 @@ class GatewayService:
         if (
             gateway_payload is None
             and dehydration_payload is None
+            and embedding_payload is None
             and diffusion_payload is None
             and reranker_payload is None
             and persona_payload is None
@@ -1782,6 +1828,8 @@ class GatewayService:
             return JSONResponse({"error": "invalid gateway config"}, status_code=400)
         if dehydration_payload is not None and not isinstance(dehydration_payload, dict):
             return JSONResponse({"error": "invalid dehydration config"}, status_code=400)
+        if embedding_payload is not None and not isinstance(embedding_payload, dict):
+            return JSONResponse({"error": "invalid embedding config"}, status_code=400)
         if diffusion_payload is not None and not isinstance(diffusion_payload, dict):
             return JSONResponse({"error": "invalid memory diffusion config"}, status_code=400)
         if reranker_payload is not None and not isinstance(reranker_payload, dict):
@@ -1794,6 +1842,8 @@ class GatewayService:
         updated = []
         if dehydration_payload is not None:
             updated.extend(self._apply_dehydration_config(dehydration_payload))
+        if embedding_payload is not None:
+            updated.extend(self._apply_embedding_config(embedding_payload))
         if gateway_payload is not None:
             updated.extend(self._apply_gateway_memory_config(gateway_payload))
         if diffusion_payload is not None:
@@ -1808,6 +1858,7 @@ class GatewayService:
             "ok": True,
             "updated": updated,
             "gateway": self._gateway_memory_config_payload(),
+            "embedding": self._embedding_config_payload(),
             "memory_diffusion": self._memory_diffusion_config_payload(),
             "reranker": self._reranker_config_payload(),
             "persona": self._persona_config_payload(),
@@ -1821,14 +1872,22 @@ class GatewayService:
             logger.exception("Gateway health check failed: %s", exc)
             return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
 
-    async def handle_chat(self, request: Request) -> Response:
+    async def handle_chat(self, request: Request, *, request_mode: str = "chat") -> Response:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
             return auth_result
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
-        client_label = self._client_label_from_request(request, "/v1/chat/completions")
-
+        request_mode = "keepalive_autonomous" if request_mode == "keepalive_autonomous" else "chat"
+        request_id = self._normalize_ombre_request_id(
+            request.headers.get("X-Ombre-Request-Id")
+        )
+        inbound_route = (
+            "/v1/keepalive/completions"
+            if request_mode == "keepalive_autonomous"
+            else "/v1/chat/completions"
+        )
+        client_label = self._client_label_from_request(request, inbound_route)
         try:
             payload = await request.json()
         except Exception:
@@ -1853,13 +1912,19 @@ class GatewayService:
 
         try:
             payload, marker_favorite = self._strip_favorite_memory_marker_from_payload(payload)
+            continuation_key = self._extract_tool_continuation_key(payload.get("messages", []))
             include_favorite_memory = marker_favorite or self._truthy_header(
                 request.headers.get("X-Ombre-Include-Favorite-Memory")
             )
-            persona_user_message = self._extract_last_user_query(payload.get("messages", []))
+            persona_user_message = (
+                self._extract_keepalive_current_turn_query(payload.get("messages", []))
+                if request_mode == "keepalive_autonomous"
+                else self._extract_last_user_query(payload.get("messages", []))
+            )
             forward_payload, recalled_ids, injection_debug = await self.prepare_payload(
                 payload,
                 session_id,
+                request_mode=request_mode,
                 include_favorite_memory=include_favorite_memory,
                 include_debug=True,
                 debug_detail=(
@@ -1868,6 +1933,12 @@ class GatewayService:
                     else "compact"
                 ),
             )
+            if isinstance(injection_debug, dict):
+                injection_debug["request_mode"] = request_mode
+                if request_id:
+                    injection_debug["request_id"] = request_id
+                if continuation_key:
+                    injection_debug["continuation_key"] = continuation_key
         except ValueError as exc:
             return JSONResponse(
                 {"error": {"message": str(exc), "type": "invalid_request_error"}},
@@ -1903,7 +1974,7 @@ class GatewayService:
                     session_id,
                     forward_payload["model"],
                     upstream_response,
-                    route="/v1/chat/completions",
+                    route=inbound_route,
                 )
                 assistant_message = self._extract_assistant_message_from_anthropic_response(upstream_response)
                 await self._record_successful_round(
@@ -1914,15 +1985,19 @@ class GatewayService:
                     assistant_message=assistant_message,
                     model=forward_payload["model"],
                     client=client_label,
-                    route="/v1/chat/completions",
+                    route=inbound_route,
                     upstream_usage=upstream_usage,
                 )
-                await self._update_persona_after_assistant_message(
-                    session_id,
-                    persona_user_message,
-                    assistant_message,
-                    recalled_ids or [],
-                )
+                if (
+                    request_mode != "keepalive_autonomous"
+                    and not self._assistant_message_has_tool_calls(assistant_message)
+                ):
+                    await self._update_persona_after_assistant_message(
+                        session_id,
+                        persona_user_message,
+                        assistant_message,
+                        recalled_ids or [],
+                    )
                 return self._anthropic_response_to_openai(upstream_response, forward_payload["model"])
 
             return self._proxy_response(upstream_response)
@@ -1940,7 +2015,7 @@ class GatewayService:
                 session_id,
                 forward_payload["model"],
                 upstream_response,
-                route="/v1/chat/completions",
+                route=inbound_route,
             )
             self._capture_reasoning_from_response(session_id, upstream_response)
             assistant_message = self._extract_assistant_message_from_response(upstream_response)
@@ -1952,15 +2027,19 @@ class GatewayService:
                 assistant_message=assistant_message,
                 model=forward_payload["model"],
                 client=client_label,
-                route="/v1/chat/completions",
+                route=inbound_route,
                 upstream_usage=upstream_usage,
             )
-            await self._update_persona_after_assistant_message(
-                session_id,
-                persona_user_message,
-                assistant_message,
-                recalled_ids or [],
-            )
+            if (
+                request_mode != "keepalive_autonomous"
+                and not self._assistant_message_has_tool_calls(assistant_message)
+            ):
+                await self._update_persona_after_assistant_message(
+                    session_id,
+                    persona_user_message,
+                    assistant_message,
+                    recalled_ids or [],
+                )
 
         return self._proxy_response(upstream_response)
 
@@ -1970,8 +2049,10 @@ class GatewayService:
             return auth_result
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        request_id = self._normalize_ombre_request_id(
+            request.headers.get("X-Ombre-Request-Id")
+        )
         client_label = self._client_label_from_request(request, "/v1/messages")
-
         try:
             payload = await request.json()
         except Exception:
@@ -1994,6 +2075,7 @@ class GatewayService:
 
         try:
             openai_payload, marker_favorite = self._strip_favorite_memory_marker_from_payload(openai_payload)
+            continuation_key = self._extract_tool_continuation_key(openai_payload.get("messages", []))
             include_favorite_memory = marker_favorite or self._truthy_header(
                 request.headers.get("X-Ombre-Include-Favorite-Memory")
             )
@@ -2009,6 +2091,12 @@ class GatewayService:
                     else "compact"
                 ),
             )
+            if isinstance(injection_debug, dict):
+                injection_debug["request_mode"] = "chat"
+                if request_id:
+                    injection_debug["request_id"] = request_id
+                if continuation_key:
+                    injection_debug["continuation_key"] = continuation_key
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
         except RuntimeError as exc:
@@ -2088,12 +2176,13 @@ class GatewayService:
                 route="/v1/messages",
                 upstream_usage=upstream_usage,
             )
-            await self._update_persona_after_assistant_message(
-                session_id,
-                persona_user_message,
-                assistant_message,
-                recalled_ids or [],
-            )
+            if not self._assistant_message_has_tool_calls(assistant_message):
+                await self._update_persona_after_assistant_message(
+                    session_id,
+                    persona_user_message,
+                    assistant_message,
+                    recalled_ids or [],
+                )
             return self._openai_response_to_anthropic(upstream_response, forward_payload["model"])
 
         return self._proxy_anthropic_error_response(upstream_response)
@@ -2154,20 +2243,28 @@ class GatewayService:
         except ValueError:
             limit = 20
         session_id = str(request.query_params.get("session_id", "") or "").strip()
+        raw_request_id = str(request.query_params.get("request_id", "") or "").strip()
+        request_id = self._normalize_ombre_request_id(raw_request_id)
+        if raw_request_id and not request_id:
+            return JSONResponse({"items": []})
         include_context = str(request.query_params.get("include_context", "1")).strip().lower() not in {
             "0",
             "false",
             "no",
         }
-        return JSONResponse(
-            {
-                "items": self.state_store.list_injection_debug(
-                    session_id=session_id,
-                    limit=limit,
-                    include_context=include_context,
-                )
-            }
+        items = self.state_store.list_injection_debug(
+            session_id=session_id,
+            limit=max(limit, 80) if request_id else limit,
+            include_context=include_context,
         )
+        if request_id:
+            items = [
+                item
+                for item in items
+                if isinstance(item.get("payload"), dict)
+                and str(item["payload"].get("request_id") or "") == request_id
+            ]
+        return JSONResponse({"items": items[: max(1, min(100, limit))]})
 
     async def handle_hook_recall(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
@@ -2494,6 +2591,7 @@ class GatewayService:
         payload: dict,
         session_id: str,
         *,
+        request_mode: str = "chat",
         include_favorite_memory: bool = False,
         include_debug: bool = False,
         debug_detail: str = "full",
@@ -2521,7 +2619,11 @@ class GatewayService:
         mark_step("list_all_buckets", stage_started_at)
 
         stage_started_at = time.perf_counter()
-        current_user_query = self._extract_current_turn_user_query(messages)
+        current_user_query = (
+            self._extract_keepalive_current_turn_query(messages)
+            if request_mode == "keepalive_autonomous"
+            else self._extract_current_turn_user_query(messages)
+        )
         is_new_user_turn = bool(current_user_query)
         has_handoff_context = self._messages_contain_handoff_context(messages)
         is_session_start = self.state_store.get_last_success_at(session_id) is None
@@ -3533,6 +3635,11 @@ class GatewayService:
         injection_debug: dict[str, Any] | None = None,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
+        inbound_route = (
+            "/v1/keepalive/completions"
+            if str((injection_debug or {}).get("request_mode") or "") == "keepalive_autonomous"
+            else "/v1/chat/completions"
+        )
         route = self._resolve_upstream_for_model(model)
         if self._upstream_uses_anthropic_protocol(route["upstream"]):
             return await self._stream_anthropic_upstream_as_openai(
@@ -3559,7 +3666,7 @@ class GatewayService:
                 "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
                 "status=%s error_response=true header_ms=%s body_read_ms=%s total_ms=%s",
                 session_id,
-                "/v1/chat/completions",
+                inbound_route,
                 upstream.get("name"),
                 model,
                 route["upstream_model"],
@@ -3591,7 +3698,7 @@ class GatewayService:
                 await self._finalize_stream_turn(
                     session_id=session_id,
                     model=model,
-                    route="/v1/chat/completions",
+                    route=inbound_route,
                     stream_state=stream_state,
                     recalled_ids=recalled_ids,
                     user_message=user_message,
@@ -3613,7 +3720,7 @@ class GatewayService:
                                 "model=%s upstream_model=%s status=%s header_ms=%s "
                                 "first_chunk_ms=%s header_to_first_chunk_ms=%s",
                                 session_id,
-                                "/v1/chat/completions",
+                                inbound_route,
                                 upstream.get("name"),
                                 model,
                                 route["upstream_model"],
@@ -3634,7 +3741,7 @@ class GatewayService:
                     "status=%s header_ms=%s first_chunk_ms=%s header_to_first_chunk_ms=%s "
                     "body_ms=%s total_ms=%s chunks=%s bytes=%s finalized=%s seen_done=%s",
                     session_id,
-                    "/v1/chat/completions",
+                    inbound_route,
                     upstream.get("name"),
                     model,
                     route["upstream_model"],
@@ -3674,7 +3781,61 @@ class GatewayService:
         route: str = "",
         upstream_usage: dict[str, Any] | None = None,
     ) -> None:
+        continuation_key = str((injection_debug or {}).get("continuation_key") or "").strip()
+        request_mode = str((injection_debug or {}).get("request_mode") or "chat")
         if recalled_ids is None:
+            pending_turn = (
+                self._pending_tool_turns.get(
+                    self._pending_tool_turn_key(session_id, continuation_key)
+                )
+                if continuation_key
+                else None
+            )
+            if pending_turn and request_mode == "chat":
+                if self._assistant_message_has_tool_calls(assistant_message):
+                    self._replace_pending_tool_turn_keys(pending_turn, assistant_message)
+                    logger.info(
+                        "Gateway tool continuation retained | session=%s tool_call_id=%s",
+                        session_id,
+                        continuation_key,
+                    )
+                    return
+                if self._assistant_message_has_output(assistant_message):
+                    self._record_conversation_turn(
+                        session_id=session_id,
+                        round_id=int(pending_turn["round_id"]),
+                        user_message=str(pending_turn.get("user_message") or user_message),
+                        assistant_message=assistant_message,
+                        model=model or str(pending_turn.get("model") or ""),
+                        client=client or str(pending_turn.get("client") or ""),
+                        route=route or str(pending_turn.get("route") or ""),
+                    )
+                    if isinstance(upstream_usage, dict) and upstream_usage:
+                        try:
+                            self.state_store.record_upstream_usage(
+                                session_id=session_id,
+                                round_id=int(pending_turn["round_id"]),
+                                model=model or str(pending_turn.get("model") or ""),
+                                route=route or str(pending_turn.get("route") or ""),
+                                usage=upstream_usage,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Gateway tool continuation final usage record failed | session=%s "
+                                "tool_call_id=%s error=%s",
+                                session_id,
+                                continuation_key,
+                                exc,
+                            )
+                    self._forget_pending_tool_turn(pending_turn)
+                    logger.info(
+                        "Gateway tool continuation final conversation recorded | session=%s "
+                        "round=%s tool_call_id=%s",
+                        session_id,
+                        pending_turn["round_id"],
+                        continuation_key,
+                    )
+                    return
             logger.info(
                 "Gateway round bookkeeping skipped | session=%s reason=not_current_user_turn",
                 session_id,
@@ -3726,15 +3887,48 @@ class GatewayService:
                     round_id,
                     exc,
                 )
-        self._record_conversation_turn(
-            session_id=session_id,
-            round_id=round_id,
-            user_message=user_message,
-            assistant_message=assistant_message,
-            model=model,
-            client=client,
-            route=route,
+        defer_conversation_turn = bool(
+            request_mode == "chat"
+            and self._assistant_message_has_tool_calls(assistant_message)
+            and self._assistant_message_tool_call_ids(assistant_message)
         )
+        if defer_conversation_turn:
+            self._prune_pending_tool_turns()
+            pending_turn = {
+                "round_id": round_id,
+                "session_id": session_id,
+                "user_message": user_message,
+                "model": model,
+                "client": client,
+                "route": route,
+                "created_at": time.time(),
+            }
+            self._replace_pending_tool_turn_keys(pending_turn, assistant_message)
+            logger.info(
+                "Gateway conversation deferred until final tool-loop response | "
+                "session=%s round=%s tool_call_ids=%s",
+                session_id,
+                round_id,
+                pending_turn.get("tool_call_ids", []),
+            )
+        elif request_mode != "keepalive_autonomous":
+            self._record_conversation_turn(
+                session_id=session_id,
+                round_id=round_id,
+                user_message=user_message,
+                assistant_message=assistant_message,
+                model=model,
+                client=client,
+                route=route,
+            )
+        else:
+            logger.info(
+                "Gateway autonomous keepalive exposure recorded without Lin conversation turn | "
+                "session=%s round=%s recalled=%s",
+                session_id,
+                round_id,
+                recalled_ids,
+            )
         if isinstance(upstream_usage, dict) and upstream_usage:
             try:
                 self.state_store.record_upstream_usage(
@@ -3760,6 +3954,59 @@ class GatewayService:
             recalled_ids,
         )
 
+    def _prune_pending_tool_turns(self) -> None:
+        cutoff = time.time() - 3600
+        expired_turns = {
+            id(item): item
+            for item in self._pending_tool_turns.values()
+            if float(item.get("created_at") or 0) < cutoff
+        }
+        for item in expired_turns.values():
+            self._forget_pending_tool_turn(item)
+        if len(self._pending_tool_turns) <= 500:
+            return
+        oldest = sorted(
+            {id(item): item for item in self._pending_tool_turns.values()}.values(),
+            key=lambda item: float(item.get("created_at") or 0),
+        )
+        while len(self._pending_tool_turns) > 500 and oldest:
+            self._forget_pending_tool_turn(oldest.pop(0))
+
+    @staticmethod
+    def _assistant_message_tool_call_ids(assistant_message: dict[str, Any] | None) -> list[str]:
+        if not isinstance(assistant_message, dict):
+            return []
+        return list(dict.fromkeys(
+            str(item.get("id") or "").strip()
+            for item in assistant_message.get("tool_calls", []) or []
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ))
+
+    def _forget_pending_tool_turn(self, pending_turn: dict[str, Any]) -> None:
+        session_id = str(pending_turn.get("session_id") or "")
+        for tool_call_id in pending_turn.get("tool_call_ids", []) or []:
+            pending_key = self._pending_tool_turn_key(session_id, tool_call_id)
+            if self._pending_tool_turns.get(pending_key) is pending_turn:
+                self._pending_tool_turns.pop(pending_key, None)
+
+    def _replace_pending_tool_turn_keys(
+        self,
+        pending_turn: dict[str, Any],
+        assistant_message: dict[str, Any] | None,
+    ) -> None:
+        self._forget_pending_tool_turn(pending_turn)
+        tool_call_ids = self._assistant_message_tool_call_ids(assistant_message)
+        pending_turn["tool_call_ids"] = tool_call_ids
+        session_id = str(pending_turn.get("session_id") or "")
+        for tool_call_id in tool_call_ids:
+            self._pending_tool_turns[
+                self._pending_tool_turn_key(session_id, tool_call_id)
+            ] = pending_turn
+
+    @staticmethod
+    def _pending_tool_turn_key(session_id: Any, tool_call_id: Any) -> str:
+        return f"{str(session_id or '').strip()}\x1f{str(tool_call_id or '').strip()}"
+
     @staticmethod
     def _assistant_message_has_output(assistant_message: dict[str, Any] | None) -> bool:
         if not isinstance(assistant_message, dict):
@@ -3772,6 +4019,13 @@ class GatewayService:
         reasoning = assistant_message.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning.strip():
             return True
+        tool_calls = assistant_message.get("tool_calls")
+        return isinstance(tool_calls, list) and bool(tool_calls)
+
+    @staticmethod
+    def _assistant_message_has_tool_calls(assistant_message: dict[str, Any] | None) -> bool:
+        if not isinstance(assistant_message, dict):
+            return False
         tool_calls = assistant_message.get("tool_calls")
         return isinstance(tool_calls, list) and bool(tool_calls)
 
@@ -4662,11 +4916,11 @@ class GatewayService:
         return "\n\n".join(part for part in blocks if part.strip()), missing_ids
 
     def _insert_memory_detail_context(self, messages: Any, detail_context: str) -> list[dict]:
-        new_messages = deepcopy(messages) if isinstance(messages, list) else []
-        detail_message = {"role": "system", "content": detail_context}
-        insert_at = self._after_leading_system_index(new_messages)
-        new_messages.insert(insert_at, detail_message)
-        return new_messages
+        return self._inject_context_messages(
+            messages if isinstance(messages, list) else [],
+            "",
+            f"Memory Detail\n{detail_context}",
+        )
 
     async def _update_persona_after_response(
         self,
@@ -4820,12 +5074,16 @@ class GatewayService:
             route=route,
             upstream_usage=upstream_usage,
         )
-        self._schedule_persona_post_reply_update(
-            session_id,
-            user_message,
-            assistant_message,
-            recalled_ids or [],
-        )
+        if (
+            str((injection_debug or {}).get("request_mode") or "chat") != "keepalive_autonomous"
+            and not self._assistant_message_has_tool_calls(assistant_message)
+        ):
+            self._schedule_persona_post_reply_update(
+                session_id,
+                user_message,
+                assistant_message,
+                recalled_ids or [],
+            )
 
     def _schedule_persona_post_reply_update(
         self,
@@ -6024,6 +6282,11 @@ class GatewayService:
         injection_debug: dict[str, Any] | None = None,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
+        inbound_route = (
+            "/v1/keepalive/completions"
+            if str((injection_debug or {}).get("request_mode") or "") == "keepalive_autonomous"
+            else "/v1/chat/completions"
+        )
         stream_started_at = time.perf_counter()
         upstream_open_started_at = time.perf_counter()
         upstream_response = await self._open_anthropic_upstream_stream(route, payload)
@@ -6049,7 +6312,7 @@ class GatewayService:
                 "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
                 "status=%s error_response=true header_ms=%s body_read_ms=%s total_ms=%s",
                 session_id,
-                "/v1/chat/completions",
+                inbound_route,
                 upstream.get("name"),
                 model,
                 route["upstream_model"],
@@ -6086,7 +6349,7 @@ class GatewayService:
                 await self._finalize_stream_turn(
                     session_id=session_id,
                     model=model,
-                    route="/v1/chat/completions",
+                    route=inbound_route,
                     stream_state=stream_state,
                     recalled_ids=recalled_ids,
                     user_message=user_message,
@@ -6145,7 +6408,7 @@ class GatewayService:
                             "model=%s upstream_model=%s status=%s header_ms=%s "
                             "first_chunk_ms=%s header_to_first_chunk_ms=%s",
                             session_id,
-                            "/v1/chat/completions",
+                            inbound_route,
                             upstream.get("name"),
                             model,
                             route["upstream_model"],
@@ -6203,7 +6466,7 @@ class GatewayService:
                     "status=%s header_ms=%s first_chunk_ms=%s header_to_first_chunk_ms=%s "
                     "body_ms=%s total_ms=%s chunks=%s bytes=%s finalized=%s seen_done=%s",
                     session_id,
-                    "/v1/chat/completions",
+                    inbound_route,
                     upstream.get("name"),
                     model,
                     route["upstream_model"],
@@ -6665,8 +6928,51 @@ class GatewayService:
             if message.get("role") != "user":
                 continue
             content = self._coerce_message_text(message.get("content"))
-            if content.strip():
-                return content.strip()
+            cleaned = self._strip_external_context_from_user_text(content)
+            if cleaned:
+                return cleaned
+        return ""
+
+    def _extract_keepalive_current_turn_query(self, messages: list[dict[str, Any]]) -> str:
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role == "system":
+                continue
+            if role != "user":
+                return ""
+            content = self._coerce_message_text(message.get("content"))
+            memo_contexts = [
+                match.strip()
+                for match in MEMO_CONTEXT_RE.findall(str(content or ""))
+                if match.strip()
+            ]
+            content_without_memos = MEMO_CONTEXT_RE.sub("", str(content or ""))
+            current_instruction = self._strip_external_context_from_user_text(
+                content_without_memos
+            )
+            query_parts = [
+                part
+                for part in [current_instruction, *memo_contexts]
+                if str(part or "").strip()
+            ]
+            if query_parts:
+                return "\n\n".join(query_parts)
+            continue
+        return ""
+
+    @staticmethod
+    def _extract_tool_continuation_key(messages: list[dict[str, Any]]) -> str:
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "tool":
+                tool_call_id = str(message.get("tool_call_id") or "").strip()
+                if tool_call_id:
+                    return tool_call_id
+            if message.get("role") == "user":
+                return ""
         return ""
 
     def _extract_current_turn_user_query(self, messages: list[dict[str, Any]]) -> str:
@@ -6747,7 +7053,14 @@ class GatewayService:
         return ""
 
     def _strip_external_context_from_user_text(self, text: str) -> str:
-        cleaned = WORKSPACE_ATTACHMENT_RE.sub("", str(text or ""))
+        raw_text = str(text or "")
+        lin_messages = re.findall(
+            r"<lin_message>\s*(.*?)\s*</lin_message>",
+            raw_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        cleaned = lin_messages[-1] if lin_messages else raw_text
+        cleaned = WORKSPACE_ATTACHMENT_RE.sub("", cleaned)
         cleaned = EXTERNAL_CONTEXT_ATTACHMENT_RE.sub("", cleaned)
         cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
         cleaned = self._strip_leading_auto_context_markers(cleaned)
@@ -7111,6 +7424,13 @@ class GatewayService:
 
     def _truthy_header(self, value: str | None) -> bool:
         return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _normalize_ombre_request_id(value: Any) -> str:
+        request_id = str(value or "").strip()
+        if not request_id or not OMBRE_REQUEST_ID_RE.fullmatch(request_id):
+            return ""
+        return request_id
 
     def _strip_favorite_memory_marker_from_payload(self, payload: dict) -> tuple[dict, bool]:
         cleaned = deepcopy(payload)
@@ -7816,7 +8136,7 @@ class GatewayService:
             return "", debug
 
         lines = [
-            "Recent Haven Bridge raw chat snippets for an explicit Codex/Bridge/room just-now reference. "
+            "Recent Bridge raw chat snippets for an explicit Codex/Bridge/room just-now reference. "
             "These are original mirrored messages; do not substitute current API-session turns."
         ]
         for event in reversed(selected):
@@ -19108,23 +19428,27 @@ class GatewayService:
         dynamic_context: str,
     ) -> list[dict]:
         new_messages = deepcopy(messages)
-        if stable_context.strip():
-            stable_message = {"role": "system", "content": stable_context}
-            if new_messages and isinstance(new_messages[0], dict) and new_messages[0].get("role") == "system":
-                new_messages.insert(1, stable_message)
-            else:
-                new_messages.insert(0, stable_message)
-        if dynamic_context.strip():
-            current_user_index = self._current_turn_user_index(new_messages)
-            if current_user_index is not None:
-                new_messages[current_user_index] = self._prepend_dynamic_context_to_user_message(
-                    new_messages[current_user_index],
-                    dynamic_context,
-                )
-            else:
-                dynamic_message = {"role": "system", "content": dynamic_context}
-                insert_at = self._after_leading_system_index(new_messages)
-                new_messages.insert(insert_at, dynamic_message)
+        live_context = "\n\n".join(
+            context.strip()
+            for context in (stable_context, dynamic_context)
+            if context.strip()
+        )
+        if not live_context:
+            return new_messages
+
+        current_user_index = self._current_turn_user_index(new_messages)
+        if current_user_index is not None:
+            new_messages[current_user_index] = self._prepend_dynamic_context_to_user_message(
+                new_messages[current_user_index],
+                live_context,
+            )
+        else:
+            context_message = {
+                "role": "system",
+                "content": self._wrap_live_context(live_context),
+            }
+            insert_at = self._after_leading_system_index(new_messages)
+            new_messages.insert(insert_at, context_message)
         return new_messages
 
     def _current_turn_user_index(self, messages: list[dict]) -> int | None:
@@ -19155,20 +19479,90 @@ class GatewayService:
         dynamic_context: str,
     ) -> dict[str, Any]:
         updated = deepcopy(message)
-        prefix = (
-            "<ombre_live_context>\n"
-            f"{dynamic_context}\n"
-            "</ombre_live_context>\n\n"
-            "Current user message:\n"
-        )
+        context = self._sanitize_live_context(dynamic_context)
+        wrapped_context = self._wrap_live_context(dynamic_context)
         content = updated.get("content")
         if isinstance(content, str):
-            updated["content"] = prefix + content
+            if LEADING_OMBRE_LIVE_CONTEXT_RE.match(content):
+                updated["content"] = self._merge_or_prepend_live_context(content, context, wrapped_context)
+            elif "<lin_message>" in content:
+                updated["content"] = f"{wrapped_context}\n\n{content}"
+            else:
+                updated["content"] = (
+                    f"{wrapped_context}\n\n<lin_message>\n{content}\n</lin_message>"
+                )
         elif isinstance(content, list):
-            updated["content"] = [{"type": "text", "text": prefix}, *deepcopy(content)]
+            blocks = deepcopy(content)
+            merged = False
+            has_lin_envelope = any(
+                isinstance(block, dict)
+                and str(block.get("text") or block.get("input_text") or "").find("<lin_message>") >= 0
+                for block in blocks
+            )
+            for block in blocks:
+                if not isinstance(block, dict) or block.get("type") not in {"text", "input_text"}:
+                    continue
+                field = "text" if "text" in block or block.get("type") == "text" else "input_text"
+                text = str(block.get(field) or "")
+                if not LEADING_OMBRE_LIVE_CONTEXT_RE.match(text):
+                    continue
+                block[field] = self._merge_or_prepend_live_context(text, context, wrapped_context)
+                merged = True
+                break
+            if merged:
+                updated["content"] = blocks
+            elif has_lin_envelope:
+                updated["content"] = [{"type": "text", "text": f"{wrapped_context}\n\n"}, *blocks]
+            else:
+                updated["content"] = [
+                    {"type": "text", "text": f"{wrapped_context}\n\n<lin_message>\n"},
+                    *blocks,
+                    {"type": "text", "text": "\n</lin_message>"},
+                ]
         else:
-            updated["content"] = prefix
+            updated["content"] = f"{wrapped_context}\n\n<lin_message>\n\n</lin_message>"
         return updated
+
+    @staticmethod
+    def _merge_or_prepend_live_context(text: str, context: str, prefix: str) -> str:
+        match = LEADING_OMBRE_LIVE_CONTEXT_RE.match(str(text or ""))
+        if not match:
+            return f"{prefix}\n\n{text}"
+        closing_match = re.search(
+            r"</ombre_live_context>",
+            match.group(0),
+            flags=re.IGNORECASE,
+        )
+        if closing_match is None:
+            return f"{prefix}\n\n{text}"
+        closing_start = closing_match.start()
+        existing_body = text[:closing_start].rstrip()
+        return f"{existing_body}\n\n{context}\n{text[closing_start:]}"
+
+    @staticmethod
+    def _sanitize_live_context(context: str) -> str:
+        return (
+            re.sub(
+                r"<(/?)ombre_live_context>",
+                lambda match: (
+                    "&lt;/ombre_live_context&gt;"
+                    if match.group(1)
+                    else "&lt;ombre_live_context&gt;"
+                ),
+                str(context or ""),
+                flags=re.IGNORECASE,
+            )
+            .strip()
+        )
+
+    @staticmethod
+    def _wrap_live_context(context: str) -> str:
+        cleaned = GatewayService._sanitize_live_context(context)
+        return (
+            "<ombre_live_context>\n"
+            f"{cleaned}\n"
+            "</ombre_live_context>"
+        )
 
     def _operit_context_rewrite_debug_base(self) -> dict[str, Any]:
         return {
@@ -20446,6 +20840,12 @@ def create_gateway_app(
     async def chat_completions(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_chat(request)
 
+    async def keepalive_completions(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_chat(
+            request,
+            request_mode="keepalive_autonomous",
+        )
+
     async def anthropic_messages(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_anthropic_messages(request)
 
@@ -20478,6 +20878,7 @@ def create_gateway_app(
             Route("/api/debug/upstream-usage", upstream_usage_debug, methods=["GET"]),
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
+            Route("/v1/keepalive/completions", keepalive_completions, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),
         ],
         lifespan=lifespan,

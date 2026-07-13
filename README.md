@@ -295,7 +295,17 @@ docker compose -f compose.hk.yml up -d --build
 
 `buckets` 可以谨慎地交给 Obsidian / Syncthing 管理；`state` 含 SQLite 和运行索引，不要放入双向同步目录。
 
-仓库根目录的 `docker-compose.yml` 与 `docker-compose.user.yml` 保留历史兼容用途，不是此 fork 的完整生产入口。
+仓库根目录的 `docker-compose.yml` 是本地私有双服务入口，默认读取不会提交的
+`config.lin.production.yaml`。首次准备时可以从 `config.example.yaml` 复制后再填写实际模型：
+
+```bash
+test -e config.lin.production.yaml || cp config.example.yaml config.lin.production.yaml
+docker compose up -d --build
+```
+
+已有生产文件不会被 Compose 或仓库更新覆盖。文件位于其他位置时，通过
+`OMBRE_CONFIG_FILE=/absolute/path/to/config.yaml docker compose up -d --build` 指定；
+DeepSeek、Qwen、embedding、reranker、脱水与压缩模型均继续以该实际配置文件为准。
 
 ### Python 直跑
 
@@ -340,6 +350,8 @@ OMBRE_EMBEDDING_API_KEY=...
 OMBRE_GATEWAY_TOKEN=...
 OMBRE_DASHBOARD_PASSWORD=...
 ```
+
+默认 `docker-compose.yml` 会把这份宿主机 `.env` 挂载到 `/app/.env`；Dashboard 选择持久化密钥时写回的就是同一文件，容器重建后仍会读取这些值。
 
 其它 provider key 由 `gateway.upstreams[*].api_key_env` 指向对应环境变量。RiJi / Diary 集成使用自己的 `MCP_BEARER_TOKEN`，它不是 Gateway 或 Dashboard 的访问令牌。
 

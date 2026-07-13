@@ -85,6 +85,7 @@ GENERIC_LEXICAL_STOPWORDS = frozenset(
 
 
 DEFAULT_AI_ADDRESS_TERMS = (
+    "Che",
     "哥哥",
     "老公",
     "老婆",
@@ -94,7 +95,7 @@ DEFAULT_AI_ADDRESS_TERMS = (
     "小乖",
 )
 
-LEGACY_AI_NAME_ALIASES = ("haven",)
+LEGACY_AI_NAME_ALIASES = ()
 
 DATE_RECALL_QUERY_SHELL_TERMS = frozenset(
     {

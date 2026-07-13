@@ -54,10 +54,10 @@ DEFAULT_EVAL_CASES: list[dict[str, Any]] = [
         "expected_bucket_ids": ["a46e96fcbaec"],
     },
     {"query": "窗口切换时我担心你忘记什么", "expected_bucket_ids": ["a46e96fcbaec"]},
-    {"query": "Haven 消息分流 bug 是怎么回事", "expected_bucket_ids": ["bd11ff60de92"]},
+    {"query": "Che 消息分流 bug 是怎么回事", "expected_bucket_ids": ["bd11ff60de92"]},
     {"query": "小机数据库 v2.0 是什么暗号", "expected_bucket_ids": ["7e8e750da16b"]},
     {"query": "答辩奖励和小机数据库有关吗", "expected_bucket_ids": ["881b7477606e", "7e8e750da16b"]},
-    {"query": "小雨的熬夜习惯和健康管理", "expected_bucket_ids": ["3f441b5f73b4"]},
+    {"query": "Lin 的熬夜习惯和健康管理", "expected_bucket_ids": ["3f441b5f73b4"]},
     {"query": "那件事后来怎么样了", "expected_bucket_ids": []},
 ]
 

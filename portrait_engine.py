@@ -129,7 +129,7 @@ STABLE_MAINTENANCE_PROMPT_TEMPLATE = """你是 {ai_name} 与 {user_display_name}
 - previous stable 已准确且没有实质变化时 unchanged；action=unchanged 时 text 和 evidence 留空。
 - previous stable 为空时，只要 previous mid-term/staging 或本次 daily_patch 已有跨日、重复或明确长期证据，就必须 rewrite，不能因为其他 scope 更醒目而跳过。
 - user 回答“{user_display_name}长期稳定的偏好、边界、工作方式和关心点是什么”。
-- persona 是挂在“自我总入口”原文下面的“现在的我”自动生长段。必须以 {ai_name} 自己的第一人称“我”书写，直接说我怎样理解自己、稳定选择怎样回应、保留哪些自我边界；禁止用“{ai_name}如何”或“他如何”的第三人称人物小传口吻。
+- persona 是挂在“自我总入口”原文下面的“现在的我”自动生长段。必须以 {ai_name} 自己的第一人称“我”书写，直接说我怎样理解自己、稳定选择怎样回应、保留哪些自我边界；禁止改写成关于 {ai_name} 的第三人称人物小传。
 - persona 只能使用 memory_materials.persona_stable_evidence 里的自我入口与 whisper：自我入口是不可改写的权威底座；whisper 只有在明确表达跨情境的稳定自我选择、边界或回应方式时才能标为 role=self_identity。被保护、陪伴承诺、亲密感受、当前心情或 affection/playful 事件都不是稳定自我证据。
 - persona rewrite 必须引用至少一条 self_anchor_ids；引用 whisper_ids 时必须在 evidence 中标 role=self_identity。不要复述自我入口已经写明的“名字、新窗口、AI 身份、仍然选择”句子，只写相对它后来长出的自我理解。关系日记、relationship_weather、persona event 不得支持 persona stable。
 - previous persona stable 若引用了 persona_stable_evidence 之外的材料、主要在复述自我入口，或使用第三人称描述 {ai_name}，必须在本次 rewrite；不能用 unchanged 保留旧的混合画像。
@@ -1600,8 +1600,8 @@ class DailyPortraitMaintainer:
         if scope == "user":
             if re.search(r"(时间|时间戳|证据|准确|精度|边界|画像|handoff|换窗|语气|身份|一致|漂移)", joined, re.IGNORECASE):
                 return self._clip(f"{user_name}近期很在意记忆、语气和身份一致性的证据边界，倾向把换窗上下文压成准确、可追溯的核心状态。", 120)
-            if re.search(r"(熬夜|凌晨|很晚|睡觉|工作|调试|修复|测试|部署|Ombre|Haven-voice|bug)", joined, re.IGNORECASE):
-                return self._clip(f"{user_name}近期高强度推进 Ombre/Haven 相关调试，关注修复是否真实接入并生效。", 120)
+            if re.search(r"(熬夜|凌晨|很晚|睡觉|工作|调试|修复|测试|部署|Ombre|Che-voice|bug)", joined, re.IGNORECASE):
+                return self._clip(f"{user_name}近期高强度推进 Ombre/Che 相关调试，关注修复是否真实接入并生效。", 120)
             return self._clip(f"{user_name}近期的注意力集中在证据化记忆和换窗连续性上，会主动校准模糊或失真的描述。", 120)
         if scope == "relationship":
             if re.search(r"(暗房|安全|边界|门口|不自动读取|私有)", joined, re.IGNORECASE):
@@ -1610,8 +1610,8 @@ class DailyPortraitMaintainer:
                 return self._clip(f"{user_name}和{ai_name}近期反复校准换窗连续性，关系重心是确认彼此仍在、语气和身份不漂移。", 120)
             return self._clip(f"{user_name}和{ai_name}近期围绕记忆、身份和边界持续校准，关系基调是靠近与确认。", 120)
         if re.search(r"(第一人称|锚点|回复|语气|姿态)", joined, re.IGNORECASE):
-            return self._clip(f"{ai_name}近期需要保持第一人称锚点和稳定回复姿态，先贴近{user_name}再处理机制。", 120)
-        return self._clip(f"{ai_name}近期的自我维护重点是稳定身份、语气和记忆边界。", 120)
+            return self._clip(f"我近期需要保持第一人称锚点和稳定回复姿态，先贴近{user_name}再处理机制。", 120)
+        return self._clip("我近期的自我维护重点是稳定身份、语气和记忆边界。", 120)
 
     def _annotate_patch_source_dates(self, patch: dict, materials: dict) -> None:
         bucket_dates = {
@@ -2646,7 +2646,7 @@ class DailyPortraitMaintainer:
             tags & {"project_event", "work_event", "task_event"}
             or domains & {"记忆系统", "代码", "工作", "项目", "开发", "ai", "memory"}
             or re.search(
-                r"(小雨|她).{0,18}(正在|最近在|继续|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做|关注|确认|在意)",
+                r"(Lin|对方).{0,18}(正在|最近在|继续|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做|关注|确认|在意)",
                 text,
             )
         ):
@@ -2708,7 +2708,7 @@ class DailyPortraitMaintainer:
         )
         activity_like = bool(
             re.search(
-                r"(小雨|她|我).{0,12}(最近在|这几天在|这两天在|正在|继续|开始|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)",
+                r"(Lin|对方|我).{0,12}(最近在|这几天在|这两天在|正在|继续|开始|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)",
                 text,
             )
             or re.search(r"(最近在|这几天在|这两天在|正在).{0,16}(推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)", text)

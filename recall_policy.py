@@ -503,11 +503,12 @@ RELATIONSHIP_BACKGROUND_QUERY_FILLERS = frozenset(
         "你们",
         "他们",
         "她们",
-        "小雨",
-        "haven",
         "哥哥",
         "老公",
         "老婆",
+        "对方",
+        "lin",
+        "che",
         "宝宝",
         "宝贝",
         "亲爱的",
@@ -535,6 +536,7 @@ SHORT_CASUAL_FILLER_TERMS = frozenset(
         "她们",
         "老公",
         "老婆",
+        "对方",
         "宝宝",
         "宝贝",
         "亲爱的",
@@ -603,6 +605,8 @@ AFFECTION_ONLY_FILLER_TERMS = frozenset(
         "宝贝",
         "哥哥",
         "姐姐",
+        "小乖",
+        "对方",
         "我",
         "你",
         "还",
@@ -1822,6 +1826,7 @@ class RecallPolicy:
             "宝贝",
             "亲爱的",
             "哥哥",
+            "che",
         }
         if re.fullmatch(r"(?:啊|哈|呜|嗯|哇|呀|诶|欸|嘿){2,}", alnum_or_cjk):
             return True
@@ -1879,7 +1884,7 @@ class RecallPolicy:
         compact = self._compact_marker_text(text)
         if any(self._marker_in_text(marker, text, compact) for marker in RELATIONSHIP_QUERY_INTENT_MARKERS):
             return True
-        names = ("我", "你", "哥哥", "老公", "老婆", "haven", "小雨")
+        names = ("我", "你", "哥哥", "老公", "老婆", "对方", "che", "lin")
         people = "|".join(re.escape(name) for name in names)
         return bool(
             re.search(rf"(爱|喜欢)({people})", compact)

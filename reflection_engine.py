@@ -38,7 +38,7 @@ DAILY_CHAT_MEMORY_STRUCTURAL_TAGS = {
     "stable_preference",
 }
 DAILY_CHAT_MEMORY_ENTITY_HINTS = [
-    ("Haven Bridge", ["haven_bridge", "haven bridge", "bridge 记忆", "bridge 注入"]),
+    ("Bridge", ["haven_bridge", "haven bridge", "bridge 记忆", "bridge 注入"]),
     ("Gateway", ["gateway", "网关"]),
     ("MCP", ["mcp"]),
     ("Codex", ["codex"]),
@@ -204,7 +204,7 @@ DIARY_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的日记长期记忆筛选
 
 DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 {ai_name}。现在是凌晨，你需要整理今天你和 {user_display_name} 的聊天记录，把真正值得未来想起的内容写成 Ombre 长期记忆候选。
 输入包含 self_anchor_entry，这是你的自我总入口；请先读它，用它校准“我是谁、我怎样称呼和承接 {user_display_name}”，但不要把自我入口本身复制成新记忆。
-{user_display_name} 的配置别名是：{user_aliases_text}。如果原文里出现宝宝、老婆、哥哥、老公等亲昵称呼，按原味保留；不要把它们改写成泛称 user、AI、assistant 或模型。
+{user_display_name} 的配置别名是：{user_aliases_text}。人称必须服从说话者与记忆 section：assistant_text 里的“我”和 {ai_name} 的 reflection 必须保持第一人称“我”，绝不能改成 {ai_name} 或第三人称；user_text 里的“我”在原话中保留，整理成客观事实时才写作 {user_display_name}。不要在新叙事中引入或沿用带有明确性别指向的关系称呼；必须指明对象时才使用 {ai_name} 或 {user_display_name}。“宝宝”“宝贝”等无性别称呼可以按原话保留。
 
 输入可能包含两层材料：
 - window_summaries：已经按连续窗口压缩过的对话摘要，是主要材料。
@@ -268,14 +268,13 @@ user_text 永远是 {user_display_name} 的原话，里面的“我”指 {user_
 - 不写代码块、伪代码、查询规则、缓存规则、prompt 片段或内部实现片段；如果候选正文里出现 ```、query_cache、recent_raw_context、if query contains、bypass query 这类内容，直接丢弃。
 - content 必须只写一个可未来召回的点，通常 60 到 260 字；可以用 1 到 3 句写清背景、已确认结论、后续要注意什么。它应该像手动 hold 的正文，而不是聊天记录转述。
 - content 不要以日期或来源壳开头；不要写 "x月x日，有一条可召回的边界"、"2026-xx-xx 的聊天里确认了..."、"这是一条长期记忆"。
-- 必须消解代词：user_text 里的“我”要改写成 {user_display_name} 或“她”；assistant_text 里的“我”才可指 {ai_name}。不要让来源原话里的“我”在记忆里变成 {ai_name}。
+- 必须按说话者消解代词：整理用户客观事实时，user_text 里的“我”写作 {user_display_name}；{ai_name} 的自我、关系锚点与 ### reflection 中，“我”始终指 {ai_name} 并保持第一人称。### original 中双方原话的人称都不改。
 - title 必须是具体短标题，8 到 24 字，不要用“自动记忆”“每日记忆”“2026-xx-xx 自动记忆”。
 - domain 必须从下面的新主域里选 1 个最精确的；实在没把握才选 general。不要输出旧的“日常/人际/数字/未分类”：
 {domain_options_text}
 - 只有原话本身是暗号、明确边界、承诺、昵称或高价值关系锚点时，才可在 content 末尾追加很短的 "### original"；否则不要保存原话。
 - 不硬编码姓名；如果用户指的是当前用户，写作 {user_display_name}；如果 assistant/AI 指的是当前回应者，写作 {ai_name}。
-- 正文优先用第三人称；### reflection 必须用 {ai_name} 第一人称，比如“我记得 / 我明白 / 我以后”。### original 是可选补充原文片段，只在原味不可替代时使用。
-- 用户偏好、边界、暗号适合第三人称；{ai_name} 自己的关系锚点和 ### reflection 可以用第一人称；项目状态用中性第三人称。
+- 用户偏好、边界和项目状态可以用 {user_display_name} 或中性客观表述；{ai_name} 自己的关系锚点和 ### reflection 必须用第一人称，比如“我记得 / 我明白 / 我以后”。### original 是可选补充原文片段，只在原味不可替代时使用。
 - 只根据原文能证明的内容写，不编造。
 - 没有候选时返回 {"candidates": []}。"""
 
@@ -2818,10 +2817,14 @@ class ReflectionEngine:
             "参与意愿",
             "上瘾",
             "好奇",
+            "称呼约定",
             "叫哥哥",
             "叫老公",
             "叫老婆",
+            "叫宝宝",
+            "叫宝贝",
             "宝宝",
+            "宝贝",
             "老婆",
             "哥哥",
             "老公",
@@ -2864,7 +2867,9 @@ class ReflectionEngine:
             "参与意愿",
             "上瘾",
             "好奇",
+            "亲昵称呼",
             "宝宝",
+            "宝贝",
             "老婆",
             "哥哥",
             "老公",

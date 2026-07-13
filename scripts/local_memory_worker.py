@@ -69,12 +69,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     runtime_config = load_config()
     default_state = Path(runtime_config["state_dir"]) / "local_memory_worker.json"
     parser = argparse.ArgumentParser(
-        description="Select durable Haven Bridge chat moments and write them into Ombre memory."
+        description="Select durable Bridge chat moments and write them into Ombre memory."
     )
     parser.add_argument(
         "--bridge-db",
         default=os.environ.get("OMBRE_LOCAL_MEMORY_BRIDGE_DB", str(DEFAULT_BRIDGE_DB)),
-        help="Path to Haven Bridge haven.db.",
+        help="Path to the Bridge haven.db.",
     )
     parser.add_argument(
         "--state-file",
@@ -97,7 +97,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Environment variable name holding the selector API key.",
     )
     parser.add_argument("--limit", type=int, default=40, help="Max bridge messages to inspect per run.")
-    parser.add_argument("--session-id", type=int, default=0, help="Restrict to one Haven Bridge session id.")
+    parser.add_argument("--session-id", type=int, default=0, help="Restrict to one Bridge session id.")
     parser.add_argument("--since-id", type=int, default=None, help="Override checkpoint and read messages after id.")
     parser.add_argument("--max-items", type=int, default=3, help="Max memories the selector may return.")
     parser.add_argument("--timeout-seconds", type=int, default=45)
@@ -161,7 +161,7 @@ def read_bridge_messages(
     session_id: int = 0,
 ) -> list[dict[str, Any]]:
     if not db_path.exists():
-        raise WorkerError(f"Haven Bridge db not found: {db_path}")
+        raise WorkerError(f"Bridge db not found: {db_path}")
 
     params: list[Any] = []
     clauses = ["((role = 'user' AND source = 'chat') OR (role = 'assistant' AND source = 'codex'))"]
@@ -215,7 +215,7 @@ def build_selector_prompt(messages: list[dict[str, Any]], max_items: int) -> str
     return "\n".join(
         [
             "你是 Ombre-Brain 的本地记忆筛选 worker。",
-            "任务：从 Haven Bridge 最近聊天里挑出值得写入长期记忆的片段。",
+            "任务：从 Bridge 最近聊天里挑出值得写入长期记忆的片段。",
             "",
             "只写这些内容：稳定偏好、明确边界、承诺/待办、仍会影响未来执行的项目状态、关系连续性锚点、称呼/暗号/重要约定。",
             "不要写：普通撒娇、问候、临时情绪、已过期的调试过程、命令输出、重复爱意、没有未来价值的聊天流水。",

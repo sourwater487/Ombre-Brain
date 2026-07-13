@@ -3807,8 +3807,8 @@ let bucketSortMode = 'time';
 let bucketSortDescending = true;
 let bucketBulkMode = false;
 let selectedBucketIds = new Set();
-let dashboardCommentAuthor = 'Rain';
-let dashboardAiAuthor = 'Haven';
+let dashboardCommentAuthor = 'Lin';
+let dashboardAiAuthor = 'Che';
 let reflectionSelectedDate = formatLocalDate(new Date());
 let reflectionCurrentMonth = monthStart(new Date());
 let configSnapshot = null;
@@ -4728,7 +4728,7 @@ async function loadDreams() {
       return;
     }
     content.innerHTML = '<div class="dream-list">' + records.map(function(record) {
-      var aiName = record.ai_name || dashboardAiAuthor || 'Haven';
+      var aiName = record.ai_name || dashboardAiAuthor || 'Che';
       var title = formatDreamDate(record) + ' ' + esc(aiName) + ' 做了一个梦';
       if (!record.has_body) {
         return '<div class="dream-row"><div class="dream-row-static">' +

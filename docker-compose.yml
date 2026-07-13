@@ -1,48 +1,83 @@
-# ============================================================
-# Ombre Brain Docker Compose
-# Docker Compose 配置
-#
-# Usage / 使用：
-#   1. Create .env: echo "OMBRE_API_KEY=your-key" > .env
-#      创建 .env 文件
-#   2. docker-compose up -d
-#   3. docker compose logs tunnel (for public URL / 查看公网地址)
-# ============================================================
-
 services:
   ombre-brain:
     build: .
     container_name: ombre-brain
     restart: unless-stopped
-    ports:
-      - "18001:8000"                        # Local debug port (optional) / 本地调试端口
-    environment:
-      - OMBRE_API_KEY=${OMBRE_API_KEY}      # From .env file / 从 .env 文件读取
-      - OMBRE_TRANSPORT=streamable-http     # Claude.ai requires streamable-http
-      - OMBRE_BUCKETS_DIR=/data             # Container-internal bucket path / 容器内路径
-    volumes:
-      # Mount your Obsidian vault (or any host directory) for persistent storage
-      # 挂载你的 Obsidian 仓库（或任意宿主机目录）做持久化存储
-      # Example / 示例:
-      #   - /path/to/your/Obsidian Vault/Ombre Brain:/data
-      - /Users/p0lar1s/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian Vault/Ombre Brain:/data
-      - ./config.yaml:/app/config.yaml
+    command: ["python", "server.py"]
+    env_file:
+      - .env
 
-  # Cloudflare Tunnel (optional) — expose to public internet
-  # Cloudflare Tunnel（可选）— 暴露到公网
-  # Configure your own credentials under ~/.cloudflared/
-  # 在 ~/.cloudflared/ 下放你自己的凭证
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    container_name: ombre-tunnel
-    restart: unless-stopped
-    command: >
-      tunnel --no-autoupdate --protocol http2
-      --config /etc/cloudflared/config.yml
-      --proxy-keepalive-timeout 300s
-      --proxy-connection-timeout 300s
-      run
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+    ports:
+      - "127.0.0.1:8789:8000"
+    environment:
+      OMBRE_CONFIG_PATH: /app/config.lin.production.yaml
+      OMBRE_TRANSPORT: streamable-http
+      OMBRE_BUCKETS_DIR: /app/data/buckets
+      OMBRE_STATE_DIR: /app/data/buckets/state
+      OMBRE_RUNTIME_CONFIG_PATH: /app/data/buckets/state/config.runtime.yaml
+      OMBRE_ENV_PATH: /app/.env
+      OMBRE_GATEWAY_ADMIN_URL: http://ombre-gateway:8010/api/config
     volumes:
-      - ~/.cloudflared:/etc/cloudflared
+      # Keep the real production config local. Override OMBRE_CONFIG_FILE when
+      # the file lives elsewhere; the repository never replaces that file.
+      - "${OMBRE_CONFIG_FILE:-./config.lin.production.yaml}:/app/config.lin.production.yaml:ro"
+      # Dashboard API-key changes persist back to the same host env_file.
+      - ./.env:/app/.env
+      - ./data/buckets:/app/data/buckets
     depends_on:
-      - ombre-brain
+      - ombre-gateway
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
+        ]
+      interval: 60s
+      timeout: 8s
+      retries: 3
+      start_period: 30s
+
+  ombre-gateway:
+    build: .
+    container_name: ombre-gateway
+    restart: unless-stopped
+    command: ["python", "gateway.py"]
+    env_file:
+      - .env
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+    ports:
+      - "127.0.0.1:8790:8010"
+    environment:
+      OMBRE_CONFIG_PATH: /app/config.lin.production.yaml
+      OMBRE_BUCKETS_DIR: /app/data/buckets
+      OMBRE_STATE_DIR: /app/data/buckets/state
+      OMBRE_RUNTIME_CONFIG_PATH: /app/data/buckets/state/config.runtime.yaml
+    volumes:
+      - "${OMBRE_CONFIG_FILE:-./config.lin.production.yaml}:/app/config.lin.production.yaml:ro"
+      - ./data/buckets:/app/data/buckets
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5).read()",
+        ]
+      interval: 60s
+      timeout: 8s
+      retries: 3
+      start_period: 30s

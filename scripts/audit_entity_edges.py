@@ -41,8 +41,8 @@ GENERIC_OBJECT_KEYS = {
     "故事",
     "暗号",
     "未来",
-    "小雨",
-    "haven",
+    "lin",
+    "che",
 }
 
 

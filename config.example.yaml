@@ -27,15 +27,14 @@ log_level: "INFO"
 # state_dir: "/path/to/ombre-brain/state"
 
 # --- Identity / 名字口径 ---
-# These names are used in prompts and comment authors. Change this block first
-# when adapting the fork for another person/persona.
-# 这些名字会进入提示词和年轮作者。改给别人用时优先改这一块。
+# These values document the private-fork identity. Runtime identity resolution
+# is locked to Che/Lin and ignores attempted overrides.
+# 这些值记录私有分支身份；运行时固定为 Che/Lin，不接受覆盖。
 identity:
-  ai_name: "AI"                 # MCP-authored year rings and assistant wording
-  user_name: "User"             # Dashboard-authored year rings
-  user_display_name: "用户"      # How prompts refer to the human partner
-  user_aliases:
-    - "对方"
+  ai_name: "Che"                # Fixed in this private fork
+  user_name: "Lin"              # Fixed in this private fork
+  user_display_name: "Lin"      # Fixed in this private fork
+  user_aliases: []
 
 # --- Merge threshold / 桶合并阈值 ---
 # When storing a new memory, if similarity with an existing bucket exceeds
@@ -300,6 +299,7 @@ gateway:
   port: 8010
   default_session_id: "main"      # used only by compatible routes when the header is omitted
   upstream_base_url: "https://api.openai.com/v1"
+  upstream_protocol: "openai"
   upstream_default_model: "gpt-4.1-mini"
   upstream_models:
     - "gpt-4.1-mini"
@@ -311,7 +311,7 @@ gateway:
   # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；
   # anthropic: 给只认顶层 cache_control 的中转站使用；
   # anthropic_explicit: 在 system/tools/上一条 assistant 历史上显式打断点。
-  prompt_cache: "openai"
+  prompt_cache: ""
   # prompt_cache_retention: "24h"  # Optional for supported OpenAI models / 支持模型可选
   # Optional multi-upstream mode / 可选多上游模式
   # When upstreams is set, the gateway aggregates all listed models and routes

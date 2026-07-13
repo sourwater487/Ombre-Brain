@@ -18,8 +18,8 @@
 #                   只读浮现久未触碰的旧记忆
 #       comment_bucket — Add a ring comment to a memory
 #                        给记忆追加年轮
-#       delete_bucket_comment — Delete one Haven-authored ring comment
-#                               删除一条 Haven 自己写的年轮
+#       delete_bucket_comment — Delete one Che-authored ring comment
+#                               删除一条 Che 自己写的年轮
 #       hold   — Store a single memory
 #                存储单条记忆
 #       grow   — Long-note memory digest, auto-split selected content into buckets
@@ -52,6 +52,7 @@ import re
 import secrets
 import time
 from base64 import b64decode
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -474,13 +475,33 @@ def _dashboard_gateway_upstreams_payload(gateway_cfg: dict) -> list[dict]:
     return payload
 
 
-async def _hot_update_gateway_config(gateway_payload: dict) -> str | None:
+def _expected_gateway_hot_update_paths(gateway_payload: dict) -> set[str]:
+    expected = set()
+    for section, section_payload in (gateway_payload or {}).items():
+        if not isinstance(section_payload, dict):
+            continue
+        for key in section_payload:
+            expected.add(f"{section}.{key}")
+    return expected
+
+
+async def _hot_update_gateway_config(gateway_payload: dict) -> dict:
     if not gateway_payload:
-        return None
+        return {"ok": True, "attempted": False, "status": "gateway_hot_reload_not_needed"}
     admin_url = os.environ.get("OMBRE_GATEWAY_ADMIN_URL", "").strip()
     token = os.environ.get("OMBRE_GATEWAY_TOKEN", "").strip()
     if not admin_url or not token:
-        return None
+        missing = []
+        if not admin_url:
+            missing.append("OMBRE_GATEWAY_ADMIN_URL")
+        if not token:
+            missing.append("OMBRE_GATEWAY_TOKEN")
+        return {
+            "ok": False,
+            "attempted": False,
+            "status": "gateway_hot_reload_not_configured",
+            "error": f"missing {', '.join(missing)}",
+        }
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.post(
@@ -489,11 +510,117 @@ async def _hot_update_gateway_config(gateway_payload: dict) -> str | None:
                 json=gateway_payload,
             )
         if response.status_code >= 400:
-            return f"gateway_hot_reload_failed:{response.status_code}"
-        return "gateway_hot_reloaded"
+            return {
+                "ok": False,
+                "attempted": True,
+                "status": "gateway_hot_reload_failed",
+                "error": f"gateway returned HTTP {response.status_code}",
+                "http_status": response.status_code,
+            }
+        try:
+            response_payload = response.json()
+        except Exception:
+            response_payload = None
+        if not isinstance(response_payload, dict) or response_payload.get("ok") is not True:
+            return {
+                "ok": False,
+                "attempted": True,
+                "status": "gateway_hot_reload_invalid_response",
+                "error": "gateway did not confirm the config update",
+                "http_status": response.status_code,
+            }
+        confirmed_updates = {
+            str(item)
+            for item in response_payload.get("updated", [])
+            if str(item or "").strip()
+        }
+        missing_updates = sorted(
+            _expected_gateway_hot_update_paths(gateway_payload) - confirmed_updates
+        )
+        if missing_updates:
+            return {
+                "ok": False,
+                "attempted": True,
+                "status": "gateway_hot_reload_incomplete",
+                "error": "gateway did not confirm every requested config field",
+                "http_status": response.status_code,
+                "missing_updates": missing_updates,
+            }
+        return {
+            "ok": True,
+            "attempted": True,
+            "status": "gateway_hot_reloaded",
+            "http_status": response.status_code,
+            "updated": sorted(confirmed_updates),
+        }
     except Exception as exc:
         logger.warning("Gateway hot config update failed: %s", exc)
-        return f"gateway_hot_reload_failed:{type(exc).__name__}"
+        return {
+            "ok": False,
+            "attempted": True,
+            "status": "gateway_hot_reload_failed",
+            "error": type(exc).__name__,
+        }
+
+
+_DASHBOARD_RUNTIME_ENV_KEYS = (
+    "OMBRE_DOMAIN_SENTINEL_API_KEY",
+    "OMBRE_DREAM_API_KEY",
+    "OMBRE_DREAM_BASE_URL",
+    "OMBRE_DREAM_MODEL",
+    "OMBRE_PERSONA_API_KEY",
+    "OMBRE_PERSONA_BASE_URL",
+    "OMBRE_PERSONA_MODEL",
+    "OMBRE_PORTRAIT_API_KEY",
+    "OMBRE_PORTRAIT_BASE_URL",
+    "OMBRE_PORTRAIT_MODEL",
+    "OMBRE_REFLECTION_API_KEY",
+    "OMBRE_REFLECTION_BASE_URL",
+    "OMBRE_REFLECTION_MODEL",
+    "OMBRE_RERANKER_API_KEY",
+    "OMBRE_RERANKER_BASE_URL",
+    "OMBRE_RERANKER_ENABLED",
+    "OMBRE_RERANKER_MODEL",
+)
+
+
+def _snapshot_dashboard_runtime_state() -> dict:
+    return {
+        "config": deepcopy(config),
+        "env": {key: os.environ.get(key) for key in _DASHBOARD_RUNTIME_ENV_KEYS},
+    }
+
+
+def _restore_dashboard_runtime_state(snapshot: dict, touched_sections) -> None:
+    global dehydrator, embedding_engine, reranker_engine
+    global persona_engine, reflection_engine, portrait_engine, dream_engine
+
+    restored_config = deepcopy(snapshot.get("config") or {})
+    config.clear()
+    config.update(restored_config)
+    for key, value in (snapshot.get("env") or {}).items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+    touched = set(touched_sections or [])
+    if "dehydration" in touched:
+        dehydrator = Dehydrator(config)
+        import_engine.dehydrator = dehydrator
+    if "embedding" in touched:
+        embedding_engine = EmbeddingEngine(config)
+        import_engine.embedding_engine = embedding_engine
+    if "reranker" in touched:
+        reranker_engine = RerankerEngine(config)
+    if "persona" in touched:
+        persona_engine = PersonaStateEngine(config)
+    if "reflection" in touched:
+        reflection_engine = ReflectionEngine(config)
+    if "portrait" in touched:
+        portrait_engine = DailyPortraitMaintainer(config)
+    if "dream" in touched:
+        dream_engine = DreamEngine(config)
 
 
 def _gateway_debug_injections_url() -> str:
@@ -1121,7 +1248,7 @@ def _breath_query_requests_date_read(query: str) -> bool:
 def _strip_breath_date_query_shell(query: str) -> str:
     text = strip_human_date_references(query)
     shell_terms = {
-        "我们", "咱们", "哥哥", "宝宝", "老婆", "我", "你",
+        "我们", "咱们", "哥哥", "老婆", "对方", "宝宝", "宝贝", "亲爱的", "小乖", "我", "你",
         "还记得", "记不记得", "记得", "想起", "想起来", "回忆", "记忆",
         "在聊什么", "聊了什么", "聊什么", "聊过什么", "说了什么", "说什么",
         "提到什么", "讲了什么", "讨论什么", "做了什么", "发生了什么",
@@ -8022,7 +8149,7 @@ async def comment_bucket(
 # =============================================================
 @mcp.tool()
 async def delete_bucket_comment(bucket_id: str, comment_id: str) -> dict:
-    """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除小雨/dashboard 写的年轮。"""
+    """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除 Lin/dashboard 写的年轮。"""
     bucket_id = _coerce_memory_id(bucket_id)
     comment_id = _coerce_memory_id(comment_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
@@ -8475,7 +8602,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
 
 @mcp.tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection。需要之后轻轻提醒/照顾备忘的事项用 reminder_create，不写进长期记忆。feel 年轮只写第一人称感受，不写分段标题。"""
+    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。无性别称呼、自称和原话可以保留，不把临时称呼推成稳定画像事实；Che 的自我与 reflection 始终使用第一人称。title 可选，短内容时传了就用给定标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection。需要之后轻轻提醒/照顾备忘的事项用 reminder_create，不写进长期记忆。feel 年轮只写第一人称感受，不写分段标题。"""
     await decay_engine.ensure_started()
 
     if not content or not content.strip():
@@ -9101,10 +9228,12 @@ PROFILE_FACT_CANDIDATE_PATTERN_SPECS = (
 BASE_NOISY_PROFILE_OBJECT_KEYS = {
     "哥哥",
     "老公",
+    "老婆",
+    "对方",
     "宝宝",
     "宝贝",
-    "老婆",
     "亲爱的",
+    "小乖",
     "你",
     "你啦",
     "你呀",
@@ -11841,9 +11970,29 @@ async def api_config_update(request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid config"}, status_code=400)
+
+    for section in (
+        "dehydration",
+        "embedding",
+        "reranker",
+        "gateway",
+        "self_anchor",
+        "recall",
+        "memory_diffusion",
+        "persona",
+        "reflection",
+        "portrait",
+        "dream",
+    ):
+        if section in body and not isinstance(body[section], dict):
+            return JSONResponse({"error": f"invalid {section} config"}, status_code=400)
 
     updated = []
     env_updates: dict[str, str] = {}
+    runtime_snapshot = _snapshot_dashboard_runtime_state()
+    touched_sections = {key for key in body if isinstance(key, str)}
 
     def _memory_diffusion_dashboard_config(payload) -> dict:
         if not isinstance(payload, dict):
@@ -11910,31 +12059,40 @@ async def api_config_update(request):
                 api_key=dehydrator.api_key,
                 base_url=dehydrator.base_url,
             )
-        gateway_hot_update_payload["dehydration"] = {
+        dehydration_gateway_payload = {
             "model": dehydrator.model,
             "base_url": dehydrator.base_url,
-            "api_key": dehydrator.api_key,
             "thinking_mode": dehy.get("thinking_mode", ""),
             "max_tokens": dehy.get("max_tokens", 1024),
             "temperature": dehy.get("temperature", 0.1),
         }
+        if dehydrator.api_key:
+            dehydration_gateway_payload["api_key"] = dehydrator.api_key
+        gateway_hot_update_payload["dehydration"] = dehydration_gateway_payload
 
     # --- Embedding config ---
     if "embedding" in body:
         e = body["embedding"]
+        if not isinstance(e, dict):
+            return JSONResponse({"error": "invalid embedding config"}, status_code=400)
         emb = config.setdefault("embedding", {})
+        embedding_gateway_payload = {}
         if "enabled" in e:
-            emb["enabled"] = bool(e["enabled"])
+            emb["enabled"] = _bool_value(e["enabled"], True)
+            embedding_gateway_payload["enabled"] = emb["enabled"]
             updated.append("embedding.enabled")
         if "model" in e:
-            emb["model"] = e["model"]
+            emb["model"] = str(e["model"] or "").strip()
+            embedding_gateway_payload["model"] = emb["model"]
             updated.append("embedding.model")
         if "base_url" in e:
-            emb["base_url"] = e["base_url"]
+            emb["base_url"] = str(e["base_url"] or "").strip()
+            embedding_gateway_payload["base_url"] = emb["base_url"]
             updated.append("embedding.base_url")
         if "api_key" in e and e["api_key"]:
-            emb["api_key"] = e["api_key"]
+            emb["api_key"] = str(e["api_key"])
             env_updates["OMBRE_EMBEDDING_API_KEY"] = str(e["api_key"])
+            embedding_gateway_payload["api_key"] = emb["api_key"]
             updated.append("embedding.api_key")
 
         # Hot-reload embedding client; falls back to dehydration key/base_url when unset.
@@ -11955,6 +12113,8 @@ async def api_config_update(request):
             )
         else:
             embedding_engine.client = None
+        if embedding_gateway_payload:
+            gateway_hot_update_payload["embedding"] = embedding_gateway_payload
 
     # --- Merge threshold ---
     if "merge_threshold" in body:
@@ -12468,9 +12628,41 @@ async def api_config_update(request):
             os.environ["OMBRE_DREAM_MODEL"] = str(dream_cfg["model"])
         dream_engine = DreamEngine(config)
 
-    hot_update_status = await _hot_update_gateway_config(gateway_hot_update_payload)
-    if hot_update_status:
-        updated.append(hot_update_status)
+    gateway_hot_update = await _hot_update_gateway_config(gateway_hot_update_payload)
+    if gateway_hot_update_payload and not gateway_hot_update.get("ok", False):
+        attempted_updates = list(updated)
+        try:
+            _restore_dashboard_runtime_state(runtime_snapshot, touched_sections)
+        except Exception as rollback_exc:
+            logger.exception("Dashboard config rollback failed: %s", rollback_exc)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "gateway hot reload failed and server rollback failed",
+                    "updated": [],
+                    "attempted_updates": attempted_updates,
+                    "gateway_hot_update": gateway_hot_update,
+                    "rolled_back": False,
+                    "rollback_error": type(rollback_exc).__name__,
+                },
+                status_code=500,
+            )
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    "gateway config apply failed: "
+                    f"{gateway_hot_update.get('error') or gateway_hot_update.get('status') or 'unknown error'}"
+                ),
+                "updated": [],
+                "attempted_updates": attempted_updates,
+                "gateway_hot_update": gateway_hot_update,
+                "rolled_back": True,
+            },
+            status_code=502,
+        )
+    if gateway_hot_update.get("attempted"):
+        updated.append(gateway_hot_update["status"])
 
     # --- Persist to config.yaml if requested ---
     if body.get("persist", False):
@@ -12932,7 +13124,7 @@ async def api_config_update(request):
                 status_code=500,
             )
 
-    return JSONResponse({"updated": updated, "ok": True})
+    return JSONResponse({"updated": updated, "ok": True, "gateway_hot_update": gateway_hot_update})
 
 
 @mcp.custom_route("/api/status", methods=["GET"])
