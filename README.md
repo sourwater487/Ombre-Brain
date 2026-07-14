@@ -295,17 +295,19 @@ docker compose -f compose.hk.yml up -d --build
 
 `buckets` 可以谨慎地交给 Obsidian / Syncthing 管理；`state` 含 SQLite 和运行索引，不要放入双向同步目录。
 
-仓库根目录的 `docker-compose.yml` 是本地私有双服务入口，默认读取不会提交的
-`config.lin.production.yaml`。首次准备时可以从 `config.example.yaml` 复制后再填写实际模型：
+仓库根目录的 `docker-compose.yml` 是生产双服务入口，默认读取仓库内跟踪的
+`config.lin.production.yaml`。该文件保存生产模型与行为参数，但不保存明文 API key、
+token 或密码；敏感凭据继续放在不会提交的 `.env` 中：
 
 ```bash
-test -e config.lin.production.yaml || cp config.example.yaml config.lin.production.yaml
+test -f config.lin.production.yaml
 docker compose up -d --build
 ```
 
-已有生产文件不会被 Compose 或仓库更新覆盖。文件位于其他位置时，通过
+需要在服务器维护独立配置时，通过
 `OMBRE_CONFIG_FILE=/absolute/path/to/config.yaml docker compose up -d --build` 指定；
 DeepSeek、Qwen、embedding、reranker、脱水与压缩模型均继续以该实际配置文件为准。
+Compose 会在配置文件缺失时直接报错，不会再创建同名目录。
 
 ### Python 直跑
 

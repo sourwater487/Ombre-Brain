@@ -1,0 +1,25 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Runtime configuration is bind-mounted by Compose, never baked into images.
+config.yaml
+config.lin.production.yaml
+config.runtime.yaml
+compose.local.yml
+
+# Runtime data and local development artifacts.
+data/
+buckets/
+state/
+backups/
+__pycache__/
+*.py[cod]
+*.log
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

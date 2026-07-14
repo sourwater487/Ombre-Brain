@@ -1,0 +1,581 @@
+# ============================================================
+# Ombre Brain Configuration / 配置文件
+# Copy this file to config.yaml and modify as needed
+# 复制此文件为 config.yaml 后按需修改
+# ============================================================
+
+# --- Transport / 传输方式 ---
+# stdio: local use (Claude Desktop, direct pipe)
+# streamable-http: remote use (HTTP, tunnel/CDN/proxy friendly)
+# stdio: 本地使用（Claude Desktop，直接管道通信）
+# streamable-http: 远程使用（标准 HTTP，对隧道/CDN/代理友好）
+transport: "stdio"
+
+# --- Log level / 日志级别 ---
+log_level: "INFO"
+
+# --- Bucket storage path / 记忆桶存储路径 ---
+# Point this to your Obsidian vault subdirectory, or any local folder
+# 指向你的 Obsidian 仓库子目录，或任意本地文件夹
+# Leave as-is to use the built-in ./buckets/ directory
+# 保持默认则使用内置的 ./buckets/ 目录
+# buckets_dir: "/path/to/your/Obsidian Vault/Ombre Brain"
+
+# --- Runtime state path / 运行状态路径 ---
+# Stores runtime SQLite state such as Persona State outside bucket sync.
+# 保存 Persona State 等运行时 SQLite 状态，建议放在 buckets 同步目录外。
+state_dir: "/opt/render/project/src/buckets/state"
+
+# --- Identity / 名字口径 ---
+identity:
+  ai_name: "Che"
+  user_name: "Lin"
+  user_display_name: "Lin"
+  user_aliases: []
+
+# --- Merge threshold / 桶合并阈值 ---
+# When storing a new memory, if similarity with an existing bucket exceeds
+# this value (0-100), merge instead of creating a new one
+# 存新记忆时，如果与已有桶的相似度超过此值（0-100），则合并而非新建
+merge_threshold: 75
+
+# --- Write path / 写入路径 ---
+write_path:
+  semantic_search_timeout_seconds: 3
+
+# --- Dehydration API / 脱水压缩 API 配置 ---
+# Uses a cheap LLM for intelligent compression; auto-degrades to local
+# keyword extraction if API is unavailable
+# 用廉价 LLM 做智能压缩，API 不可用时自动降级到本地关键词提取
+dehydration:
+  # Supports any OpenAI-compatible API: DeepSeek / Ollama / LM Studio / vLLM / Gemini etc.
+  # 支持所有 OpenAI 兼容 API：DeepSeek / Ollama / LM Studio / vLLM / Gemini 等
+  model: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com/v1"
+  # Optional thinking mode override for DeepSeek v4 models:
+  #   disabled = non-thinking / enabled = thinking / empty = provider default
+  # DeepSeek v4 可选思考模式覆盖：
+  #   disabled = 非思考 / enabled = 思考 / 留空 = 走模型默认行为
+  thinking_mode: "disabled"
+  # Common base_url examples / 常见 base_url 示例：
+  #   DeepSeek:    https://api.deepseek.com/v1
+  #   SiliconFlow: https://api.siliconflow.cn/v1
+  #   Ollama:      http://localhost:11434/v1
+  #   LM Studio:   http://localhost:1234/v1
+  #   vLLM:        http://localhost:8000/v1
+  #   Gemini:      https://generativelanguage.googleapis.com/v1beta/openai
+  # api_key: ""    # ⚠️ Use env var OMBRE_API_KEY instead / 请使用环境变量 OMBRE_API_KEY
+  # Env overrides / 环境变量覆盖:
+  #   OMBRE_API_KEY
+  #   OMBRE_BASE_URL
+  #   OMBRE_DEHYDRATION_BASE_URL
+  #   OMBRE_DEHYDRATION_MODEL
+  #   OMBRE_MODEL
+  max_tokens: 1024
+  temperature: 0.1
+
+# --- Anchor / 长期锚点 ---
+# anchor is a small curated set of long-term important memories.
+# It works beside breath surfacing and keyword search.
+# anchor 是少量长期重要记忆的标记，和 breath 浮现、关键词检索各自分工。
+anchor:
+  max_count: 24
+  min_age_hours: 24
+
+# --- Decay parameters / 记忆衰减参数 ---
+# Simulates Ebbinghaus forgetting curve, auto-archives inactive memories
+# 模拟艾宾浩斯遗忘曲线，自动归档不活跃的记忆
+decay:
+  lambda: 0.05                    # Decay rate / 衰减速率（越大遗忘越快）
+  threshold: 0.3                  # Archive threshold / 归档阈值
+  check_interval_hours: 24        # Check interval (hours) / 衰减检查间隔（小时）
+  emotion_weights:
+    base: 1.0                     # Base weight / 基础权重
+    arousal_boost: 0.8            # Arousal boost coefficient / 唤醒度加成系数
+
+# --- Embedding / 向量化配置 ---
+# Uses embedding API for semantic similarity search
+# 通过 embedding API 实现语义相似度搜索
+# Uses embedding.api_key/base_url first; falls back to dehydration API when unset
+# 优先使用 embedding 独立 API；未配置时回退复用脱水 API
+embedding:
+  enabled: true                   # Enable embedding / 启用向量化
+  model: "Qwen/Qwen3-Embedding-0.6B"       # Embedding model / 向量化模型
+  base_url: "https://api.siliconflow.cn/v1"
+  vector_index:
+    enabled: false
+    backend: hnswlib
+    space: cosine
+    M: 16
+    ef_construction: 100
+    ef_search: 40
+    rebuild_on_start: false
+  # api_key: ""                   # Use env var OMBRE_EMBEDDING_API_KEY / 请使用环境变量
+  # Common embedding model examples / 常见向量模型示例：
+  #   SiliconFlow Qwen: Qwen/Qwen3-Embedding-0.6B
+  #   Gemini:           gemini-embedding-001
+  # Env vars / 环境变量:
+  #   OMBRE_EMBEDDING_API_KEY
+  #   OMBRE_EMBEDDING_BASE_URL
+  #   OMBRE_EMBEDDING_MODEL
+  #   OMBRE_EMBEDDING_ENABLED
+
+# --- Gateway / 网关注入配置 ---
+# Exposes an OpenAI-compatible /v1/chat/completions endpoint that injects
+# Core Memory + Recent Context + Recalled Memory before forwarding upstream
+# 暴露 OpenAI 兼容的 /v1/chat/completions 网关，在转发上游模型前自动注入
+# 核心记忆 + 最近上下文 + 动态召回记忆
+gateway:
+  host: "0.0.0.0"
+  port: 8010
+  upstream_base_url: "https://openrouter.ai/api/v1"
+  upstream_protocol: "openai"
+  upstream_default_model: "anthropic/claude-opus-4.6"
+  upstream_models:
+    - "anthropic/claude-opus-4.6"
+  # Optional prompt cache hints / 可选提示缓存参数
+  # openai: send prompt_cache_key using X-Ombre-Session-Id; leave empty for other providers.
+  # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；其他供应商保持空值。
+  prompt_cache: ""
+  # prompt_cache_retention: "24h"  # Optional for supported OpenAI models / 支持模型可选
+  # Optional multi-upstream mode / 可选多上游模式
+  # When upstreams is set, the gateway aggregates all listed models and routes
+  # each request by model name to the matching upstream.
+  # 配置 upstreams 后，网关会聚合所有模型，并按模型名路由到对应上游。
+  # upstreams:
+  #   - name: "deepseek"
+  #     base_url: "https://api.deepseek.com/v1"
+  #     api_key_env: "OMBRE_GATEWAY_DEEPSEEK_API_KEY"
+  #     default_model: "deepseek-v4-pro"
+  #     prompt_cache: ""  # DeepSeek uses automatic prefix cache / DeepSeek 使用自动前缀缓存
+  #     models:
+  #       - "deepseek-chat"
+  #       - "deepseek-reasoner"
+  #   - name: "siliconflow"
+  #     base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  #     api_key_env: "OMBRE_GATEWAY_SILICONFLOW_API_KEY"
+  #     models:
+  #       - "Qwen/Qwen3-32B"
+  #       - "THUDM/GLM-4-32B"
+  head_recent_hours: 24
+  dynamic_top_k: 12
+  inject_max_cards: 2
+  skip_recent_rounds: 5
+  cooldown_hours: 12
+  cooldown_floor: 0.15
+  default_session_id: "lin-main"
+  core_memory_interval_rounds: 0
+  current_inner_state_interval_rounds: 0
+  relationship_weather_interval_rounds: 0
+  favorite_memory_interval_rounds: 0
+  high_confidence_semantic_score: 0.72
+  high_confidence_keyword_score: 0.65
+  high_confidence_cooldown_floor: 0.65
+  inject_total_budget: 1200
+  core_memory_budget: 500
+  recent_context_budget: 300
+  recent_context_interval_rounds: 6
+  recalled_memory_budget: 500
+  recalled_memory_interval_rounds: 2
+  relationship_weather_budget: 220
+  favorite_memory_budget: 180
+  favorite_memory_max_cards: 1
+  related_memory_budget: 220
+  related_memory_interval_rounds: 4
+  related_memory_skip_recent_rounds: 6
+  related_memory_cooldown_hours: 8
+  related_memory_cooldown_floor: 0.18
+  related_memory_max_cards: 1
+  semantic_weight: 0.45
+  keyword_weight: 0.35
+  importance_weight: 0.10
+  freshness_weight: 0.10
+  first_card_min_score: 0.55
+  second_card_min_score: 0.50
+  second_card_relative_score: 0.85
+  auto_recall_first_card_min_score: 0.30
+  auto_recall_second_card_min_score: 0.24
+  auto_recall_second_card_relative_score: 0.60
+  recall_admission_semantic_score: 0.62
+  recall_admission_rerank_score: 0.55
+  recall_timeout_seconds: 6.0
+  edge_min_confidence: 0.55
+  # Env vars:
+  #   OMBRE_GATEWAY_TOKEN
+  #   OMBRE_GATEWAY_UPSTREAM_API_KEY
+  #   OMBRE_GATEWAY_UPSTREAM_BASE_URL
+  #   OMBRE_GATEWAY_UPSTREAM_MODEL
+  #   OMBRE_GATEWAY_UPSTREAM_MODELS   # comma-separated model list for /v1/models
+  #   OMBRE_GATEWAY_DEEPSEEK_API_KEY  # example for gateway.upstreams[*].api_key_env
+  #   OMBRE_GATEWAY_SILICONFLOW_API_KEY
+
+# --- Persona State Engine / 人格状态引擎 ---
+# Tracks slow personality drift, relationship state, and per-session affect.
+# 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
+  # --- Mainline recall additions merged into Lin production config ---
+  just_now_context_enabled: false
+  just_now_context_hours: 6
+  just_now_context_max_turns: 5
+  just_now_context_budget: 420
+  conversation_turns_max_entries: 500
+  date_persona_trace_enabled: false
+  date_persona_trace_budget: 220
+  date_persona_trace_max_events: 5
+  date_persona_trace_include_daily: false
+  retrieval_mode: graph
+  direct_render_mode: auto
+  portrait_memory_enabled: false
+  portrait_memory_budget: 360
+  portrait_memory_max_sources: 8
+  portrait_memory_include_anchors: false
+  query_planner_enabled: false
+  query_planner_model: ""
+  query_planner_min_chars: 24
+  query_planner_max_queries: 3
+  query_planner_max_tokens: 360
+  recall_selection_timeout_seconds: 6.0
+  recall_selection_candidate_limit: 30
+  memory_detail_recall_enabled: false
+  memory_detail_recall_max_ids: 3
+  memory_detail_recall_budget: 1200
+  word_map_hint_enabled: false
+  word_map_hint_weight: 0.08
+  word_map_hint_moment_boost: 0.25
+  word_map_hint_neighbor_limit: 6
+  word_map_hint_bucket_limit: 12
+persona:
+  enabled: true
+  profile_id: "lin_che"
+  mode: "llm"
+  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-v4-flash"
+  # Optional thinking mode override for DeepSeek v4 models:
+  #   disabled = non-thinking / enabled = thinking / empty = provider default
+  thinking_mode: "disabled"
+  # api_key: ""                  # Use OMBRE_PERSONA_API_KEY; falls back to OMBRE_API_KEY
+  temperature: 0.1
+  max_tokens: 500
+  global_decay_hours: 168
+  session_mood_half_life_minutes: 90
+  max_personality_delta: 0.01
+  max_relationship_delta: 0.03
+  max_affect_delta: 0.18
+  initial_personality:
+    openness: 0.56
+    conscientiousness: 0.50
+    extraversion: 0.44
+    agreeableness: 0.66
+    neuroticism: 0.36
+  initial_relationship:
+    affinity: 0.86
+    dominance: 0.38
+    defensiveness: 0.12
+    trust: 0.82
+  initial_affect:
+    valence: 0.56
+    arousal: 0.34
+    tenderness: 0.62
+    possessiveness: 0.24
+    longing: 0.34
+    security: 0.68
+    protective_drive: 0.52
+    mood_label: "warm_neutral"
+    session_defensiveness: 0.12
+    residue: ""
+  # Env vars:
+  #   OMBRE_PERSONA_API_KEY
+  #   OMBRE_PERSONA_BASE_URL
+  #   OMBRE_PERSONA_MODEL
+
+# --- Reflection worker / 关系天气与记忆关系 ---
+# Defaults to persona model config. Set these only when reflection should use a separate model/key.
+reflection:
+  enabled: true
+  auto_enabled: true
+  enrich_on_write: true
+  memory_affect_anchor_enabled: false
+  relationship_weather_affect_anchor_enabled: true
+  enrich_backfill_enabled: true
+  enrich_backfill_limit: 5
+  base_url: ""                    # empty = persona.base_url
+  model: ""                       # empty = persona.model
+  low_risk_model: "deepseek-v4-flash"
+  high_risk_model: "deepseek-v4-pro"
+  thinking_mode: "disabled"
+  # api_key: ""                   # empty = persona.api_key; OMBRE_REFLECTION_API_KEY overrides
+  temperature: 0.1
+  max_tokens: 700
+  timezone: "Asia/Shanghai"
+  daily_hour: 4                   # generate daily impression after this local hour
+  weekly_day: 0                   # 0=Monday, 6=Sunday; auto run writes the previous week
+  weekly_hour: 4
+  check_interval_minutes: 60
+  candidate_limit: 18
+  candidate_recent_limit: 8
+  candidate_semantic_limit: 6
+  edge_min_confidence: 0.55
+  diary_mcp_url: "https://riji.lin-che.com/mcp"               # optional Che-diary MCP URL, e.g. http://127.0.0.1:8000/mcp
+  diary_mcp_token_env: "RIJI_MCP_BEARER_TOKEN"         # optional bearer token env var name, e.g. MCP_BEARER_TOKEN
+  diary_memory_extract_enabled: true
+  diary_memory_extract_max_per_day: 1
+  diary_memory_extract_min_confidence: 0.68
+  # Env vars:
+  #   OMBRE_REFLECTION_API_KEY
+  #   OMBRE_REFLECTION_BASE_URL
+  #   OMBRE_REFLECTION_MODEL
+  #   OMBRE_DIARY_MCP_URL
+  #   OMBRE_DIARY_MCP_TOKEN_ENV
+
+# --- Scoring weights / 检索权重参数 ---
+# total = topic(×4) + emotion(×2) + time(×1.5) + importance(×1)
+scoring_weights:
+  topic_relevance: 4.0
+  emotion_resonance: 2.0
+  time_proximity: 1.5
+  importance: 1.0
+
+# --- Fuzzy matching / 模糊匹配参数 ---
+matching:
+  fuzzy_threshold: 50             # Minimum match score (0-100) / 最低匹配分数
+  max_results: 5                  # Max results per search / 单次搜索最多返回条数
+
+# --- Obsidian wikilinks / Obsidian 双链自动注入 ---
+wikilink:
+  enabled: true
+  use_tags: false
+  use_domain: true
+  use_auto_keywords: true
+  auto_top_k: 4
+  min_keyword_len: 3
+  exclude_keywords: []
+
+# --- Mainline memory/recall sections merged for Lin production ---
+reranker:
+  enabled: true
+  model: Qwen/Qwen3-Reranker-4B
+  base_url: "https://api.siliconflow.cn/v1"
+  candidate_limit: 15
+  score_weight: 0.65
+  timeout_seconds: 5
+
+recall_diagnostics:
+  enabled: false
+  path: ''
+  max_candidates: 20
+  max_text_chars: 220
+
+recall_thresholds:
+  vector_min_score: 0.50
+  facet_vector_min_score: 0.45
+  vague_vector_min_score: 0.42
+  explicit_vector_min_score: 0.55
+  explicit_admission_semantic_score: 0.68
+  explicit_admission_rerank_score: 0.60
+  vague_top_k: 40
+
+recall:
+  query_resurface_enabled: false
+
+word_map:
+  enabled: false
+  max_terms_per_bucket: 16
+  edge_top_k: 10
+  min_term_len: 2
+  stopwords: []
+  private_terms: []
+  stopword_prefixes: []
+  overview_stopwords: []
+  overview_stopword_prefixes: []
+  overview_aliases: {}
+  overview_priority_terms: []
+  overview_hub_terms: []
+  weak_hint_terms: []
+  weak_hint_weight: 0.25
+
+identity_semantics:
+  enabled: false
+  private_config_path: ''
+  min_confidence: 0.78
+  evidence_tags:
+  - profile_fact
+  - ai_favorite
+  - favorite_memory
+
+moment_annotations:
+  enabled: true
+  max_summary_chars: 160
+  max_evidence_spans: 3
+  max_evidence_chars: 120
+
+node_facets:
+  enabled: true
+  store: sqlite
+  salience_min: 0.2
+  salience_max: 1.3
+
+memory_relevance:
+  aliases:
+    relationship_identity:
+    - human-ai relationship
+    - ai relationship
+    - 人机恋
+    - 人机关系
+    - AI伴侣
+    intimacy:
+    - intimacy
+    - sexual
+    - nsfw
+    - 亲密
+    - 情欲
+    - 欲望
+    embodiment:
+    - embodiment
+    - physical body
+    - 具身
+    - 身体
+    - 形体
+    hardware_protocol:
+    - hardware
+    - protocol
+    - ble
+    - esp32
+    - mpr121
+    - 硬件
+    - 协议
+    communication_action:
+    - email
+    - mail
+    - message
+    - 发邮件
+    - 邮件
+    - 发消息
+    old_or_resolved:
+    - legacy
+    - deprecated
+    - resolved
+    - 旧版
+    - 废弃
+    - 已解决
+  blocked_facets: []
+  section_hints: {}
+
+memory_write_gate:
+  enabled: true
+  auto_sources:
+  - operit
+  - workflow
+  - worker
+  - auto
+  pending_threshold: 0.42
+  grow_threshold: 0.72
+  duplicate_similarity: 0.88
+  repeat_similarity: 0.82
+  repeat_promote_count: 2
+  candidate_log: memory_write_candidates.jsonl
+  max_recent_candidates: 120
+
+memory_diffusion:
+  enabled: true
+  max_hops: 2
+  top_k: 3
+  min_activation: 0.18
+  hop_decays:
+  - 0.8
+  - 0.6
+  - 0.4
+  - 0.25
+  decay: 0.55
+  include_incoming: true
+  max_paths_per_hit: 3
+  chain_walk_enabled: false
+  chain_max_hops: 4
+  chain_min_strength: 0.2
+  chain_min_confidence: 0.78
+  chain_min_relation_priority: 60
+  chain_max_frontier: 16
+  chain_continue_relation_types:
+  - same_event
+  - context_of
+  - precedes
+  - previous_context
+  - next_context
+  - updates
+  - evidenced_by
+  - reflects_on
+  relation_type_weights:
+    same_event: 1.15
+    context_of: 1.05
+    embodiment_chain: 0.9
+    same_topic: 0.75
+    precedes: 0.85
+    triggers: 0.75
+    cause: 0.75
+    causes: 0.75
+    followup: 0.65
+    updates: 0.85
+    supports: 0.8
+    promises: 0.55
+    belongs_to: 0.55
+    emotional_echo: 0.5
+    next_context: 0.7
+    previous_context: 0.6
+    reflects_on: 0.5
+    evidenced_by: 0.85
+    relates_to: 0.4
+    old_version: 0.2
+    conflict: 0.3
+    contradicts: 0.3
+    blocks: 0.3
+
+portrait:
+  enabled: false
+  auto_enabled: false
+  auto_initial_enabled: false
+  daily_enabled: false
+  timezone: Asia/Shanghai
+  daily_hour: 4
+  check_interval_minutes: 60
+  state_path: ''
+  base_url: ''
+  model: ''
+  thinking_mode: ''
+  temperature: 0.1
+  max_tokens: 1800
+  material_limit: 18
+  first_run_material_limit: 160
+  source_excerpt_chars: 900
+  recent_continuity_days: 3
+  persona_events_limit: 24
+  recent_buffer_max: 24
+  staging_pool_max: 24
+  candidate_max: 40
+
+dream:
+  enabled: false
+  auto_enabled: false
+  surface_enabled: false
+  inject_enabled: false
+  retain_after_inject: false
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+  thinking_mode: disabled
+  temperature: 0.85
+  max_tokens: 900
+  timezone: Asia/Shanghai
+  daily_hour: 3
+  run_window_hours: 3
+  daily_probability: 0.4
+  check_interval_minutes: 60
+  min_material_count: 5
+  material_window_hours: 48
+  material_limit: 5
+  old_echo_enabled: false
+  old_echo_min_age_hours: 72
+  identity_anchor_id: c0b8ddb7423e
+  min_surface_age_hours: 3
+  surface_threshold: 0.62
+  attempt_threshold: 0.45
+  alpha_subordinate: 0.25
+  spontaneous_surface_prob: 0.02
+  max_surface_attempts: 4
+  claim_ttl_minutes: 15

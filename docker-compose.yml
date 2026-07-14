@@ -24,9 +24,15 @@ services:
       OMBRE_ENV_PATH: /app/.env
       OMBRE_GATEWAY_ADMIN_URL: http://ombre-gateway:8010/api/config
     volumes:
-      # Keep the real production config local. Override OMBRE_CONFIG_FILE when
-      # the file lives elsewhere; the repository never replaces that file.
-      - "${OMBRE_CONFIG_FILE:-./config.lin.production.yaml}:/app/config.lin.production.yaml:ro"
+      # The tracked production baseline contains no plaintext secrets. Override
+      # OMBRE_CONFIG_FILE when a deployment keeps its config elsewhere.
+      - type: bind
+        source: "${OMBRE_CONFIG_FILE:-./config.lin.production.yaml}"
+        target: /app/config.lin.production.yaml
+        read_only: true
+        bind:
+          # Fail clearly instead of silently creating a directory when missing.
+          create_host_path: false
       # Dashboard API-key changes persist back to the same host env_file.
       - ./.env:/app/.env
       - ./data/buckets:/app/data/buckets
@@ -67,7 +73,12 @@ services:
       OMBRE_STATE_DIR: /app/data/buckets/state
       OMBRE_RUNTIME_CONFIG_PATH: /app/data/buckets/state/config.runtime.yaml
     volumes:
-      - "${OMBRE_CONFIG_FILE:-./config.lin.production.yaml}:/app/config.lin.production.yaml:ro"
+      - type: bind
+        source: "${OMBRE_CONFIG_FILE:-./config.lin.production.yaml}"
+        target: /app/config.lin.production.yaml
+        read_only: true
+        bind:
+          create_host_path: false
       - ./data/buckets:/app/data/buckets
     healthcheck:
       test:
