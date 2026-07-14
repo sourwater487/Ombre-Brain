@@ -28,6 +28,34 @@ WORKSPACE_ATTACHMENT_RE = re.compile(
     r"<workspace_attachment>[\s\S]*?</workspace_attachment>",
     re.IGNORECASE,
 )
+LIN_MESSAGE_RE = re.compile(
+    r"<lin_message\b[^>]*>\s*(?P<body>[\s\S]*?)\s*</lin_message\s*>",
+    re.IGNORECASE,
+)
+CLIENT_CONTEXT_CONTAINER_RE = re.compile(
+    r"<(?P<tag>dynamic|dynamic_context|lin_dynamic_context|ombre_live_context|memo_context)\b[^>]*>"
+    r"[\s\S]*?</(?P=tag)\s*>",
+    re.IGNORECASE,
+)
+CLIENT_CONTEXT_CONTAINER_SELF_CLOSING_RE = re.compile(
+    r"<(?:dynamic|dynamic_context|lin_dynamic_context|ombre_live_context|memo_context)\b[^>]*/\s*>",
+    re.IGNORECASE,
+)
+CLIENT_METADATA_XML_RE = re.compile(
+    r"<(?P<tag>message_time|current_time|timestamp|current_weather|weather|current_location|location|geolocation)"
+    r"\b[^>]*>[\s\S]*?</(?P=tag)\s*>",
+    re.IGNORECASE,
+)
+CLIENT_METADATA_XML_SELF_CLOSING_RE = re.compile(
+    r"<(?:message_time|current_time|timestamp|current_weather|weather|current_location|location|geolocation)"
+    r"\b[^>]*/\s*>",
+    re.IGNORECASE,
+)
+CLIENT_STATUS_PREFIX_RE = re.compile(
+    r"^\s*\[\s*20\d{2}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?"
+    r"(?:\s*\|\s*[^\]\r\n]*)*\s*\]\s*(?:\r?\n)?",
+    re.IGNORECASE,
+)
 CLIENT_CONTEXT_BLOCK_TITLES = {
     "当前时间",
     "当前电量",
@@ -41,14 +69,61 @@ CLIENT_CONTEXT_BLOCK_TITLES = {
 }
 
 
-def strip_raw_client_context(text: str) -> str:
-    cleaned = WORKSPACE_ATTACHMENT_RE.sub("", str(text or ""))
+def strip_raw_client_context(text: str, *, strip_injected_xml: bool = True) -> str:
+    cleaned = str(text or "")
+    if strip_injected_xml:
+        lin_message = _extract_provider_lin_message(cleaned)
+        if lin_message is not None:
+            # The provider envelope is the strongest boundary: everything
+            # outside lin_message is injected context, not the user's utterance.
+            cleaned = lin_message
+        else:
+            # Other clients may send injected XML next to plain user text
+            # without a lin_message envelope.
+            cleaned = _strip_client_context_containers(cleaned)
+        cleaned = CLIENT_METADATA_XML_RE.sub("", cleaned)
+        cleaned = CLIENT_METADATA_XML_SELF_CLOSING_RE.sub("", cleaned)
+        while CLIENT_STATUS_PREFIX_RE.match(cleaned):
+            cleaned = CLIENT_STATUS_PREFIX_RE.sub("", cleaned, count=1)
+    cleaned = WORKSPACE_ATTACHMENT_RE.sub("", cleaned)
     cleaned = CLIENT_ATTACHMENT_RE.sub("", cleaned)
     cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
     cleaned = _strip_client_context_blocks(cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def _extract_provider_lin_message(text: str) -> str | None:
+    matches = list(LIN_MESSAGE_RE.finditer(str(text or "")))
+    if not matches:
+        return None
+    match = matches[-1]
+    surrounding = f"{text[:match.start()]}\n{text[match.end():]}"
+    surrounding = _strip_client_context_containers(surrounding)
+    surrounding = CLIENT_METADATA_XML_RE.sub("", surrounding)
+    surrounding = CLIENT_METADATA_XML_SELF_CLOSING_RE.sub("", surrounding)
+    surrounding = WORKSPACE_ATTACHMENT_RE.sub("", surrounding)
+    surrounding = CLIENT_ATTACHMENT_RE.sub("", surrounding)
+    surrounding = SELF_CLOSING_ATTACHMENT_RE.sub("", surrounding)
+    if surrounding.strip():
+        # A literal lin_message mentioned inside ordinary prose is user text,
+        # not a provider envelope.
+        return None
+    return match.group("body")
+
+
+def _strip_client_context_containers(text: str) -> str:
+    cleaned = str(text or "")
+    # A small bounded loop handles wrappers nested inside another reserved
+    # wrapper without turning this into a general-purpose XML parser.
+    for _ in range(6):
+        previous = cleaned
+        cleaned = CLIENT_CONTEXT_CONTAINER_RE.sub("", cleaned)
+        cleaned = CLIENT_CONTEXT_CONTAINER_SELF_CLOSING_RE.sub("", cleaned)
+        if cleaned == previous:
+            break
+    return cleaned
 
 
 def _strip_client_context_blocks(text: str) -> str:
@@ -215,7 +290,7 @@ class RawEventStore:
         until: str = "",
     ) -> dict[str, Any]:
         safe_limit = max(1, min(100, int(limit or 10)))
-        cleaned_query = str(query or "").strip()
+        cleaned_query = strip_raw_client_context(str(query or ""))
         filters, params = self._search_filters(
             source=source,
             role=role,
@@ -398,7 +473,10 @@ class RawEventStore:
         role = str(raw.get("role") or "").strip().lower()
         if role not in ALLOWED_RAW_ROLES:
             return None, "invalid_role"
-        text = strip_raw_client_context(self._coerce_text(raw.get("text", raw.get("content", ""))))
+        text = strip_raw_client_context(
+            self._coerce_text(raw.get("text", raw.get("content", ""))),
+            strip_injected_xml=role == "user",
+        )
         if not text:
             return None, "empty_text"
         if self._looks_injected(text, raw):

@@ -410,7 +410,10 @@ class DreamEngine:
             role = str(event.get("role") or "").strip().lower()
             if role not in {"user", "assistant"}:
                 continue
-            text = strip_raw_client_context(str(event.get("text") or "")).strip()
+            text = strip_raw_client_context(
+                str(event.get("text") or ""),
+                strip_injected_xml=role == "user",
+            ).strip()
             if not text or raw_event_text_looks_injected(text, event):
                 continue
             metadata = event.get("metadata", {}) if isinstance(event.get("metadata"), dict) else {}

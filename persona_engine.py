@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 
 from identity import generic_identity_names, identity_names, render_identity_template
 from persona_event_selection import trim_persona_excerpt
+from raw_events import strip_raw_client_context
 
 logger = logging.getLogger("ombre_brain.persona")
 
@@ -408,6 +409,7 @@ class PersonaStateEngine:
         return self._snapshot(global_state, session_state, self.fallback_guidance)
 
     def _clean_client_status_lines(self, user_message: str) -> str:
+        user_message = strip_raw_client_context(str(user_message or ""))
         user_message = self._strip_jsonrpc_error_context(user_message)
         user_message = self._strip_operit_extra_context(user_message)
         lines = []

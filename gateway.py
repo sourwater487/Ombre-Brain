@@ -2288,7 +2288,7 @@ class GatewayService:
         messages = body.get("messages")
         if not isinstance(messages, list):
             messages = []
-        query = str(
+        raw_query = str(
             body.get("query")
             or body.get("prompt")
             or body.get("message")
@@ -2296,8 +2296,12 @@ class GatewayService:
             or self._extract_last_user_query(messages)
             or ""
         ).strip()
+        query = self._strip_external_context_from_user_text(raw_query)
         if not query:
-            return JSONResponse({"error": "query is required"}, status_code=400)
+            return JSONResponse(
+                {"error": "query has no user utterance after client-context filtering"},
+                status_code=400,
+            )
 
         session_id = str(
             body.get("session_id")
@@ -4047,8 +4051,8 @@ class GatewayService:
             assistant_text = self._coerce_message_text(assistant_message.get("content")).strip()
             if not assistant_text and assistant_message.get("tool_calls"):
                 return
-        user_text = self._clean_conversation_turn_text(user_message)
-        assistant_text = self._clean_conversation_turn_text(assistant_text)
+        user_text = self._clean_conversation_turn_text(user_message, role="user")
+        assistant_text = self._clean_conversation_turn_text(assistant_text, role="assistant")
         user_text = self._conversation_turn_original_text(user_text, role="user")
         assistant_text = self._conversation_turn_original_text(assistant_text, role="assistant")
         if not user_text and not assistant_text:
@@ -4124,9 +4128,9 @@ class GatewayService:
             )
             return False
         for turn in turns:
-            if self._clean_conversation_turn_text(turn.get("user_text", "")) != user_text:
+            if self._clean_conversation_turn_text(turn.get("user_text", ""), role="user") != user_text:
                 continue
-            if self._clean_conversation_turn_text(turn.get("assistant_text", "")) != assistant_text:
+            if self._clean_conversation_turn_text(turn.get("assistant_text", ""), role="assistant") != assistant_text:
                 continue
             if str(turn.get("model") or "") != str(model or ""):
                 continue
@@ -5023,12 +5027,15 @@ class GatewayService:
             limit=max_turns + 4,
             hours=12,
         )
-        current_user = self._clean_conversation_turn_text(user_message)
-        current_assistant = self._clean_conversation_turn_text(assistant_response)
+        current_user = self._clean_conversation_turn_text(user_message, role="user")
+        current_assistant = self._clean_conversation_turn_text(assistant_response, role="assistant")
         selected: list[dict[str, Any]] = []
         for turn in turns:
-            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""))
-            assistant_text = self._clean_conversation_turn_text(turn.get("assistant_text", ""))
+            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""), role="user")
+            assistant_text = self._clean_conversation_turn_text(
+                turn.get("assistant_text", ""),
+                role="assistant",
+            )
             if user_text == current_user and assistant_text == current_assistant:
                 continue
             if not user_text and not assistant_text:
@@ -7053,13 +7060,7 @@ class GatewayService:
         return ""
 
     def _strip_external_context_from_user_text(self, text: str) -> str:
-        raw_text = str(text or "")
-        lin_messages = re.findall(
-            r"<lin_message>\s*(.*?)\s*</lin_message>",
-            raw_text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        cleaned = lin_messages[-1] if lin_messages else raw_text
+        cleaned = strip_raw_client_context(str(text or ""))
         cleaned = WORKSPACE_ATTACHMENT_RE.sub("", cleaned)
         cleaned = EXTERNAL_CONTEXT_ATTACHMENT_RE.sub("", cleaned)
         cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
@@ -7825,7 +7826,7 @@ class GatewayService:
                 grouped[group_key] = row
             row["event_ids"].append(int(event.get("id") or 0))
             role = str(event.get("role") or "").strip().lower()
-            text = self._clean_conversation_turn_text(event.get("text", ""))
+            text = self._clean_conversation_turn_text(event.get("text", ""), role=role)
             if role == "user" and text:
                 row["user_text"] = f"{row['user_text']} / {text}".strip(" /") if row["user_text"] else text
             elif role == "assistant" and text:
@@ -7884,8 +7885,11 @@ class GatewayService:
             header_bits.append(f"session:{session_label}")
         header = f"- [{' '.join(header_bits)}]" if header_bits else "-"
         lines = []
-        user_text = self._clean_conversation_turn_text(turn.get("user_text", ""))
-        assistant_text = self._clean_conversation_turn_text(turn.get("assistant_text", ""))
+        user_text = self._clean_conversation_turn_text(turn.get("user_text", ""), role="user")
+        assistant_text = self._clean_conversation_turn_text(
+            turn.get("assistant_text", ""),
+            role="assistant",
+        )
         if user_text:
             lines.append(f"{header} {self.identity['user_display_name']}: {self._clip_text(user_text, 180)}")
         if assistant_text:
@@ -8087,8 +8091,11 @@ class GatewayService:
             if session_label:
                 header_bits.append(f"session:{session_label}")
             header = f"- [{' '.join(header_bits)}]" if header_bits else "-"
-            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""))
-            assistant_text = self._clean_conversation_turn_text(turn.get("assistant_text", ""))
+            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""), role="user")
+            assistant_text = self._clean_conversation_turn_text(
+                turn.get("assistant_text", ""),
+                role="assistant",
+            )
             if user_text:
                 lines.append(f"{header} {self.identity['user_display_name']}: {self._clip_text(user_text, 180)}")
             if assistant_text:
@@ -8126,7 +8133,10 @@ class GatewayService:
             event
             for event in events
             if str(event.get("role") or "").strip().lower() in {"user", "assistant"}
-            and self._clean_conversation_turn_text(event.get("text", ""))
+            and self._clean_conversation_turn_text(
+                event.get("text", ""),
+                role=str(event.get("role") or ""),
+            )
         ][:limit]
         debug["turn_count"] = len(selected)
         debug["selected_turn_ids"] = [int(event.get("id") or 0) for event in selected]
@@ -8155,7 +8165,7 @@ class GatewayService:
                 if role == "user"
                 else self.identity["ai_name"]
             )
-            text = self._clean_conversation_turn_text(event.get("text", ""))
+            text = self._clean_conversation_turn_text(event.get("text", ""), role=role)
             lines.append(f"{header} {speaker}: {self._clip_text(text, 180)}")
 
         text = self._trim_text("\n".join(lines), self.just_now_context_budget)
@@ -8215,9 +8225,17 @@ class GatewayService:
             parsed = parsed.astimezone(self.gateway_tz)
         return parsed.strftime("%Y-%m-%d %H:%M")
 
-    def _clean_conversation_turn_text(self, text: Any) -> str:
-        cleaned = strip_raw_client_context(str(text or "").strip())
-        cleaner = getattr(self.persona_engine, "_clean_client_status_lines", None)
+    def _clean_conversation_turn_text(self, text: Any, *, role: str = "") -> str:
+        role_key = str(role or "").strip().lower()
+        cleaned = strip_raw_client_context(
+            str(text or "").strip(),
+            strip_injected_xml=role_key == "user",
+        )
+        cleaner = (
+            getattr(self.persona_engine, "_clean_client_status_lines", None)
+            if role_key == "user"
+            else None
+        )
         if callable(cleaner):
             try:
                 cleaned = str(cleaner(cleaned) or "").strip()

@@ -122,7 +122,7 @@ from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
 from portrait_engine import DailyPortraitMaintainer
-from raw_events import RawEventStore
+from raw_events import RawEventStore, strip_raw_client_context
 from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
@@ -3799,7 +3799,7 @@ async def _edge_backfill_candidates(
 ) -> tuple[list[dict], list[str]]:
     warnings: list[str] = []
     bucket_id = str(bucket_id or "").strip()
-    query = str(query or "").strip()
+    query = strip_raw_client_context(str(query or ""))
     if bucket_id:
         bucket = await mgr.get(bucket_id)
         if not bucket:
@@ -3909,7 +3909,7 @@ async def _entity_edge_backfill_candidates(
 ) -> tuple[list[dict], list[str]]:
     warnings: list[str] = []
     bucket_id = str(bucket_id or "").strip()
-    query = str(query or "").strip()
+    query = strip_raw_client_context(str(query or ""))
     if bucket_id:
         bucket = await mgr.get(bucket_id)
         if not bucket:
@@ -6099,7 +6099,7 @@ async def _build_recall_debug_payload(
     valence: float | None = None,
     arousal: float | None = None,
 ) -> dict:
-    query = str(query or "").strip()
+    query = strip_raw_client_context(str(query or ""))
     if not query:
         return {"status": "error", "error": "query_required"}
 
@@ -6733,7 +6733,7 @@ async def inspect_diffusion(
     edge_min_confidence: float = 0.55,
 ) -> dict:
     """只读诊断 query 如何沿 memory_edges 点亮联想记忆；不 touch bucket，不创建记忆。"""
-    query = str(query or "").strip()
+    query = strip_raw_client_context(str(query or ""))
     if not query:
         return {"status": "error", "error": "query_required"}
 
@@ -7068,6 +7068,8 @@ async def reminder_create(
     session_id: str = "",
 ) -> dict:
     """创建独立照顾备忘；不写记忆桶，不触发 embedding。可设 start_at/end_at 和 daily_limit 控制每天出现次数；morning_evening 未指定时默认每天 2 次。"""
+    title = strip_raw_client_context(str(title or ""))
+    content = strip_raw_client_context(str(content or ""))
     try:
         item = reminder_store.create(
             title=title,
@@ -7114,6 +7116,8 @@ async def reminder_update(
     reminder_id = _coerce_memory_id(reminder_id)
     if not reminder_id:
         return {"error": "missing reminder_id"}
+    title = strip_raw_client_context(str(title or ""))
+    content = strip_raw_client_context(str(content or ""))
     try:
         if snooze_minutes:
             item = reminder_store.snooze(reminder_id, minutes=_int_between(snooze_minutes, 60, 1, 525600))
@@ -7167,6 +7171,9 @@ async def breath(
 ) -> str:
     """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
     await decay_engine.ensure_started()
+    raw_query = str(query or "")
+    query = strip_raw_client_context(raw_query)
+    query_filtered_to_empty = bool(raw_query.strip()) and not query
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
     include_related = _bool_value(include_related, True)
@@ -7269,6 +7276,9 @@ async def breath(
             max_results=max_results,
             domain_filter=domain_filter,
         )
+
+    if query_filtered_to_empty:
+        return "查询里只有客户端注入的时间、天气、地点或动态上下文，没有可用于召回的用户话语。"
 
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
@@ -8114,6 +8124,7 @@ async def comment_bucket(
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
         return {"error": "invalid bucket_id"}
+    content = strip_raw_client_context(str(content or ""))
     if not content or not content.strip():
         return {"error": "empty content"}
     if not await bucket_mgr.get(bucket_id):
@@ -8310,6 +8321,8 @@ async def hold(
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
+    content = strip_raw_client_context(str(content or ""))
+    title = strip_raw_client_context(str(title or ""))
     if not content or not content.strip():
         return "内容为空，无法存储。"
 
@@ -8468,6 +8481,7 @@ async def darkroom_enter(
     new_room: bool = True,
 ) -> dict:
     """写入一段未显影的私密反思；默认第一人称，不用第三人称自述；默认新开房间，new_room=false 才续写当前 active 房间；写错要撤回已有房间时传 new_room=false + visibility="retracted"；不回显 note 正文。"""
+    note = strip_raw_client_context(str(note or ""))
     try:
         return darkroom_store.enter(
             note,
@@ -8605,6 +8619,8 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
     """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。无性别称呼、自称和原话可以保留，不把临时称呼推成稳定画像事实；Che 的自我与 reflection 始终使用第一人称。title 可选，短内容时传了就用给定标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection。需要之后轻轻提醒/照顾备忘的事项用 reminder_create，不写进长期记忆。feel 年轮只写第一人称感受，不写分段标题。"""
     await decay_engine.ensure_started()
 
+    content = strip_raw_client_context(str(content or ""))
+    title = strip_raw_client_context(str(title or ""))
     if not content or not content.strip():
         return "内容为空，无法整理。"
 
@@ -8760,7 +8776,10 @@ async def profile_fact(
     confidence: float = 0.9,
 ) -> str:
     """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。"""
-    fact = str(fact or "").strip()
+    fact = strip_raw_client_context(str(fact or ""))
+    evidence_context = strip_raw_client_context(str(evidence_context or ""))
+    reflection = strip_raw_client_context(str(reflection or ""))
+    followup = strip_raw_client_context(str(followup or ""))
     evidence_bucket_id = str(evidence_bucket_id or "").strip()
     if not fact:
         return "fact 为空，无法写入画像事实。"
@@ -8786,7 +8805,7 @@ async def profile_fact(
     kind = _profile_key(profile_kind, "preference")
     subject_key = _profile_key(subject, "user")
     predicate_key = _profile_key(predicate, "")
-    object_text = str(object_value or "").strip()
+    object_text = strip_raw_client_context(str(object_value or ""))
     confidence = _float_between(confidence, 0.9, 0.0, 1.0)
     body = _profile_fact_body(
         fact=fact,
@@ -8899,6 +8918,8 @@ async def trace(
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id:
         return "请提供有效的 bucket_id。"
+    name = strip_raw_client_context(str(name or ""))
+    content = strip_raw_client_context(str(content or ""))
 
     # --- Delete mode / 删除模式 ---
     if delete:
@@ -10933,7 +10954,7 @@ async def api_search(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
-    query = request.query_params.get("q", "")
+    query = strip_raw_client_context(request.query_params.get("q", ""))
     if not query:
         return JSONResponse({"error": "missing q parameter"}, status_code=400)
     try:
@@ -11045,7 +11066,7 @@ async def api_search_raw(request):
     def value(name: str, default: str = ""):
         return body.get(name, params.get(name, default))
 
-    query = str(value("q", value("query", "")) or "")
+    query = strip_raw_client_context(str(value("q", value("query", "")) or ""))
     try:
         result = raw_event_store.search(
             query=query,
@@ -11147,7 +11168,7 @@ async def api_breath_debug(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
-    query = request.query_params.get("q", "")
+    query = strip_raw_client_context(request.query_params.get("q", ""))
     q_valence = request.query_params.get("valence")
     q_arousal = request.query_params.get("arousal")
     q_valence = float(q_valence) if q_valence else None
@@ -11289,7 +11310,7 @@ async def api_diffusion_debug(request):
     if err:
         return err
 
-    query = request.query_params.get("q", "")
+    query = strip_raw_client_context(request.query_params.get("q", ""))
     max_seeds = _int_between(request.query_params.get("max_seeds"), 3, 1, 20)
     max_hits = _int_between(request.query_params.get("max_hits"), 5, 0, 20)
     edge_min_confidence = _float_between(
