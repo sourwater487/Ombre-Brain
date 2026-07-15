@@ -309,6 +309,31 @@ docker compose up -d --build
 DeepSeek、Qwen、embedding、reranker、脱水与压缩模型均继续以该实际配置文件为准。
 Compose 会在配置文件缺失时直接报错，不会再创建同名目录。
 
+#### `/opt/ombre-brain` 快捷更新
+
+部署目录为 `/opt/ombre-brain` 时，可以一次性安装全局更新命令：
+
+```bash
+sudo /opt/ombre-brain/scripts/ombre-refresh --install
+```
+
+以后在任意目录执行下面的关键词，就会安全拉取 `origin/main`、重新构建并强制替换
+Brain 与 Gateway 容器，然后等待两个健康检查通过：
+
+```bash
+ombre-refresh
+```
+
+怀疑 Docker 层缓存异常时可以完整重建：
+
+```bash
+ombre-refresh --no-cache
+```
+
+脚本不会执行 `docker compose down`，也不会删除 `.env`、`data/buckets` 或运行状态。
+如果 tracked 文件存在本地修改，或者本地分支与远端分叉，脚本会停止并保留现场。
+仓库不在默认目录时，可通过 `OMBRE_REPO_DIR` 覆盖路径。
+
 ### Python 直跑
 
 ```bash
@@ -514,6 +539,7 @@ Python 直跑时对应端口为 `8000/8010`。
 
 常用脚本位于 [`scripts/`](scripts/)：
 
+- `ombre-refresh`：`/opt/ombre-brain` 部署的一词更新入口。
 - `bootstrap_update.sh`：更新旧部署。
 - `update_deploy.sh`：更新并重新部署。
 - `doctor.sh`：检查配置、目录和服务。

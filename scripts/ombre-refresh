@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+COMMAND_NAME="ombre-refresh"
+REPO_DIR="${OMBRE_REPO_DIR:-/opt/ombre-brain}"
+INSTALL_TARGET="${OMBRE_REFRESH_COMMAND_PATH:-/usr/local/bin/${COMMAND_NAME}}"
+NO_CACHE="${OMBRE_BUILD_NO_CACHE:-0}"
+INSTALL_ONLY=0
+
+usage() {
+  printf '%s\n' \
+    "Usage: ${COMMAND_NAME} [--no-cache]" \
+    "       ${COMMAND_NAME} --install" \
+    "" \
+    "Pull origin/main in /opt/ombre-brain, rebuild the Docker services," \
+    "recreate the containers, and wait for both health checks." \
+    "" \
+    "Options:" \
+    "  --no-cache  Rebuild Docker images without using cached layers." \
+    "  --install   Install ${COMMAND_NAME} into /usr/local/bin." \
+    "  -h, --help  Show this help." \
+    "" \
+    "Environment overrides:" \
+    "  OMBRE_REPO_DIR             Repository path (default: /opt/ombre-brain)" \
+    "  COMPOSE_FILE               Compose file (default: docker-compose.yml)" \
+    "  OMBRE_REMOTE               Git remote (default: origin)" \
+    "  OMBRE_BRANCH               Git branch (default: main)" \
+    "  OMBRE_REFRESH_COMMAND_PATH Installed command path"
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --no-cache)
+      NO_CACHE=1
+      shift
+      ;;
+    --install)
+      INSTALL_ONLY=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unknown option: %s\n\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+install_command() {
+  local source_script="${REPO_DIR}/scripts/${COMMAND_NAME}"
+  local target_dir
+  target_dir="$(dirname "${INSTALL_TARGET}")"
+
+  if [[ ! -f "${source_script}" ]]; then
+    echo "Cannot find ${source_script}. Set OMBRE_REPO_DIR if the checkout is elsewhere." >&2
+    exit 1
+  fi
+  if [[ -e "${INSTALL_TARGET}" && ! -L "${INSTALL_TARGET}" ]]; then
+    echo "Refusing to replace existing non-symlink: ${INSTALL_TARGET}" >&2
+    exit 1
+  fi
+  if [[ ! -d "${target_dir}" || ! -w "${target_dir}" ]]; then
+    echo "Cannot write ${target_dir}. Run this installation once with sudo:" >&2
+    echo "  sudo ${source_script} --install" >&2
+    exit 1
+  fi
+
+  ln -sfn "${source_script}" "${INSTALL_TARGET}"
+  echo "Installed ${INSTALL_TARGET} -> ${source_script}"
+  echo "Run '${COMMAND_NAME}' from any directory to update and redeploy Ombre."
+}
+
+if [[ "${INSTALL_ONLY}" == "1" ]]; then
+  install_command
+  exit 0
+fi
+
+if [[ ! -d "${REPO_DIR}/.git" ]]; then
+  echo "Ombre checkout not found at ${REPO_DIR}." >&2
+  echo "Clone the repository there first, or set OMBRE_REPO_DIR." >&2
+  exit 1
+fi
+if [[ ! -f "${REPO_DIR}/scripts/update_deploy.sh" ]]; then
+  echo "Missing ${REPO_DIR}/scripts/update_deploy.sh." >&2
+  exit 1
+fi
+
+cd "${REPO_DIR}"
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Tracked files in ${REPO_DIR} have local changes; deployment stopped." >&2
+  echo "Commit or stash them first. Ignored runtime data such as .env and data/ is unaffected." >&2
+  git status --short --untracked-files=no >&2 || true
+  exit 1
+fi
+
+export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+export OMBRE_REMOTE="${OMBRE_REMOTE:-origin}"
+export OMBRE_BRANCH="${OMBRE_BRANCH:-main}"
+export OMBRE_ALLOW_DIVERGED_RESET="${OMBRE_ALLOW_DIVERGED_RESET:-0}"
+export OMBRE_FORCE_RECREATE="${OMBRE_FORCE_RECREATE:-1}"
+export OMBRE_BUILD_NO_CACHE="${NO_CACHE}"
+
+echo "Ombre refresh: ${REPO_DIR} (${OMBRE_REMOTE}/${OMBRE_BRANCH})"
+exec bash "${REPO_DIR}/scripts/update_deploy.sh"

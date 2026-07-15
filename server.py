@@ -11592,7 +11592,13 @@ async def dashboard(request):
     dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
     try:
         with open(dashboard_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(f.read())
+            return HTMLResponse(
+                f.read(),
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate",
+                    "Pragma": "no-cache",
+                },
+            )
     except FileNotFoundError:
         return HTMLResponse("<h1>dashboard.html not found</h1>", status_code=404)
 
