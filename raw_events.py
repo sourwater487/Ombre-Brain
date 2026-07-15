@@ -56,6 +56,27 @@ CLIENT_STATUS_PREFIX_RE = re.compile(
     r"(?:\s*\|\s*[^\]\r\n]*)*\s*\]\s*(?:\r?\n)?",
     re.IGNORECASE,
 )
+CLIENT_STATUS_CONTEXT_RE = re.compile(
+    r"\[\s*(?P<observed_at>20\d{2}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?)"
+    r"(?P<details>(?:\s*\|\s*[^\]\r\n]*)+)\s*\]",
+    re.IGNORECASE,
+)
+CLIENT_WEATHER_VALUE_RE = re.compile(
+    r"<(?:current_weather|weather)\b[^>]*>([\s\S]*?)</(?:current_weather|weather)\s*>",
+    re.IGNORECASE,
+)
+CLIENT_LOCATION_VALUE_RE = re.compile(
+    r"<(?:current_location|location|geolocation)\b[^>]*>([\s\S]*?)</(?:current_location|location|geolocation)\s*>",
+    re.IGNORECASE,
+)
+CLIENT_TIME_VALUE_RE = re.compile(
+    r"<(?:message_time|current_time|timestamp)\b[^>]*>([\s\S]*?)</(?:message_time|current_time|timestamp)\s*>",
+    re.IGNORECASE,
+)
+CLIENT_WEATHER_HINT_RE = re.compile(
+    r"(?:天气|气温|温度|湿度|体感|晴|阴|多云|雨|雪|雷|雾|霾|风|台风|℃|°C|℉|°F)",
+    re.IGNORECASE,
+)
 CLIENT_CONTEXT_BLOCK_TITLES = {
     "当前时间",
     "当前电量",
@@ -92,6 +113,49 @@ def strip_raw_client_context(text: str, *, strip_injected_xml: bool = True) -> s
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def extract_raw_client_context(text: str, *, max_value_chars: int = 240) -> dict[str, str]:
+    """Extract bounded app-provided weather/location without treating it as speech."""
+    raw = str(text or "")
+    if not raw:
+        return {}
+    limit = max(32, min(2000, int(max_value_chars or 240)))
+
+    def clean_value(value: Any) -> str:
+        cleaned = re.sub(r"<[^>]+>", " ", str(value or ""))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned[:limit].rstrip()
+
+    weather_values = [clean_value(value) for value in CLIENT_WEATHER_VALUE_RE.findall(raw)]
+    location_values = [clean_value(value) for value in CLIENT_LOCATION_VALUE_RE.findall(raw)]
+    time_values = [clean_value(value) for value in CLIENT_TIME_VALUE_RE.findall(raw)]
+    weather = next((value for value in reversed(weather_values) if value), "")
+    location = next((value for value in reversed(location_values) if value), "")
+    observed_at = next((value for value in reversed(time_values) if value), "")
+
+    status_matches = list(CLIENT_STATUS_CONTEXT_RE.finditer(raw))
+    if status_matches:
+        match = status_matches[-1]
+        observed_at = observed_at or clean_value(match.group("observed_at"))
+        details = [clean_value(value) for value in match.group("details").split("|")]
+        details = [value for value in details if value]
+        if details:
+            status_weather = [value for value in details if CLIENT_WEATHER_HINT_RE.search(value)]
+            status_location = [value for value in details if value not in status_weather]
+            if status_weather:
+                weather = weather or " | ".join(status_weather)
+            if status_location:
+                location = location or " | ".join(status_location)
+
+    result = {}
+    if weather:
+        result["weather"] = weather
+    if location:
+        result["location"] = location
+    if result and observed_at:
+        result["observed_at"] = observed_at[:80]
+    return result
 
 
 def _extract_provider_lin_message(text: str) -> str | None:
@@ -182,6 +246,22 @@ class RawEventStore:
         )
         self.db_path = str(raw_cfg.get("db_path") or os.path.join(state_dir, "raw_events.sqlite"))
         self.max_ingest_batch = max(1, min(5000, int(raw_cfg.get("max_ingest_batch", 1000))))
+        self.client_context_enabled = self._bool_config_value(
+            raw_cfg.get("client_context_enabled"),
+            True,
+        )
+        self.client_context_max_records = max(
+            0,
+            min(100000, int(raw_cfg.get("client_context_max_records", 5000))),
+        )
+        self.client_context_max_per_day = max(
+            1,
+            min(500, int(raw_cfg.get("client_context_max_per_day", 24))),
+        )
+        self.client_context_value_max_chars = max(
+            32,
+            min(2000, int(raw_cfg.get("client_context_value_max_chars", 240))),
+        )
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.fts_enabled = False
         self._init_db()
@@ -212,6 +292,26 @@ class RawEventStore:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS raw_client_context (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_event_id INTEGER,
+                context_hash TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                date_key TEXT NOT NULL,
+                weather TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_client_context_date "
+            "ON raw_client_context(date_key, id DESC)"
+        )
+        self._prune_client_context_rows(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_events_created ON raw_events(created_at DESC, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_events_source ON raw_events(source, created_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_events_role ON raw_events(role, created_at DESC)")
@@ -236,6 +336,35 @@ class RawEventStore:
         conn.commit()
         conn.close()
 
+    def _prune_client_context_rows(self, conn: sqlite3.Connection) -> None:
+        if self.client_context_max_records <= 0:
+            return
+        stale_global = conn.execute(
+            "SELECT id FROM raw_client_context ORDER BY id DESC LIMIT -1 OFFSET ?",
+            (self.client_context_max_records,),
+        ).fetchall()
+        if stale_global:
+            conn.executemany(
+                "DELETE FROM raw_client_context WHERE id = ?",
+                [(int(row["id"]),) for row in stale_global],
+            )
+        date_keys = conn.execute(
+            "SELECT date_key FROM raw_client_context GROUP BY date_key "
+            "HAVING COUNT(*) > ?",
+            (self.client_context_max_per_day,),
+        ).fetchall()
+        for row in date_keys:
+            stale_daily = conn.execute(
+                "SELECT id FROM raw_client_context WHERE date_key = ? "
+                "ORDER BY id DESC LIMIT -1 OFFSET ?",
+                (str(row["date_key"]), self.client_context_max_per_day),
+            ).fetchall()
+            if stale_daily:
+                conn.executemany(
+                    "DELETE FROM raw_client_context WHERE id = ?",
+                    [(int(item["id"]),) for item in stale_daily],
+                )
+
     def ingest(self, events: list[dict[str, Any]], *, source: str = "") -> dict[str, Any]:
         safe_source = self._clean_source(source)
         now = self._now_iso()
@@ -243,7 +372,9 @@ class RawEventStore:
         inserted = 0
         duplicate = 0
         rejected = 0
+        client_context_inserted = 0
         for raw in list(events or [])[: self.max_ingest_batch]:
+            raw_text = self._coerce_text((raw or {}).get("text", (raw or {}).get("content", "")))
             normalized, reason = self._normalize_event(raw, default_source=safe_source, ingested_at=now)
             if reason:
                 rejected += 1
@@ -260,6 +391,16 @@ class RawEventStore:
                 inserted += 1
             else:
                 duplicate += 1
+            if normalized["role"] == "user":
+                context_result = self.record_client_context(
+                    raw_text,
+                    source=normalized["source"],
+                    session_id=normalized["session_id"],
+                    created_at=normalized["created_at"],
+                    raw_event_id=row_id,
+                )
+                if context_result.get("status") == "inserted":
+                    client_context_inserted += 1
             items.append(
                 {
                     "status": status,
@@ -274,8 +415,138 @@ class RawEventStore:
             "inserted": inserted,
             "duplicate": duplicate,
             "rejected": rejected,
+            "client_context_inserted": client_context_inserted,
             "items": items,
         }
+
+    def record_client_context(
+        self,
+        text: str,
+        *,
+        source: str = "",
+        session_id: str = "",
+        created_at: str = "",
+        date_key: str = "",
+        raw_event_id: int | None = None,
+    ) -> dict[str, Any]:
+        if not self.client_context_enabled or self.client_context_max_records <= 0:
+            return {"status": "disabled"}
+        context = extract_raw_client_context(
+            text,
+            max_value_chars=self.client_context_value_max_chars,
+        )
+        if not context:
+            return {"status": "empty"}
+        safe_created_at = self._clean_time(created_at or context.get("observed_at") or self._now_iso())
+        safe_date_key = self._clean_date_key(
+            date_key or context.get("observed_at") or safe_created_at
+        )
+        fingerprint = {
+            "date_key": safe_date_key,
+            "weather": context.get("weather", ""),
+            "location": context.get("location", ""),
+        }
+        context_hash = hashlib.sha256(
+            json.dumps(fingerprint, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return self._insert_client_context(
+            raw_event_id=raw_event_id,
+            context_hash=context_hash,
+            source=self._clean_source(source),
+            session_id=str(session_id or "")[:160],
+            created_at=safe_created_at,
+            date_key=safe_date_key,
+            weather=str(context.get("weather") or ""),
+            location=str(context.get("location") or ""),
+        )
+
+    def list_client_context_for_date(self, date_key: str, *, limit: int = 24) -> list[dict[str, Any]]:
+        safe_date_key = self._clean_date_key(date_key, fallback_today=False)
+        try:
+            safe_limit = max(0, min(500, int(limit)))
+        except (TypeError, ValueError):
+            safe_limit = 24
+        if not safe_date_key or safe_limit <= 0:
+            return []
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, raw_event_id, source, session_id, created_at, date_key, weather, location
+                FROM raw_client_context
+                WHERE date_key = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_date_key, safe_limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(row) for row in rows]
+
+    def _insert_client_context(
+        self,
+        *,
+        raw_event_id: int | None,
+        context_hash: str,
+        source: str,
+        session_id: str,
+        created_at: str,
+        date_key: str,
+        weather: str,
+        location: str,
+    ) -> dict[str, Any]:
+        conn = self._connect()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM raw_client_context WHERE context_hash = ? LIMIT 1",
+                (context_hash,),
+            ).fetchone()
+            if existing:
+                return {"status": "duplicate", "id": int(existing["id"])}
+
+            same_day_rows = conn.execute(
+                "SELECT id FROM raw_client_context WHERE date_key = ? ORDER BY id DESC",
+                (date_key,),
+            ).fetchall()
+            stale_same_day = same_day_rows[max(0, self.client_context_max_per_day - 1) :]
+            if stale_same_day:
+                conn.executemany(
+                    "DELETE FROM raw_client_context WHERE id = ?",
+                    [(int(row["id"]),) for row in stale_same_day],
+                )
+
+            cursor = conn.execute(
+                """
+                INSERT INTO raw_client_context
+                (raw_event_id, context_hash, source, session_id, created_at, date_key, weather, location)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(raw_event_id) if raw_event_id else None,
+                    context_hash,
+                    source,
+                    session_id,
+                    created_at,
+                    date_key,
+                    weather,
+                    location,
+                ),
+            )
+            row_id = int(cursor.lastrowid or 0)
+            conn.execute(
+                """
+                DELETE FROM raw_client_context
+                WHERE id NOT IN (
+                    SELECT id FROM raw_client_context ORDER BY id DESC LIMIT ?
+                )
+                """,
+                (self.client_context_max_records,),
+            )
+            conn.commit()
+            return {"status": "inserted", "id": row_id, "date_key": date_key}
+        finally:
+            conn.close()
 
     def search(
         self,
@@ -524,6 +795,26 @@ class RawEventStore:
         if not text:
             return RawEventStore._now_iso()
         return text[:80]
+
+    @staticmethod
+    def _clean_date_key(value: Any, *, fallback_today: bool = True) -> str:
+        text = str(value or "").strip()
+        match = re.search(r"(?<!\d)(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?!\d)", text)
+        if match:
+            year, month, day = (int(part) for part in match.groups())
+            try:
+                return datetime(year, month, day).date().isoformat()
+            except ValueError:
+                pass
+        return datetime.now(timezone.utc).date().isoformat() if fallback_today else ""
+
+    @staticmethod
+    def _bool_config_value(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     @staticmethod
     def _now_iso() -> str:

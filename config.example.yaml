@@ -265,6 +265,10 @@ word_map:
 raw_events:
   db_path: ""                          # empty = state_dir/raw_events.sqlite
   max_ingest_batch: 1000
+  client_context_enabled: true         # keep bounded app weather/location snapshots outside dialogue text
+  client_context_max_records: 5000     # global hard cap; oldest snapshots are pruned first
+  client_context_max_per_day: 24       # per-day hard cap after exact same-day snapshot dedupe
+  client_context_value_max_chars: 240  # hard cap for each weather/location field
 
 # --- Private identity semantics / 私有身份语义 ---
 # Optional private canonical alias overlay. Do not put personal canonical nodes
@@ -369,6 +373,7 @@ gateway:
   semantic_session_dedupe_lexical_threshold: 0.82
   inject_total_budget: 1800
   core_memory_budget: 0
+  recent_context_mode: auto # auto | explicit_only | off
   recent_context_budget: 300
   just_now_context_enabled: true     # 刚刚/刚才/上一句: use short-term conversation_turns, not long-term memory
   just_now_context_hours: 6
@@ -387,6 +392,7 @@ gateway:
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
   date_persona_trace_include_daily: true
+  date_recall_max_client_contexts: 6 # bounded weather/location snapshots for explicit date queries
   recalled_memory_budget: 900
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   retrieval_mode: graph       # graph | bucket; bucket skips moment graph diffusion

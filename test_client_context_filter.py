@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from gateway import GatewayService
-from raw_events import RawEventStore, strip_raw_client_context
+from persona_event_selection import format_persona_event_trace_line
+from raw_events import RawEventStore, extract_raw_client_context, strip_raw_client_context
 
 
 WEB_REQUEST_TEXT = """<dynamic_context>
@@ -17,6 +20,30 @@ WEB_REQUEST_TEXT = """<dynamic_context>
 
 def test_web_request_keeps_only_the_lin_utterance():
     assert strip_raw_client_context(WEB_REQUEST_TEXT) == "我真正说的话"
+
+
+def test_web_request_extracts_bounded_client_context_separately():
+    assert extract_raw_client_context(WEB_REQUEST_TEXT) == {
+        "weather": "小雨 28℃",
+        "location": "上海市徐汇区",
+        "observed_at": "2026-07-14T21:05:00+08:00",
+    }
+
+
+def test_split_weather_status_fields_are_not_misclassified_as_location():
+    context = extract_raw_client_context(
+        "<lin_message>[2026-07-14 21:05 | 微风 | 雷雨 | 高新南社区公园]\n正文</lin_message>"
+    )
+
+    assert context["weather"] == "微风 | 雷雨"
+    assert context["location"] == "高新南社区公园"
+
+
+def test_lin_weather_and_location_prose_is_not_client_metadata():
+    text = "深圳今天有雷雨，我被困在公司了。"
+
+    assert strip_raw_client_context(text) == text
+    assert extract_raw_client_context(text) == {}
 
 
 def test_standalone_client_metadata_xml_is_removed():
@@ -151,3 +178,203 @@ def test_raw_event_ingest_preserves_assistant_xml_examples(tmp_path):
         end_at=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     assert [event["text"] for event in events] == [assistant_text]
+
+
+def test_primary_memory_policy_names_lin_instead_of_generic_user():
+    service = object.__new__(GatewayService)
+    service.identity = {"user_display_name": "Lin", "ai_name": "Che"}
+
+    policy = service._memory_reading_policy_context()
+
+    assert "prefer Lin's current message" in policy
+    assert "prefer the user's current message" not in policy
+
+
+def test_date_persona_trace_uses_identity_labels():
+    line = format_persona_event_trace_line(
+        {"user_excerpt": "你好", "assistant_excerpt": "在呢"},
+        user_label="Lin",
+        assistant_label="Che",
+    )
+
+    assert "Lin: 你好" in line
+    assert "Che: 在呢" in line
+
+
+def test_client_context_snapshots_are_deduped_and_hard_capped(tmp_path):
+    store = RawEventStore(
+        {
+            "state_dir": str(tmp_path),
+            "raw_events": {
+                "client_context_max_records": 3,
+                "client_context_max_per_day": 2,
+                "client_context_value_max_chars": 80,
+            },
+        }
+    )
+
+    def ingest_snapshot(day: str, index: int, *, weather: str | None = None):
+        value = weather or f"小雨 {20 + index}℃"
+        text = (
+            f"<lin_message>[{day} 09:0{index} | {value} | 地点{index}]\n"
+            f"正文{index}</lin_message>"
+        )
+        return store.ingest(
+            [
+                {
+                    "source_event_id": f"event-{day}-{index}-{value}",
+                    "role": "user",
+                    "text": text,
+                    "created_at": f"{day}T09:0{index}:00+08:00",
+                    "session_id": "lin-main",
+                }
+            ],
+            source="test",
+        )
+
+    ingest_snapshot("2026-07-10", 0)
+    ingest_snapshot("2026-07-10", 1)
+    ingest_snapshot("2026-07-10", 2)
+    day_one = store.list_client_context_for_date("2026-07-10")
+    assert [item["weather"] for item in day_one] == ["小雨 22℃", "小雨 21℃"]
+
+    duplicate = store.record_client_context(
+        "<weather>小雨 22℃</weather><location>地点2</location>",
+        date_key="2026-07-10",
+    )
+    assert duplicate["status"] == "duplicate"
+
+    ingest_snapshot("2026-07-11", 3)
+    ingest_snapshot("2026-07-11", 4)
+    assert len(store.list_client_context_for_date("2026-07-10")) == 1
+    assert len(store.list_client_context_for_date("2026-07-11")) == 2
+
+
+def test_date_recall_dedupes_only_substantive_pairs_in_current_window():
+    service = object.__new__(GatewayService)
+    service.persona_engine = SimpleNamespace()
+    duplicate_turn = {
+        "id": 1,
+        "user_text": "我们昨天认真讨论了夜梦的结构化元数据保存方案。",
+        "assistant_text": "我建议把自动天气和位置放进有上限的独立快照表。",
+    }
+    short_turn = {"id": 2, "user_text": "晚安", "assistant_text": "晚安宝宝"}
+    novel_turn = {
+        "id": 3,
+        "user_text": "后来我们还讨论了窗口去重应该怎么做。",
+        "assistant_text": "最后决定使用成对文本指纹，不调用模型。",
+    }
+    messages = [
+        {"role": "user", "content": duplicate_turn["user_text"]},
+        {"role": "assistant", "content": duplicate_turn["assistant_text"]},
+        {"role": "user", "content": short_turn["user_text"]},
+        {"role": "assistant", "content": short_turn["assistant_text"]},
+    ]
+
+    kept, debug = service._dedupe_date_recall_turns(
+        [duplicate_turn, short_turn, novel_turn],
+        messages,
+    )
+
+    assert [turn["id"] for turn in kept] == [2, 3]
+    assert debug["dropped_turn_count"] == 1
+    assert debug["dedupe_ms"] >= 0
+
+
+def test_date_recall_keeps_topic_terms_debug_only():
+    service = object.__new__(GatewayService)
+    service.identity = {"user_display_name": "Lin", "ai_name": "Che"}
+    service.persona_engine = SimpleNamespace()
+    service.gateway_tz = ZoneInfo("Asia/Shanghai")
+    service.date_recall_enabled = True
+    service.date_recall_budget = 520
+    service.date_recall_max_buckets = 4
+    service.date_recall_max_client_contexts = 6
+    service._query_date_recall_hint = lambda _query: {"date": "2026-07-14", "label": "昨天"}
+    service._date_recall_protected_topic_terms = lambda _query: []
+    service._date_recall_topic_terms = lambda _query: ["夜梦"]
+    service._query_requires_role_safe_date_transcript = lambda _query: False
+    service._date_recall_turns_for_range = lambda *_args, **_kwargs: (
+        [
+            {
+                "id": 7,
+                "created_at": "2026-07-14T21:00:00+08:00",
+                "session_id": "lin-main",
+                "user_text": "昨天我们讨论了夜梦应该如何保存环境快照。",
+                "assistant_text": "我建议给快照设置全局和每日双重上限。",
+            }
+        ],
+        "raw_events",
+    )
+    service._date_recall_buckets_for_date = lambda *_args: []
+    service._date_recall_client_contexts_for_query = lambda *_args: []
+
+    text, debug, _bucket_ids = service._build_date_recall_context(
+        "昨天夜梦聊了什么",
+        [],
+        current_messages=[],
+    )
+
+    assert "chat_transcript:" in text
+    assert "topic_filter:" not in text
+    assert debug["topic_terms"] == ["夜梦"]
+
+
+def test_date_recall_client_context_requires_direct_relevance(tmp_path):
+    store = RawEventStore({"state_dir": str(tmp_path)})
+    store.record_client_context(
+        "<weather>雷雨 29℃</weather><location>高新南社区公园</location>",
+        date_key="2026-07-14",
+    )
+    service = object.__new__(GatewayService)
+    service.raw_event_store = store
+    service.date_recall_max_client_contexts = 6
+
+    weather = service._date_recall_client_contexts_for_query(
+        "2026-07-14",
+        "昨天天气怎么样",
+        ["天气"],
+    )
+    location = service._date_recall_client_contexts_for_query(
+        "2026-07-14",
+        "昨天在高新南社区公园聊了什么",
+        ["高新南社区公园"],
+    )
+    unrelated = service._date_recall_client_contexts_for_query(
+        "2026-07-14",
+        "昨天聊了夜梦",
+        ["夜梦"],
+    )
+
+    assert weather[0]["weather"] == "雷雨 29℃"
+    assert weather[0]["location"] == ""
+    assert location[0]["location"] == "高新南社区公园"
+    assert location[0]["weather"] == ""
+    assert unrelated == []
+
+
+def test_explicit_date_weather_or_location_question_can_trigger_recall():
+    service = object.__new__(GatewayService)
+    service.gateway_tz = ZoneInfo("Asia/Shanghai")
+    service.identity = {
+        "ai_name": "Che",
+        "user_name": "Lin",
+        "user_display_name": "Lin",
+        "user_aliases": [],
+        "relationship_terms": [],
+    }
+
+    assert service._query_requests_date_recall("昨天天气怎么样") is True
+    assert service._query_requests_date_recall("昨天在哪里") is True
+    assert service._query_requests_date_recall("今天状态怎么样") is False
+
+
+def test_recent_context_explicit_only_disables_passive_triggers():
+    service = object.__new__(GatewayService)
+    service.recent_budget = 300
+    service.head_recent_hours = 24
+    service.recent_context_mode = "explicit_only"
+    service._query_requests_recent_context = lambda query: "最近" in query
+
+    assert service._should_inject_recent_context("lin-main", "最近聊了什么") is True
+    assert service._should_inject_recent_context("lin-main", "今天有点累") is False

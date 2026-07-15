@@ -1820,9 +1820,10 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
         if part
     )
 
+    user_display_name = str(_identity().get("user_display_name") or "Lin").strip()
     sections = [
         (SELF_ANCHOR_TAG, self_context, 180, False),
-        ("User Portrait", user_portrait, 140, False),
+        (f"{user_display_name} Portrait", user_portrait, 140, False),
         ("Current Focus", current_focus, 120, True),
         ("Relationship Portrait", relationship_portrait, 160, False),
         ("Recent Continuity", recent_continuity, 650, True),
@@ -11750,6 +11751,7 @@ async def api_config_get(request):
             "skip_recent_rounds": gateway_cfg.get("skip_recent_rounds", 5),
             "recent_context_cooldown_hours": gateway_cfg.get("recent_context_cooldown_hours", 6),
             "recent_context_reentry_idle_hours": gateway_cfg.get("recent_context_reentry_idle_hours", 24),
+            "recent_context_mode": str(gateway_cfg.get("recent_context_mode") or "auto"),
             "recent_context_budget": gateway_cfg.get("recent_context_budget", 300),
             "date_persona_trace_enabled": _bool_value(gateway_cfg.get("date_persona_trace_enabled"), True),
             "date_persona_trace_budget": gateway_cfg.get("date_persona_trace_budget", 220),
@@ -12244,6 +12246,13 @@ async def api_config_update(request):
                 "recent_context_reentry_idle_hours"
             ]
             updated.append("gateway.recent_context_reentry_idle_hours")
+        if "recent_context_mode" in g:
+            recent_context_mode = str(g["recent_context_mode"] or "auto").strip().lower().replace("-", "_")
+            if recent_context_mode not in {"auto", "explicit_only", "off"}:
+                recent_context_mode = "auto"
+            gateway_cfg["recent_context_mode"] = recent_context_mode
+            gateway_hot_update_body["recent_context_mode"] = recent_context_mode
+            updated.append("gateway.recent_context_mode")
         if "recent_context_budget" in g:
             gateway_cfg["recent_context_budget"] = max(0, int(g["recent_context_budget"]))
             gateway_hot_update_body["recent_context_budget"] = gateway_cfg["recent_context_budget"]
@@ -12773,6 +12782,15 @@ async def api_config_update(request):
                     sc_gateway["recent_context_reentry_idle_hours"] = max(
                         0.0,
                         float(body["gateway"]["recent_context_reentry_idle_hours"]),
+                    )
+                if "recent_context_mode" in body["gateway"]:
+                    recent_context_mode = str(
+                        body["gateway"]["recent_context_mode"] or "auto"
+                    ).strip().lower().replace("-", "_")
+                    sc_gateway["recent_context_mode"] = (
+                        recent_context_mode
+                        if recent_context_mode in {"auto", "explicit_only", "off"}
+                        else "auto"
                     )
                 if "recent_context_budget" in body["gateway"]:
                     sc_gateway["recent_context_budget"] = max(0, int(body["gateway"]["recent_context_budget"]))

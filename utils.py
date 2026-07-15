@@ -220,6 +220,10 @@ def load_config(config_path: str = None) -> dict:
         "raw_events": {
             "db_path": "",
             "max_ingest_batch": 1000,
+            "client_context_enabled": True,
+            "client_context_max_records": 5000,
+            "client_context_max_per_day": 24,
+            "client_context_value_max_chars": 240,
         },
         "identity_semantics": {
             "enabled": False,
@@ -297,7 +301,9 @@ def load_config(config_path: str = None) -> dict:
             "domain_sentinel_enable_thinking": False,
             "inject_total_budget": 1200,
             "core_memory_budget": 0,
+            "recent_context_mode": "auto",
             "recent_context_budget": 300,
+            "date_recall_max_client_contexts": 6,
             "recalled_memory_budget": 400,
             "direct_render_mode": "auto",
             "bucket_list_cache_ttl_seconds": 300,

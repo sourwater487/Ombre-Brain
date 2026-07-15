@@ -40,7 +40,7 @@ flowchart LR
 
 ### 1. 原文层
 
-`raw_events.sqlite` 保存 user / assistant 原始对话，用于查原句、指定日期和长期记忆没有覆盖的细节。它不是普通语义记忆池，也不会自动整段注入。
+`raw_events.sqlite` 保存 user / assistant 原始对话，用于查原句、指定日期和长期记忆没有覆盖的细节。它不是普通语义记忆池，也不会自动整段注入。客户端自动附带的天气/位置不混入正文，而是写入独立的有界快照表：同日相同值去重，并受每日条数、全局条数和字段长度三重上限约束。
 
 询问“那天原话是什么”或给出明确日期时，应优先走原文 / 日期检索；当天没有证据，就不拿附近日期的语义记忆代替。
 
@@ -193,7 +193,7 @@ Gateway 支持：
 - 模型列表：`GET /v1/models`
 - 注入调试：`GET /api/debug/injections`
 
-动态注入以低噪声为原则，可能包含 Recent Context、Recalled Memory、Diffused Memory、关系天气或梦境；是否出现取决于查询类型、可靠性、冷却和预算。画像与自我入口只在 handoff 恢复，不在普通每轮重复注入。
+动态注入以低噪声为原则，可能包含 Recent Context、Recalled Memory、Diffused Memory、关系天气或梦境；是否出现取决于查询类型、可靠性、冷却和预算。`gateway.recent_context_mode` 支持 `auto`、`explicit_only` 和 `off`；`explicit_only` 只在 Lin 明确询问最近/上次内容时注入。画像与自我入口只在 handoff 恢复，不在普通每轮重复注入。
 
 `X-Ombre-Session-Id` 用来隔离会话短态和召回冷却。相同值共享同一会话状态；它不是 OpenAI 标准字段。为不同聊天窗口使用稳定、明确的名称即可，不要照抄他人的生产 session id。
 

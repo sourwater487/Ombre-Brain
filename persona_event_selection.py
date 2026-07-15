@@ -164,15 +164,17 @@ def format_persona_event_trace_line(
     *,
     excerpt_limit: int = 180,
     tz: ZoneInfo | None = _TRACE_TZ,
+    user_label: str = "user",
+    assistant_label: str = "assistant",
 ) -> str:
     time_label = _time_label(event.get("created_at"), tz=tz)
     user_excerpt = trim_persona_excerpt(event.get("user_excerpt"), excerpt_limit)
     assistant_excerpt = trim_persona_excerpt(event.get("assistant_excerpt"), excerpt_limit)
     parts = []
     if user_excerpt:
-        parts.append(f"user: {user_excerpt}")
+        parts.append(f"{user_label}: {user_excerpt}")
     if assistant_excerpt:
-        parts.append(f"assistant: {assistant_excerpt}")
+        parts.append(f"{assistant_label}: {assistant_excerpt}")
     if not parts:
         trigger = trim_persona_excerpt(event.get("surface_trigger") or event.get("perceived_intent"), 90)
         inner = trim_persona_excerpt(event.get("inner_thought") or event.get("residue"), 90)

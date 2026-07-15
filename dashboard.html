@@ -3004,9 +3004,13 @@
       <h3>记忆浮现</h3>
       <div class="config-row">
         <label>最近记忆</label>
-        <select id="cfg-recent-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+        <select id="cfg-recent-context-mode">
+          <option value="auto">自动</option>
+          <option value="explicit_only">仅明确询问</option>
+          <option value="off">关闭</option>
+        </select>
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 不自动注入 Recent Context；可靠直命中和扩散不受影响</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">“仅明确询问”不会被动注入，但 Lin 问“最近/上次聊了什么”时仍可使用；关闭则完全禁用</div>
       <div class="config-row">
         <label>Persona提示</label>
         <select id="cfg-persona-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
@@ -8226,8 +8230,9 @@ async function loadConfig() {
       (cfg.gateway && cfg.gateway.recent_context_reentry_idle_hours) ?? 24;
     document.getElementById('cfg-recent-context-budget').value =
       (cfg.gateway && cfg.gateway.recent_context_budget) ?? 300;
-    document.getElementById('cfg-recent-context-enabled').value =
-      ((cfg.gateway && cfg.gateway.recent_context_budget) ?? 300) > 0 ? 'true' : 'false';
+    document.getElementById('cfg-recent-context-mode').value =
+      (cfg.gateway && cfg.gateway.recent_context_mode) ||
+      ((((cfg.gateway && cfg.gateway.recent_context_budget) ?? 300) > 0) ? 'auto' : 'off');
     document.getElementById('cfg-recalled-memory-budget').value =
       (cfg.gateway && cfg.gateway.recalled_memory_budget) ?? 900;
     document.getElementById('cfg-related-memory-budget').value =
@@ -8368,7 +8373,8 @@ async function saveConfig(persist, persistEnv) {
     if (Object.keys(changed).length) target[sectionName] = changed;
   }
 
-  var recentContextEnabled = document.getElementById('cfg-recent-context-enabled').value === 'true';
+  var recentContextMode = document.getElementById('cfg-recent-context-mode').value || 'auto';
+  var recentContextEnabled = recentContextMode !== 'off';
   var recentContextBudget = recentContextEnabled ? numberValue('cfg-recent-context-budget', 300) : 0;
   if (recentContextEnabled && recentContextBudget <= 0) recentContextBudget = 300;
   var personaContextEnabled = document.getElementById('cfg-persona-context-enabled').value === 'true';
@@ -8494,6 +8500,7 @@ async function saveConfig(persist, persistEnv) {
       skip_recent_rounds: numberValue('cfg-gateway-rounds', 5),
       recent_context_cooldown_hours: floatValue('cfg-recent-context-cooldown', 6),
       recent_context_reentry_idle_hours: floatValue('cfg-recent-context-reentry', 24),
+      recent_context_mode: recentContextMode,
       recent_context_budget: recentContextBudget,
       recalled_memory_budget: numberValue('cfg-recalled-memory-budget', 900),
       related_memory_budget: numberValue('cfg-related-memory-budget', 220),
