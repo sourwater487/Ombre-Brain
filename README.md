@@ -195,6 +195,11 @@ Gateway 支持：
 
 动态注入以低噪声为原则，可能包含 Recent Context、Recalled Memory、Diffused Memory、关系天气或梦境；是否出现取决于查询类型、可靠性、冷却和预算。`gateway.recent_context_mode` 支持 `auto`、`explicit_only` 和 `off`；`explicit_only` 只在 Lin 明确询问最近/上次内容时注入。画像与自我入口只在 handoff 恢复，不在普通每轮重复注入。
 
+前端的独立表情包消息（例如 `{"type":"sticker","id":"小猫-开心"}`）会原样留在
+上游聊天窗口中，但不作为 Ombre 检索查询，也不写入 Raw Events、Recent Context、日期召回、
+Persona 更新或日总结材料。只有字段严格为 `type` 与 `id` 的完整独立 JSON 对象会被识别；
+普通 JSON、正文中引用的表情包 JSON 和表情包库清单不会被误删。
+
 `X-Ombre-Session-Id` 用来隔离会话短态和召回冷却。相同值共享同一会话状态；它不是 OpenAI 标准字段。为不同聊天窗口使用稳定、明确的名称即可，不要照抄他人的生产 session id。
 
 查看一次召回是否真的注入，应以 Gateway 的 debug injection 记录或带 debug 的 payload 为准，不能只看搜索候选列表。

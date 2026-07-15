@@ -4,7 +4,13 @@ from zoneinfo import ZoneInfo
 
 from gateway import GatewayService
 from persona_event_selection import format_persona_event_trace_line
-from raw_events import RawEventStore, extract_raw_client_context, strip_raw_client_context
+from raw_events import (
+    RawEventStore,
+    extract_raw_client_context,
+    is_sticker_payload,
+    strip_raw_client_context,
+)
+from reflection_engine import ReflectionEngine
 
 
 WEB_REQUEST_TEXT = """<dynamic_context>
@@ -16,6 +22,7 @@ WEB_REQUEST_TEXT = """<dynamic_context>
 [2026-07-14 21:05 | 小雨 28℃ | 上海市徐汇区]
 我真正说的话
 </lin_message>"""
+STICKER_TEXT = '{"type":"sticker","id":"小猫-开心"}'
 
 
 def test_web_request_keeps_only_the_lin_utterance():
@@ -80,6 +87,24 @@ def test_unrelated_xml_is_not_removed():
     assert strip_raw_client_context(text) == text
 
 
+def test_standalone_sticker_json_is_non_recallable_but_regular_json_is_preserved():
+    assert is_sticker_payload(STICKER_TEXT) is True
+    assert strip_raw_client_context(STICKER_TEXT) == ""
+    assert strip_raw_client_context(
+        '<lin_message>{"type":"sticker","id":"小猫-开心"}</lin_message>'
+    ) == ""
+
+    regular_json = '{"type":"note","id":"小猫-开心"}'
+    sticker_example_in_prose = '格式示例：{"type":"sticker","id":"小猫-开心"}'
+    sticker_with_extra_fields = '{"type":"sticker","id":"小猫-开心","caption":"示例"}'
+    sticker_library = '[{"id":"小猫-请给我","url":"https://example.com/a.jpg"}]'
+    assert is_sticker_payload(regular_json) is False
+    assert strip_raw_client_context(regular_json) == regular_json
+    assert strip_raw_client_context(sticker_example_in_prose) == sticker_example_in_prose
+    assert strip_raw_client_context(sticker_with_extra_fields) == sticker_with_extra_fields
+    assert strip_raw_client_context(sticker_library) == sticker_library
+
+
 def test_lin_message_mentioned_inside_ordinary_prose_is_not_an_envelope():
     text = "请解释 <lin_message>foo</lin_message> 这个 XML"
 
@@ -92,6 +117,26 @@ def test_gateway_current_turn_query_uses_the_same_filter():
     assert service._extract_current_turn_user_query(
         [{"role": "user", "content": WEB_REQUEST_TEXT}]
     ) == "我真正说的话"
+
+
+def test_gateway_keeps_sticker_as_raw_current_message_but_not_as_recall_query():
+    service = object.__new__(GatewayService)
+    messages = [{"role": "user", "content": STICKER_TEXT}]
+
+    assert service._extract_current_turn_user_raw_text(messages) == STICKER_TEXT
+    assert service._extract_current_turn_user_query(messages) == ""
+    assert messages == [{"role": "user", "content": STICKER_TEXT}]
+
+
+def test_latest_sticker_does_not_fall_back_to_an_older_persona_message():
+    service = object.__new__(GatewayService)
+    messages = [
+        {"role": "user", "content": "上一轮真正的问题"},
+        {"role": "assistant", "content": "上一轮回复"},
+        {"role": "user", "content": STICKER_TEXT},
+    ]
+
+    assert service._extract_last_user_query(messages) == ""
 
 
 def test_gateway_filters_split_text_blocks_around_an_image():
@@ -178,6 +223,56 @@ def test_raw_event_ingest_preserves_assistant_xml_examples(tmp_path):
         end_at=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     assert [event["text"] for event in events] == [assistant_text]
+
+
+def test_raw_event_ingest_rejects_sticker_only_events(tmp_path):
+    store = RawEventStore({"state_dir": str(tmp_path)})
+
+    result = store.ingest(
+        [{"role": "user", "text": STICKER_TEXT}],
+        source="test",
+    )
+
+    assert result["inserted"] == 0
+    assert result["rejected"] == 1
+    assert result["items"][0]["reason"] == "empty_text"
+
+
+def test_reflection_filters_historical_sticker_rows_from_memory_material():
+    conversation_turns = ReflectionEngine._conversation_turn_payloads(
+        [
+            {
+                "id": 1,
+                "user_text": STICKER_TEXT,
+                "assistant_text": "看到啦。",
+            }
+        ],
+        limit=10,
+    )
+    raw_turns = ReflectionEngine._raw_event_turn_payloads(
+        [
+            {
+                "id": 1,
+                "role": "user",
+                "text": STICKER_TEXT,
+                "session_id": "lin-main",
+                "metadata": {"round_id": 1},
+            },
+            {
+                "id": 2,
+                "role": "assistant",
+                "text": "看到啦。",
+                "session_id": "lin-main",
+                "metadata": {"round_id": 1},
+            },
+        ],
+        limit=10,
+    )
+
+    assert conversation_turns[0]["user_text"] == ""
+    assert raw_turns[0]["user_text"] == ""
+    assert STICKER_TEXT not in str(conversation_turns)
+    assert STICKER_TEXT not in str(raw_turns)
 
 
 def test_primary_memory_policy_names_lin_instead_of_generic_user():

@@ -88,6 +88,28 @@ CLIENT_CONTEXT_BLOCK_TITLES = {
     "相关记忆",
     "屏幕文本",
 }
+STICKER_PAYLOAD_KEYS = {"type", "id"}
+STICKER_PAYLOAD_MAX_CHARS = 4096
+
+
+def is_sticker_payload(text: Any) -> bool:
+    """Return true only for the frontend's complete, standalone sticker JSON."""
+    raw = str(text or "").strip()
+    if (
+        not raw
+        or len(raw) > STICKER_PAYLOAD_MAX_CHARS
+        or not raw.startswith("{")
+        or not raw.endswith("}")
+    ):
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or set(payload) != STICKER_PAYLOAD_KEYS:
+        return False
+    sticker_id = payload.get("id")
+    return payload.get("type") == "sticker" and isinstance(sticker_id, str) and bool(sticker_id.strip())
 
 
 def strip_raw_client_context(text: str, *, strip_injected_xml: bool = True) -> str:
@@ -112,7 +134,8 @@ def strip_raw_client_context(text: str, *, strip_injected_xml: bool = True) -> s
     cleaned = _strip_client_context_blocks(cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
+    cleaned = cleaned.strip()
+    return "" if is_sticker_payload(cleaned) else cleaned
 
 
 def extract_raw_client_context(text: str, *, max_value_chars: int = 240) -> dict[str, str]:

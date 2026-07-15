@@ -14,6 +14,7 @@ from identity import generic_identity_names, identity_names, render_identity_tem
 from memory_edges import RELATION_TYPES, MemoryEdgeStore
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from persona_event_selection import select_persona_events
+from raw_events import strip_raw_client_context
 from self_anchor import is_self_anchor_bucket
 from utils import bucket_text_for_embedding, strip_wikilinks
 
@@ -1573,8 +1574,14 @@ class ReflectionEngine:
             return []
         selected = []
         for turn in turns:
-            user_text = str(turn.get("user_text") or "").strip()
-            assistant_text = str(turn.get("assistant_text") or "").strip()
+            user_text = strip_raw_client_context(
+                str(turn.get("user_text") or ""),
+                strip_injected_xml=True,
+            )
+            assistant_text = strip_raw_client_context(
+                str(turn.get("assistant_text") or ""),
+                strip_injected_xml=False,
+            )
             if not user_text and not assistant_text:
                 continue
             selected.append(
@@ -1602,7 +1609,10 @@ class ReflectionEngine:
             role = str(event.get("role") or "").strip().lower()
             if role not in {"user", "assistant"}:
                 continue
-            text = str(event.get("text") or "").strip()
+            text = strip_raw_client_context(
+                str(event.get("text") or ""),
+                strip_injected_xml=role == "user",
+            )
             if not text:
                 continue
             metadata = event.get("metadata", {}) if isinstance(event.get("metadata"), dict) else {}

@@ -7026,9 +7026,11 @@ class GatewayService:
             if message.get("role") != "user":
                 continue
             content = self._coerce_message_text(message.get("content"))
-            cleaned = self._strip_external_context_from_user_text(content)
-            if cleaned:
-                return cleaned
+            # The latest user item is authoritative even when it contains only
+            # non-recallable client data such as a sticker payload. Falling
+            # through to an older user item would mislabel that old text as the
+            # current Persona exchange.
+            return self._strip_external_context_from_user_text(content)
         return ""
 
     def _extract_keepalive_current_turn_query(self, messages: list[dict[str, Any]]) -> str:
