@@ -164,6 +164,79 @@ def test_gateway_tool_continuation_is_not_treated_as_a_new_user_turn():
     assert service._extract_current_turn_user_query(messages) == ""
 
 
+def test_gateway_does_not_add_plaintext_reasoning_when_structured_details_exist():
+    service = object.__new__(GatewayService)
+    assistant_message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "weather", "arguments": '{"city":"Shanghai"}'},
+            }
+        ],
+        "reasoning_details": [
+            {
+                "type": "reasoning.encrypted",
+                "data": "opaque-provider-payload",
+                "format": "anthropic-claude-v1",
+                "index": 0,
+            }
+        ],
+    }
+    signature = service._tool_call_signature(assistant_message)
+    service.pending_tool_reasoning = {
+        "lin-main": {
+            signature: {
+                "reasoning_content": "legacy plaintext reasoning",
+                "tool_calls": assistant_message["tool_calls"],
+            }
+        }
+    }
+    messages = [
+        assistant_message,
+        {"role": "tool", "tool_call_id": "call_1", "content": "tool result"},
+    ]
+
+    service._restore_cached_reasoning_content("lin-main", messages)
+
+    assert "reasoning_content" not in assistant_message
+    assert assistant_message["reasoning_details"][0]["data"] == "opaque-provider-payload"
+
+
+def test_gateway_keeps_legacy_plaintext_reasoning_restore_as_fail_open_fallback():
+    service = object.__new__(GatewayService)
+    assistant_message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "weather", "arguments": '{"city":"Shanghai"}'},
+            }
+        ],
+    }
+    signature = service._tool_call_signature(assistant_message)
+    service.pending_tool_reasoning = {
+        "lin-main": {
+            signature: {
+                "reasoning_content": "legacy plaintext reasoning",
+                "tool_calls": assistant_message["tool_calls"],
+            }
+        }
+    }
+    messages = [
+        assistant_message,
+        {"role": "tool", "tool_call_id": "call_1", "content": "tool result"},
+    ]
+
+    service._restore_cached_reasoning_content("lin-main", messages)
+
+    assert assistant_message["reasoning_content"] == "legacy plaintext reasoning"
+
+
 def test_gateway_stored_turn_cleanup_is_role_aware():
     service = object.__new__(GatewayService)
     cleaned_by_persona = []

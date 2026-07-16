@@ -20285,7 +20285,7 @@ class GatewayService:
         for message in messages:
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
-            if message.get("reasoning_content"):
+            if message.get("reasoning_content") or message.get("reasoning_details"):
                 continue
             signature = self._tool_call_signature(message)
             if not signature:
