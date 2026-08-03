@@ -115,6 +115,7 @@ def local_date_key(value, *, tz=LOCAL_TZ) -> str:
     return parsed.date().isoformat()
 
 
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 def load_config(config_path: str = None) -> dict:
     """
     Load configuration file.
@@ -137,12 +138,6 @@ def load_config(config_path: str = None) -> dict:
             "max_items_per_chunk": 5,
             "max_tags": 6,
             "max_tag_chars": 12,
-            "auto_merge_enabled": False,
-            "merge_threshold": 90,
-            "merge_min_content_similarity": 99,
-            "merge_require_domain_overlap": True,
-            "merge_require_source_match": True,
-            "merge_block_disjoint_dates": True,
         },
         "write_path": {
             "semantic_search_timeout_seconds": 3,
@@ -165,10 +160,10 @@ def load_config(config_path: str = None) -> dict:
             "user_aliases": ["对方"],
         },
         "dehydration": {
-            "model": "deepseek-chat",
-            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com",
             "api_key": "",
-            "thinking_mode": "",
+            "thinking_mode": "disabled",
             "max_tokens": 1024,
             "temperature": 0.1,
         },
@@ -340,10 +335,11 @@ def load_config(config_path: str = None) -> dict:
             "enabled": True,
             "profile_id": "haven_xiaoyu",
             "mode": "llm",
-            "base_url": "https://api.deepseek.com/v1",
-            "model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
             "api_key": "",
-            "thinking_mode": "",
+            "thinking_mode": "disabled",
+            "json_response_format": True,
             "temperature": 0.1,
             "max_tokens": 500,
             "global_decay_hours": 168,

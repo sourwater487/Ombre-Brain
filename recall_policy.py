@@ -492,6 +492,7 @@ RELATIONSHIP_QUERY_INTENT_MARKERS = frozenset(
         "爱人",
     }
 )
+# LOCAL-ADAPTATION: [新增/缺少] 相对 upstream/main@1dac438，含本地新增、未保留部分上游实现。
 RELATIONSHIP_BACKGROUND_QUERY_FILLERS = frozenset(
     {
         "我",
@@ -523,6 +524,7 @@ RELATIONSHIP_BACKGROUND_QUERY_FILLERS = frozenset(
         "话说",
     }
 )
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 SHORT_CASUAL_FILLER_TERMS = frozenset(
     {
         "我",
@@ -596,6 +598,7 @@ AFFECTION_ONLY_SIGNAL_TERMS = frozenset(
         "loveu",
     }
 )
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 AFFECTION_ONLY_FILLER_TERMS = frozenset(
     {
         "亲爱的",
@@ -1792,6 +1795,7 @@ class RecallPolicy:
             return True
         return False
 
+    # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
     def _is_reaction_only_query(self, query: str) -> bool:
         compact = re.sub(r"\s+", "", str(query or "").lower())
         if not compact:
@@ -1873,6 +1877,7 @@ class RecallPolicy:
             or (compact_marker and compact_marker in compact_text)
         )
 
+    # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
     def _query_has_relationship_intent(self, query: str) -> bool:
         if query_has_facet(query, "relationship_identity", self.options) or query_has_facet(
             query,

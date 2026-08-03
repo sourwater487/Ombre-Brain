@@ -29,6 +29,7 @@ DEFAULT_BUCKETS_DIR = ROOT / "tmp" / "p0-local-snapshot-20260628-1528" / "bucket
 DEFAULT_EMBEDDING_BASE_URL = "https://api.siliconflow.cn/v1"
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
 DEFAULT_API_KEY_ENV = "HANDOFF_SUMMARIZER_API_KEY_2"
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 DEFAULT_EVAL_CASES: list[dict[str, Any]] = [
     {
         "query": "对未来的承诺和五十年后有关吗",

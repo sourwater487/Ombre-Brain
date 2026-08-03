@@ -40,6 +40,7 @@
 #   Docker: docker-compose up
 # ============================================================
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 import os
 import sys
 import random
@@ -52,6 +53,7 @@ import re
 import secrets
 import time
 from base64 import b64decode
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -122,6 +124,7 @@ from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
 from portrait_engine import DailyPortraitMaintainer
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 from raw_events import RawEventStore, strip_raw_client_context
 from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
@@ -475,6 +478,7 @@ def _dashboard_gateway_upstreams_payload(gateway_cfg: dict) -> list[dict]:
     return payload
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 def _expected_gateway_hot_update_paths(gateway_payload: dict) -> set[str]:
     expected = set()
     for section, section_payload in (gateway_payload or {}).items():
@@ -485,6 +489,7 @@ def _expected_gateway_hot_update_paths(gateway_payload: dict) -> set[str]:
     return expected
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 async def _hot_update_gateway_config(gateway_payload: dict) -> dict:
     if not gateway_payload:
         return {"ok": True, "attempted": False, "status": "gateway_hot_reload_not_needed"}
@@ -555,6 +560,7 @@ async def _hot_update_gateway_config(gateway_payload: dict) -> dict:
         }
     except Exception as exc:
         logger.warning("Gateway hot config update failed: %s", exc)
+        # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
         return {
             "ok": False,
             "attempted": True,
@@ -1100,6 +1106,12 @@ def _require_dashboard_auth(request):
     )
 
 
+def _require_raw_api_auth(request):
+    if _dashboard_authenticated(request) or _authorized_memory_write(request):
+        return None
+    return _require_dashboard_auth(request)
+
+
 def _dashboard_login_response():
     from starlette.responses import JSONResponse
     token = _create_dashboard_session()
@@ -1245,6 +1257,7 @@ def _breath_query_requests_date_read(query: str) -> bool:
     return any(marker in text for marker in recall_markers)
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 def _strip_breath_date_query_shell(query: str) -> str:
     text = strip_human_date_references(query)
     shell_terms = {
@@ -1766,6 +1779,7 @@ def _handoff_portrait_stable_body(value: object) -> str:
     return re.sub(r"^Stable:\s*", "", text, count=1, flags=re.IGNORECASE).strip()
 
 
+# LOCAL-ADAPTATION: [新增/改动] 相对 upstream/main@1dac438，含本地新增、采用本地适配版本。
 async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", debug: bool = False) -> str:
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
@@ -2255,6 +2269,63 @@ def _has_favorite_reason(content: str) -> bool:
 
 def _favorite_reason_error() -> str:
     return "标记 favorite memory 需要在正文写明「### reflection」。旧的「喜欢它的原因」仍兼容。"
+
+
+_NEW_WRITE_FORBIDDEN_HEADINGS = {
+    "followup",
+    "followups",
+    "followuplog",
+    "followupslog",
+    "todo",
+    "todolog",
+    "next",
+    "后续",
+    "后续待办",
+    "后续记录",
+    "待办",
+    "待办事项",
+    "待办记录",
+    "affectanchor",
+}
+_NEW_WRITE_REFLECTION_HEADINGS = {
+    "reflection",
+    "assistantreflection",
+    "havenreflection",
+}
+
+
+def _uses_first_person_voice(text: str) -> bool:
+    value = str(text or "").strip()
+    return bool("我" in value or re.search(r"(?i)\b(?:i|me|my|mine|myself)\b", value))
+
+
+def _memory_write_contract_error(content: str, *, feel_only: bool = False) -> str:
+    """Reject new memory shapes that the model should rewrite instead of persisting."""
+    text = strip_wikilinks(str(content or "")).strip()
+    matches = list(re.finditer(r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*$", text))
+    if feel_only:
+        if matches:
+            return "feel 只写第一人称正文，不写标题、Markdown 分段或 ### section。"
+        if not _uses_first_person_voice(text):
+            return "feel 必须改成第一人称正文，用“我……”表达模型自己的感受。"
+        return ""
+
+    for index, match in enumerate(matches):
+        heading = _normalize_section_heading(match.group(1))
+        if heading in _NEW_WRITE_FORBIDDEN_HEADINGS:
+            if heading == "affectanchor":
+                return "新记忆不接受 ### affect_anchor；它不是模型可写的 content section。"
+            return (
+                "新记忆不接受 ### followup / todo。需要长期保留的回应变化请改写进第一人称 "
+                "### reflection；需要到时提醒的事项请用 reminder_create。"
+            )
+        if heading not in _NEW_WRITE_REFLECTION_HEADINGS:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        reflection = text[match.end():end].strip()
+        if not _uses_first_person_voice(reflection):
+            return "### reflection 必须用模型第一人称写，用“我记得 / 我明白 / 我以后 / 我会”等表达。"
+    return ""
 
 
 def _normalize_memory_sections_for_write(content: str) -> str:
@@ -3791,6 +3862,7 @@ async def _search_edge_backfill_buckets(mgr, query: str, limit: int) -> list[dic
         return await mgr.search(query, limit=max(limit, 20))
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 async def _edge_backfill_candidates(
     mgr,
     *,
@@ -3900,6 +3972,7 @@ async def _backfill_memory_edges(
     }
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 async def _entity_edge_backfill_candidates(
     mgr,
     *,
@@ -6089,6 +6162,7 @@ def _recall_rank(query: str, moment: dict) -> tuple[int, float]:
     return recall_rank(query, moment, _recall_relevance_options())
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 async def _build_recall_debug_payload(
     query: str,
     *,
@@ -6727,6 +6801,7 @@ def _inspect_path_payload(path, bucket_map: dict[str, dict]) -> dict:
     }
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 async def inspect_diffusion(
     query: str,
     max_seeds: int = 3,
@@ -7053,6 +7128,7 @@ def _reminder_public_payload(item: dict | None) -> dict:
     return {key: item.get(key) for key in keys}
 
 
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 @mcp.tool()
 async def reminder_create(
     title: str,
@@ -7102,6 +7178,7 @@ async def reminder_list(status: str = "active", limit: int = 20) -> dict:
     return {"count": len(items), "reminders": [_reminder_public_payload(item) for item in items]}
 
 
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 @mcp.tool()
 async def reminder_update(
     reminder_id: str,
@@ -7148,6 +7225,7 @@ async def reminder_update(
 # With args: search by keyword + emotion coordinates
 # 有参数：按关键词+情感坐标检索记忆
 # =============================================================
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 @mcp.tool()
 async def breath(
     query: str = "",
@@ -8113,6 +8191,7 @@ async def list_buckets_light(
 # Tool 1.6: comment_bucket — add a ring/comment to a memory
 # 工具 1.6：comment_bucket — 给记忆追加年轮
 # =============================================================
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 @mcp.tool()
 async def comment_bucket(
     bucket_id: str,
@@ -8121,13 +8200,17 @@ async def comment_bucket(
     valence: float = -1,
     arousal: float = -1,
 ) -> dict:
-    """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。kind=feel 时 content 只写第一人称感受，不写分段标题。"""
+    """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。kind=feel 时 content 只能写“我……”第一人称正文，不写标题或任何 Markdown 分段。"""
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
         return {"error": "invalid bucket_id"}
     content = strip_raw_client_context(str(content or ""))
     if not content or not content.strip():
         return {"error": "empty content"}
+    if str(kind or "").strip().lower() == "feel":
+        contract_error = _memory_write_contract_error(content, feel_only=True)
+        if contract_error:
+            return {"error": "invalid feel content", "reason": contract_error}
     if not await bucket_mgr.get(bucket_id):
         return {"error": "not found", "id": bucket_id}
 
@@ -8159,6 +8242,7 @@ async def comment_bucket(
 # Tool 1.7: delete_bucket_comment — delete one AI-authored ring
 # 工具 1.7：delete_bucket_comment — 删除一条自己写的年轮
 # =============================================================
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 @mcp.tool()
 async def delete_bucket_comment(bucket_id: str, comment_id: str) -> dict:
     """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除 Lin/dashboard 写的年轮。"""
@@ -8303,6 +8387,7 @@ async def api_bucket_comment_delete(request):
 # Tool 2: hold — Hold on to this
 # 工具 2：hold — 握住，留下来
 # =============================================================
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 @mcp.tool()
 async def hold(
     content: str,
@@ -8318,7 +8403,7 @@ async def hold(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection。需要之后轻轻提醒/照顾备忘的事项用 reminder_create，不写进长期记忆。feel=True/whisper=True 时 content 只写第一人称感受，不写分段标题。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -8326,6 +8411,10 @@ async def hold(
     title = strip_raw_client_context(str(title or ""))
     if not content or not content.strip():
         return "内容为空，无法存储。"
+
+    contract_error = _memory_write_contract_error(content, feel_only=bool(feel or whisper))
+    if contract_error:
+        return f"写入被拒绝：{contract_error}"
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -8470,6 +8559,7 @@ async def hold(
 # Tool 2.5: darkroom — Private unfinished reflection
 # 工具 2.5：darkroom — 暗房，存放未显影的内在反思
 # =============================================================
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 @mcp.tool()
 async def darkroom_enter(
     note: str,
@@ -8505,6 +8595,17 @@ async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> dict:
         return darkroom_store.rooms(limit=limit, visibility=visibility)
     except ValueError as exc:
         return {"status": "error", "error": str(exc)}
+
+
+@mcp.tool()
+async def darkroom_delete(room_id: str, confirm: str = "") -> dict:
+    """从暗房主存储删除一整间房及全部 revisions；必须传精确 room_id 和 confirm="DELETE"，并保留本地私密备份。"""
+    try:
+        return darkroom_store.delete_room(room_id, confirm=confirm)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc), "room_id": str(room_id or "")}
+    except KeyError:
+        return {"status": "not_found", "error": "room not found", "room_id": str(room_id or "")}
 
 
 @mcp.tool()
@@ -8565,6 +8666,9 @@ def _looks_like_operit_auto_grow_content(content: str) -> bool:
 
 
 async def _grow_direct_structured_content(content: str, title: str = "", gate_prefix: str = "") -> str:
+    contract_error = _memory_write_contract_error(content)
+    if contract_error:
+        return f"{gate_prefix}写入被拒绝：{contract_error}"
     direct_content = str(content or "").strip()
     try:
         analysis = await dehydrator.analyze(direct_content)
@@ -8615,9 +8719,10 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
     return f"{gate_prefix}1条|新1合0\n📝{name or bucket_id}{related_note}"
 
 
+# LOCAL-ADAPTATION: [新增/改动] 相对 upstream/main@1dac438，含本地新增、采用本地适配版本。
 @mcp.tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。无性别称呼、自称和原话可以保留，不把临时称呼推成稳定画像事实；Che 的自我与 reflection 始终使用第一人称。title 可选，短内容时传了就用给定标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection。需要之后轻轻提醒/照顾备忘的事项用 reminder_create，不写进长期记忆。feel 年轮只写第一人称感受，不写分段标题。"""
+    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。无性别称呼、自称和原话可以保留，不把临时称呼推成稳定画像事实；Che 的自我与 reflection 始终使用第一人称。title 可选，短内容时传了就用给定标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel 年轮只写第一人称正文，不写标题或任何 Markdown 分段。"""
     await decay_engine.ensure_started()
 
     content = strip_raw_client_context(str(content or ""))
@@ -8713,6 +8818,10 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
         try:
             item_tags = item.get("tags", [])
             item_content = _normalize_memory_sections_for_write(item.get("content", ""))
+            contract_error = _memory_write_contract_error(item_content)
+            if contract_error:
+                results.append(f"⚠️{item.get('name', '未命名')}: {contract_error}")
+                continue
             item_content = await _auto_generate_write_moment_if_needed(
                 item_content,
                 item_tags,
@@ -8762,6 +8871,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
 # Tool 3.5: profile_fact — manually solidify a user/profile fact
 # 工具 3.5：profile_fact — 手动固化画像事实
 # =============================================================
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 @mcp.tool()
 async def profile_fact(
     fact: str,
@@ -8773,14 +8883,12 @@ async def profile_fact(
     evidence_moment_id: str = "",
     evidence_context: str = "",
     reflection: str = "",
-    followup: str = "",
     confidence: float = 0.9,
 ) -> str:
-    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。"""
+    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。reflection 可选，但必须写成“我……”第一人称；不要写 followup。"""
     fact = strip_raw_client_context(str(fact or ""))
     evidence_context = strip_raw_client_context(str(evidence_context or ""))
     reflection = strip_raw_client_context(str(reflection or ""))
-    followup = strip_raw_client_context(str(followup or ""))
     evidence_bucket_id = str(evidence_bucket_id or "").strip()
     if not fact:
         return "fact 为空，无法写入画像事实。"
@@ -8808,11 +8916,12 @@ async def profile_fact(
     predicate_key = _profile_key(predicate, "")
     object_text = strip_raw_client_context(str(object_value or ""))
     confidence = _float_between(confidence, 0.9, 0.0, 1.0)
+    if str(reflection or "").strip() and not _uses_first_person_voice(reflection):
+        return "写入被拒绝：reflection 必须用模型第一人称写，用“我记得 / 我明白 / 我以后 / 我会”等表达。"
     body = _profile_fact_body(
         fact=fact,
         evidence_context=evidence_context,
         reflection=reflection,
-        followup=followup,
     )
     tags = ["profile_fact", f"profile_{kind}"]
     if predicate_key:
@@ -8897,6 +9006,7 @@ def _profile_fact_name(fact: str) -> str:
 # Also handles deletion (delete=True)
 # 同时承接删除功能
 # =============================================================
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 @mcp.tool()
 async def trace(
     bucket_id: str,
@@ -9247,6 +9357,7 @@ PROFILE_FACT_CANDIDATE_PATTERN_SPECS = (
 )
 
 
+# LOCAL-ADAPTATION: [新增/缺少] 相对 upstream/main@1dac438，含本地新增、未保留部分上游实现。
 BASE_NOISY_PROFILE_OBJECT_KEYS = {
     "哥哥",
     "老公",
@@ -9417,7 +9528,7 @@ async def dream() -> str:
 # 工具 6：reflect — 生成日印象
 # =============================================================
 async def reflect(period: str = "daily", force: bool = False) -> dict:
-    """生成 daily relationship_weather 类型的 feel,记录当天关系天气,正文会带 affect_anchor 和弦。weekly 默认关闭,需 reflection.weekly_enabled=true 才会生成; force=True 会重写同周期结果。它不会替代 hold/grow 写具体 bucket。"""
+    """生成 daily relationship_weather 类型的 feel，content 只写“我……”第一人称正文，不带 Markdown section。weekly 默认关闭，需 reflection.weekly_enabled=true 才会生成；force=True 会重写同周期结果。它不会替代 hold/grow 写具体 bucket。"""
     await decay_engine.ensure_started()
     return await reflection_engine.reflect(
         period=period,
@@ -9429,13 +9540,15 @@ async def reflect(period: str = "daily", force: bool = False) -> dict:
     )
 
 
-async def portrait_maintain(force: bool = False) -> dict:
+async def portrait_maintain(force: bool = False, scope: str = "") -> dict:
     """维护每日 portrait state。只写 state/portrait_state.json，不写 profile_fact、anchor、pinned、protected 或 Core Memory。"""
     await decay_engine.ensure_started()
+    force_scopes = [str(scope or "").strip()] if str(scope or "").strip() else []
     return await portrait_engine.maintain_daily(
         bucket_mgr,
         persona_engine,
         force=force,
+        force_scopes=force_scopes,
     )
 
 
@@ -9460,6 +9573,9 @@ async def _self_anchor_entry_payload() -> dict:
 
 
 async def _portrait_state_payload() -> dict:
+    evidence_health = {}
+    if hasattr(portrait_engine, "reconcile_evidence"):
+        evidence_health = await portrait_engine.reconcile_evidence(bucket_mgr)
     state = portrait_engine.load_state()
     handoff_sections = {}
     if hasattr(portrait_engine, "build_handoff_sections"):
@@ -9473,14 +9589,31 @@ async def _portrait_state_payload() -> dict:
         "auto_enabled": bool(getattr(portrait_engine, "auto_enabled", True)),
         "auto_initial_enabled": bool(getattr(portrait_engine, "auto_initial_enabled", False)),
         "daily_enabled": bool(getattr(portrait_engine, "daily_enabled", True)),
+        "generator_ready": bool(getattr(portrait_engine, "client", None)),
+        "generator_model": str(getattr(portrait_engine, "model", "") or ""),
+        "generator_source": str(getattr(portrait_engine, "model_source", "dehydration") or "dehydration"),
         "updated_at": state.get("updated_at", ""),
         "last_run_date": state.get("last_run_date", ""),
         "portrait": state.get("portrait", {}),
         "recent_activities": state.get("recent_activities", []),
         "recent_timeline": state.get("recent_timeline", []),
+        "current_focus_items": (
+            portrait_engine.current_focus_items(max_items=8)
+            if hasattr(portrait_engine, "current_focus_items")
+            else state.get("recent_activities", [])
+        ),
         "current_focus": str(handoff_sections.get("current_focus") or ""),
         "stable_candidates": state.get("stable_candidates", []),
         "profile_fact_candidates": state.get("profile_fact_candidates", []),
+        "generation_status": (
+            {
+                scope: portrait_engine.scope_generation_status(scope)
+                for scope in ("user", "persona", "relationship")
+            }
+            if hasattr(portrait_engine, "scope_generation_status")
+            else {}
+        ),
+        "evidence_health": evidence_health,
         "self_anchor_entry": await _self_anchor_entry_payload(),
     }
 
@@ -9741,12 +9874,22 @@ async def api_portrait_maintain(request):
         body = {}
     try:
         await decay_engine.ensure_started()
+        scope = str(body.get("scope") or "").strip()
+        if scope and scope not in {"user", "persona", "relationship"}:
+            return JSONResponse({"error": "invalid scope"}, status_code=400)
+        force = _bool_value(body.get("force"), False)
+        maintain_kwargs = {"force": force}
+        if scope:
+            maintain_kwargs["force_scopes"] = [scope]
+        elif force:
+            maintain_kwargs["force_scopes"] = ["user", "persona", "relationship"]
         result = await portrait_engine.maintain_daily(
             bucket_mgr,
             persona_engine,
-            force=_bool_value(body.get("force"), False),
+            **maintain_kwargs,
         )
-        return JSONResponse(result)
+        status_code = 409 if result.get("status") == "blocked" else 200
+        return JSONResponse(result, status_code=status_code)
     except Exception as e:
         logger.warning("Portrait maintain API failed: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -9788,6 +9931,59 @@ async def api_portrait_state_item_delete(request):
     if status == "conflict":
         return JSONResponse(result, status_code=409)
     return JSONResponse(result, status_code=400)
+
+
+@mcp.custom_route("/api/portrait-state/items", methods=["POST"])
+async def api_portrait_state_item_add(request):
+    """Add one manual Current Focus item."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    if str(body.get("area") or "") != "recent_activities":
+        return JSONResponse({"error": "only recent_activities can be added manually"}, status_code=400)
+    result = portrait_engine.add_recent_activity(
+        str(body.get("text") or ""),
+        source_date=str(body.get("source_date") or ""),
+    )
+    return _portrait_mutation_response(result)
+
+
+@mcp.custom_route("/api/portrait-state/items", methods=["PUT"])
+async def api_portrait_state_item_edit(request):
+    """Edit one Current Focus or portrait generation-evidence row."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    raw_index = body.get("index")
+    try:
+        index = int(raw_index) if raw_index is not None and str(raw_index) != "" else None
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "index must be an integer"}, status_code=400)
+    result = portrait_engine.edit_state_item(
+        area=str(body.get("area") or ""),
+        scope=str(body.get("scope") or ""),
+        layer=str(body.get("layer") or ""),
+        index=index,
+        text=str(body.get("text") or ""),
+        expected_text=str(body.get("expected_text") or ""),
+    )
+    return _portrait_mutation_response(result)
 
 
 def _portrait_mutation_response(result: dict):
@@ -10185,7 +10381,6 @@ async def api_profile_fact_proposal_confirm(request):
         evidence_moment_id=proposal["evidence_moment_id"],
         evidence_context=proposal["reason"],
         reflection="",
-        followup="",
         confidence=proposal["confidence"],
     )
     if not result.startswith("profile_fact→"):
@@ -10948,6 +11143,7 @@ async def api_darkroom_status(request):
     return JSONResponse(darkroom_store.status())
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 @mcp.custom_route("/api/search", methods=["GET"])
 async def api_search(request):
     """Search buckets by query."""
@@ -11020,7 +11216,7 @@ def _raw_ingest_events_from_body(
 async def api_ingest_raw(request):
     """Ingest user/assistant raw dialogue events. Does not accept tools, system prompts, or memory injections."""
     from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
+    err = _require_raw_api_auth(request)
     if err:
         return err
     try:
@@ -11047,11 +11243,12 @@ async def api_ingest_raw(request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 @mcp.custom_route("/api/search-raw", methods=["GET", "POST"])
 async def api_search_raw(request):
     """Search raw dialogue events as a fallback archive. Returns only stored user/assistant originals."""
     from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
+    err = _require_raw_api_auth(request)
     if err:
         return err
 
@@ -11162,6 +11359,7 @@ async def api_edges(request):
     return JSONResponse({"edges": memory_edge_store.list_edges()})
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 @mcp.custom_route("/api/breath-debug", methods=["GET"])
 async def api_breath_debug(request):
     """Debug endpoint: simulate breath scoring and return per-bucket breakdown."""
@@ -11303,6 +11501,7 @@ async def api_breath_debug(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 @mcp.custom_route("/api/diffusion-debug", methods=["GET"])
 async def api_diffusion_debug(request):
     """Debug endpoint: inspect bucket-level diffusion paths for a query."""
@@ -11584,6 +11783,7 @@ async def api_daily_chat_memory_confirm(request):
     return JSONResponse(result)
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 @mcp.custom_route("/dashboard", methods=["GET"])
 async def dashboard(request):
     """Serve the dashboard HTML page."""
@@ -11675,6 +11875,7 @@ async def api_dream_detail(request):
     return JSONResponse(record)
 
 
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 @mcp.custom_route("/api/config", methods=["GET"])
 async def api_config_get(request):
     """Get current runtime config (safe fields only, API key masked)."""
@@ -11921,9 +12122,9 @@ async def api_config_get(request):
             "daily_chat_memory_mode": str(
                 reflection_cfg.get(
                     "daily_chat_memory_mode",
-                    getattr(reflection_engine, "daily_chat_memory_mode", "review"),
+                    getattr(reflection_engine, "daily_chat_memory_mode", "off"),
                 )
-                or "review"
+                or "off"
             ),
             "daily_chat_memory_hour": int(
                 reflection_cfg.get(
@@ -11979,6 +12180,14 @@ async def api_config_get(request):
                 "persona_events_limit",
                 getattr(portrait_engine, "persona_events_limit", 24),
             ),
+            "user_rewrite_evidence_delta": portrait_cfg.get(
+                "user_rewrite_evidence_delta",
+                getattr(portrait_engine, "user_rewrite_evidence_delta", 10),
+            ),
+            "manual_suppress_days": portrait_cfg.get(
+                "manual_suppress_days",
+                getattr(portrait_engine, "manual_suppress_days", 14),
+            ),
         },
         "merge_threshold": config.get("merge_threshold", 90),
         "transport": config.get("transport", "stdio"),
@@ -11986,6 +12195,7 @@ async def api_config_get(request):
     })
 
 
+# LOCAL-ADAPTATION: [新增/改动/缺少] 相对 upstream/main@1dac438，含本地新增、采用本地适配版本、未保留部分上游实现。
 @mcp.custom_route("/api/config", methods=["POST"])
 async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
@@ -12071,7 +12281,7 @@ async def api_config_update(request):
             env_updates["OMBRE_API_KEY"] = str(d["api_key"])
             updated.append("dehydration.api_key")
         # Hot-reload dehydrator
-        dehydrator.model = dehy.get("model", "deepseek-chat")
+        dehydrator.model = dehy.get("model", "deepseek-v4-flash")
         dehydrator.base_url = dehy.get("base_url", "")
         dehydrator.api_key = dehy.get("api_key", "")
         normalize_thinking = getattr(dehydrator, "_normalize_thinking_mode", None)
@@ -12098,6 +12308,8 @@ async def api_config_update(request):
         if dehydrator.api_key:
             dehydration_gateway_payload["api_key"] = dehydrator.api_key
         gateway_hot_update_payload["dehydration"] = dehydration_gateway_payload
+        if getattr(portrait_engine, "model_source", "dehydration") == "dehydration":
+            portrait_engine = DailyPortraitMaintainer(config)
 
     # --- Embedding config ---
     if "embedding" in body:
@@ -12526,9 +12738,9 @@ async def api_config_update(request):
             )
             updated.append("reflection.daily_activity_summary_max_tokens")
         if "daily_chat_memory_mode" in r:
-            mode = str(r.get("daily_chat_memory_mode") or "review").strip().lower()
+            mode = str(r.get("daily_chat_memory_mode") or "off").strip().lower()
             if mode not in {"auto", "review", "off"}:
-                mode = "review"
+                mode = "off"
             reflection_cfg["daily_chat_memory_mode"] = mode
             updated.append("reflection.daily_chat_memory_mode")
         if "daily_chat_memory_hour" in r:
@@ -12605,6 +12817,8 @@ async def api_config_update(request):
             "recent_buffer_max",
             "staging_pool_max",
             "candidate_max",
+            "user_rewrite_evidence_delta",
+            "manual_suppress_days",
         ):
             if key in p:
                 portrait_cfg[key] = p[key]
@@ -12710,6 +12924,7 @@ async def api_config_update(request):
         if not runtime_config_path:
             runtime_config_path = os.path.join(config.get("state_dir") or os.path.dirname(config_path), "config.runtime.yaml")
 
+        # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
         def _apply_dashboard_config(save_config: dict) -> dict:
             save_config = save_config or {}
             if "dehydration" in body:
@@ -13024,8 +13239,8 @@ async def api_config_update(request):
                         1000,
                     )
                 if "daily_chat_memory_mode" in body["reflection"]:
-                    mode = str(body["reflection"].get("daily_chat_memory_mode") or "review").strip().lower()
-                    sc_reflection["daily_chat_memory_mode"] = mode if mode in {"auto", "review", "off"} else "review"
+                    mode = str(body["reflection"].get("daily_chat_memory_mode") or "off").strip().lower()
+                    sc_reflection["daily_chat_memory_mode"] = mode if mode in {"auto", "review", "off"} else "off"
                 if "daily_chat_memory_hour" in body["reflection"]:
                     sc_reflection["daily_chat_memory_hour"] = _int_between(
                         body["reflection"].get("daily_chat_memory_hour"),
@@ -13083,6 +13298,8 @@ async def api_config_update(request):
                     "recent_buffer_max",
                     "staging_pool_max",
                     "candidate_max",
+                    "user_rewrite_evidence_delta",
+                    "manual_suppress_days",
                 ):
                     if key in body["portrait"]:
                         sc_portrait[key] = body["portrait"][key]
@@ -13240,6 +13457,15 @@ async def api_import_upload(request):
 
         preserve_raw = request.query_params.get("preserve_raw", "").lower() in ("1", "true")
         resume = request.query_params.get("resume", "").lower() in ("1", "true")
+        import_mode = request.query_params.get("import_mode", "auto").strip().lower()
+        if import_mode not in ("auto", "operit", "conversation"):
+            return JSONResponse({"error": f"Unsupported import mode: {import_mode}"}, status_code=400)
+        operit_tagging_value = request.query_params.get("operit_tagging")
+        operit_tagging = (
+            None
+            if operit_tagging_value is None
+            else operit_tagging_value.strip().lower() in ("1", "true")
+        )
 
     except Exception as e:
         return JSONResponse({"error": f"Failed to read upload: {e}"}, status_code=400)
@@ -13247,7 +13473,14 @@ async def api_import_upload(request):
     # Start import in background
     async def _run_import():
         try:
-            await import_engine.start(raw_content, filename, preserve_raw, resume)
+            await import_engine.start(
+                raw_content,
+                filename,
+                preserve_raw,
+                resume,
+                import_mode=import_mode,
+                operit_tagging=operit_tagging,
+            )
         except Exception as e:
             logger.error(f"Import failed: {e}")
 
@@ -13257,6 +13490,7 @@ async def api_import_upload(request):
         "status": "started",
         "filename": filename,
         "size_bytes": len(raw_content.encode()),
+        "import_mode": import_mode,
     })
 
 
@@ -13438,10 +13672,10 @@ if __name__ == "__main__":
                         reflection_cfg.get("daily_enabled", True)
                     )
                     local_reflection_engine.memory_affect_anchor_enabled = bool(
-                        reflection_cfg.get("memory_affect_anchor_enabled", True)
+                        reflection_cfg.get("memory_affect_anchor_enabled", False)
                     )
                     local_reflection_engine.relationship_weather_affect_anchor_enabled = bool(
-                        reflection_cfg.get("relationship_weather_affect_anchor_enabled", True)
+                        reflection_cfg.get("relationship_weather_affect_anchor_enabled", False)
                     )
                     local_reflection_engine.daily_min_memory_items = _int_between(
                         reflection_cfg.get("daily_min_memory_items"),
@@ -13470,9 +13704,9 @@ if __name__ == "__main__":
                         80,
                         1000,
                     )
-                    mode = str(reflection_cfg.get("daily_chat_memory_mode") or "review").strip().lower()
+                    mode = str(reflection_cfg.get("daily_chat_memory_mode") or "off").strip().lower()
                     local_reflection_engine.daily_chat_memory_mode = (
-                        mode if mode in {"auto", "review", "off"} else "review"
+                        mode if mode in {"auto", "review", "off"} else "off"
                     )
                     local_reflection_engine.daily_chat_memory_hour = _int_between(
                         reflection_cfg.get("daily_chat_memory_hour"),

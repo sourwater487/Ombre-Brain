@@ -40,6 +40,7 @@ flowchart LR
 
 ### 1. 原文层
 
+<!-- LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。 -->
 `raw_events.sqlite` 保存 user / assistant 原始对话，用于查原句、指定日期和长期记忆没有覆盖的细节。它不是普通语义记忆池，也不会自动整段注入。客户端自动附带的天气/位置不混入正文，而是写入独立的有界快照表：同日相同值去重，并受每日条数、全局条数和字段长度三重上限约束。
 
 询问“那天原话是什么”或给出明确日期时，应优先走原文 / 日期检索；当天没有证据，就不拿附近日期的语义记忆代替。
@@ -106,9 +107,9 @@ Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记�
 
 `reflection.daily_chat_memory_mode` 决定候选去向：
 
-- `review`：只生成待审候选，由人在 Dashboard 确认；默认推荐。
+- `review`：只生成待审候选，由人在 Dashboard 确认。
 - `auto`：达到较高置信度的候选自动进入正常写入链路。
-- `off`：关闭当天聊天的自动记忆整理。
+- `off`：关闭当天聊天的自动记忆整理；这是默认值。
 
 即使使用 `auto`，候选仍需经过记忆写入、去重和合并边界。原始聊天继续留在 raw events；自动记忆只保存脱水后仍值得长期带走的部分。
 
@@ -174,7 +175,7 @@ handoff 是一次性的紧凑恢复，不是每轮注入。当前内容按预算
 6. **照顾备忘**：已经到期、仍有效的照顾事项或上个窗口留给下个自己的行动话语。
 7. **Optional Anchors**：极少量长期锚点。
 
-画像由后台模型维护在 `state/portrait_state.json`，不会把高分 `profile_fact` 原文直接拼成画像。Stable 可在 Dashboard 手动编辑、锁定和回滚；首次画像默认需要手动生成，之后才按配置自动生长。
+画像由后台模型维护在 `state/portrait_state.json`，默认直接复用脱水模型，不会把高分 `profile_fact` 原文直接拼成画像。Stable 可在 Dashboard 手动编辑、锁定和回滚；首次画像默认需要手动生成，之后才按配置自动生长。User Portrait 相对上一版本新增 10 条可见生成依据时会强制重生；删除桶产生的悬空依据会在读取或生成前清理。
 
 自我入口使用第一人称。“现在的我”可从选定 self anchor 与符合身份条件的 whisper 中更新；原始自我核心始终保持只读。旧的独立 `AI Self Portrait` 和 Gateway 每轮 `Portrait Memory` 已退休，兼容配置名可能仍存在，但运行时不会重新开启该旧注入。
 
@@ -193,6 +194,7 @@ Gateway 支持：
 - 模型列表：`GET /v1/models`
 - 注入调试：`GET /api/debug/injections`
 
+<!-- LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。 -->
 动态注入以低噪声为原则，可能包含 Recent Context、Recalled Memory、Diffused Memory、关系天气或梦境；是否出现取决于查询类型、可靠性、冷却和预算。`gateway.recent_context_mode` 支持 `auto`、`explicit_only` 和 `off`；`explicit_only` 只在 Lin 明确询问最近/上次内容时注入。画像与自我入口只在 handoff 恢复，不在普通每轮重复注入。
 
 前端的独立表情包消息（例如 `{"type":"sticker","id":"小猫-开心"}`）会原样留在
@@ -300,6 +302,7 @@ docker compose -f compose.hk.yml up -d --build
 
 `buckets` 可以谨慎地交给 Obsidian / Syncthing 管理；`state` 含 SQLite 和运行索引，不要放入双向同步目录。
 
+<!-- LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。 -->
 仓库根目录的 `docker-compose.yml` 是生产双服务入口，默认读取仓库内跟踪的
 `config.lin.production.yaml`。该文件保存生产模型与行为参数，但不保存明文 API key、
 token 或密码；敏感凭据继续放在不会提交的 `.env` 中：
@@ -383,6 +386,7 @@ OMBRE_GATEWAY_TOKEN=...
 OMBRE_DASHBOARD_PASSWORD=...
 ```
 
+<!-- LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。 -->
 默认 `docker-compose.yml` 会把这份宿主机 `.env` 挂载到 `/app/.env`；Dashboard 选择持久化密钥时写回的就是同一文件，容器重建后仍会读取这些值。
 
 其它 provider key 由 `gateway.upstreams[*].api_key_env` 指向对应环境变量。RiJi / Diary 集成使用自己的 `MCP_BEARER_TOKEN`，它不是 Gateway 或 Dashboard 的访问令牌。
@@ -431,7 +435,7 @@ Dashboard 可查看和编辑 bucket、画像、日印象、记忆图、Darkroom�
 
 ### 原文写入与检索 API
 
-两个原文端点属于 Brain，并复用 Dashboard cookie 鉴权。先登录并保存 cookie：
+两个原文端点属于 Brain。浏览器和手工维护可复用 Dashboard cookie；Bridge 等服务端客户端也可使用 `OMBRE_MEMORY_WRITE_TOKEN`（未配置时回退到 `OMBRE_GATEWAY_TOKEN`）作为 Bearer token。
 
 以下 curl 使用 Python 直跑端口 `8000/8010`；VPS 默认部署请将 Brain 的 `8000` 替换为 `18001`，Gateway 的 `8010` 替换为 `18002`。
 
@@ -544,6 +548,7 @@ Python 直跑时对应端口为 `8000/8010`。
 
 常用脚本位于 [`scripts/`](scripts/)：
 
+<!-- LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。 -->
 - `ombre-refresh`：`/opt/ombre-brain` 部署的一词更新入口。
 - `bootstrap_update.sh`：更新旧部署。
 - `update_deploy.sh`：更新并重新部署。

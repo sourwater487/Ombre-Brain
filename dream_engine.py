@@ -402,6 +402,7 @@ class DreamEngine:
         ]
         return public_turns, list(dict.fromkeys(event_ids))
 
+    # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
     def _raw_residue_turn_payloads(self, events: list[dict] | None) -> list[dict]:
         grouped: dict[tuple[str, str], dict] = {}
         for event in events or []:
@@ -543,6 +544,7 @@ class DreamEngine:
         identity_anchor = await bucket_mgr.get(self.identity_anchor_id) if self.identity_anchor_id else None
         return materials[: self.material_limit], identity_anchor
 
+    # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
     def _payload_for(
         self,
         materials: list[dict],

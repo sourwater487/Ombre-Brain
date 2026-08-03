@@ -84,6 +84,7 @@ GENERIC_LEXICAL_STOPWORDS = frozenset(
 )
 
 
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 DEFAULT_AI_ADDRESS_TERMS = (
     "Che",
     "哥哥",
@@ -95,6 +96,7 @@ DEFAULT_AI_ADDRESS_TERMS = (
     "小乖",
 )
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 LEGACY_AI_NAME_ALIASES = ()
 
 DATE_RECALL_QUERY_SHELL_TERMS = frozenset(

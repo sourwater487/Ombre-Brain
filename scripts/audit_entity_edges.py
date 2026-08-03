@@ -27,6 +27,7 @@ from utils import load_config
 
 
 DEFAULT_SNAPSHOT_ROOT = ROOT / "tmp" / "p0-local-snapshot-20260628-1528"
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 GENERIC_OBJECT_KEYS = {
     "我们",
     "我们的",

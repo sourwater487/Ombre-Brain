@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# LOCAL-ADAPTATION: [新增] 整个文件为相对 upstream/main@1dac438 的本地新增。
 
 import asyncio
 import json

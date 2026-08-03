@@ -1,3 +1,4 @@
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 DEFAULT_AI_NAME = "Che"
 DEFAULT_USER_NAME = "Lin"
 DEFAULT_USER_DISPLAY_NAME = "Lin"
@@ -24,6 +25,7 @@ def _clean_list(value, default: list[str]) -> list[str]:
     return [item for item in items if item] or list(default)
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 def identity_names(config: dict | None = None) -> dict:
     # Identity is a deployment invariant in Lin's private fork. Keep the
     # argument for call-site compatibility, but never accept runtime overrides.
@@ -43,6 +45,7 @@ def identity_names(config: dict | None = None) -> dict:
     }
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 def generic_identity_names() -> dict:
     aliases = list(GENERIC_USER_ALIASES)
     return {

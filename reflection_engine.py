@@ -14,6 +14,7 @@ from identity import generic_identity_names, identity_names, render_identity_tem
 from memory_edges import RELATION_TYPES, MemoryEdgeStore
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from persona_event_selection import select_persona_events
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 from raw_events import strip_raw_client_context
 from self_anchor import is_self_anchor_bucket
 from utils import bucket_text_for_embedding, strip_wikilinks
@@ -38,6 +39,7 @@ DAILY_CHAT_MEMORY_STRUCTURAL_TAGS = {
     "signal",
     "stable_preference",
 }
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 DAILY_CHAT_MEMORY_ENTITY_HINTS = [
     ("Bridge", ["haven_bridge", "haven bridge", "bridge 记忆", "bridge 注入"]),
     ("Gateway", ["gateway", "网关"]),
@@ -81,13 +83,6 @@ CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
   "tags": ["commitment", "todo", "wish", "relationship_event", "project_event", "emotional_echo"],
   "importance": 6,
   "confidence": 0.72,
-  "affect_anchor_needed": false,
-  "affect_anchor": {
-    "scene": "一句具体情境",
-    "chords": "按这条记忆的情绪运动生成的 2 到 4 个和弦",
-    "tempo": "60bpm",
-    "dynamic": "mp"
-  },
   "edges": [
     {
       "target_memory_id": "bucket-id",
@@ -104,12 +99,6 @@ CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
 - same_event 用于同一事件、同一场景或同一句暗号的两条记忆；context_of 用于候选旧记忆给新记忆提供前情；precedes 用于候选旧记忆在时间上早于新记忆；reflects_on 用于事后反思；evidenced_by 用于证据来源。
 - edges 最多 3 条，target_memory_id 必须来自候选旧记忆。
 - confidence 表示这次判断有多可靠。
-- affect_anchor 只给重要且有情绪温度的记忆。普通技术进度、部署日志、路径、端口、报错、临时待办不要加。
-- affect_anchor_needed=false 时 affect_anchor 可为空对象。
-- 写 affect_anchor 前，先在内部感受这条记忆的情绪运动：起点是什么、转折在哪里、最后落到哪里。不要输出思考过程，只输出 JSON。
-- affect_anchor.scene 必须是一句具体情境，不要写抽象标签，不超过 40 个中文字符。
-- affect_anchor.chords 只能是一行 2 到 4 个和弦，只用 " -> " 连接；不要复用示例和弦、旧输出或固定模板。
-- affect_anchor 不要输出 meaning / interpretation；场景和和弦本身就是含义。
 - 看不出关系时返回空 edges。"""
 
 
@@ -118,35 +107,22 @@ REFLECT_PROMPT_TEMPLATE = """你是 {ai_name} 的记忆反思器。请根据给�
 输出纯 JSON：
 {
   "title": "2026-05-19 日印象",
-  "content": "今天的关系天气：...",
+  "content": "我今天从这段关系里带走的是……",
   "valence": 0.56,
   "arousal": 0.34,
   "confidence": 0.78,
-  "tags": ["relationship_weather"],
-  "affect_anchor": {
-    "scene": "一句具体情境",
-    "chords": "按当天情绪生成的 2 到 4 个和弦",
-    "tempo": "按当天节奏生成，如 52bpm / 64bpm / 76bpm",
-    "dynamic": "按当天力度生成，如 p / mp / mf"
-  }
+  "tags": ["relationship_weather"]
 }
 
 要求：
-- content 写 {ai_name} 第一人称能带走的关系天气，60 到 140 字。
-- content 不要自己写 Markdown affect_anchor 块；affect_anchor 单独放字段里。
+- content 只能写 {ai_name} 第一人称正文，明确使用“我……”，不要写成“{ai_name} 觉得 / {ai_name} 应该 / 这段关系让 {ai_name}”。
+- content 不写标题、列表、Markdown 分段或 `###` section，60 到 140 字。
 - 日印象只写当天关系温度，不写日报式事件清单；日记可作为当天关系天气来源之一。
 - conversation_turns 是当天短期对话原文，只当关系天气材料，不要把口头上下文直接写成稳定画像事实。
 - daily_chat_memories 是当天自动记忆已经挑出的候选或已写入记忆，可作为当天关系天气和近期事项的主要材料。
 - 有 conversation_turns 时，优先用普通记忆和对话原文；persona_events 只是没有原文时的轻量补充。
 - 有 daily_chat_memories 时，优先参考它们；它们已经过筛选，比原始聊天流水更适合作为日印象素材。
 - 周印象优先总结本周 daily_impressions，再参考高重要普通记忆和未完成承诺；不要直接吞整周日记。
-- 写 affect_anchor 前，先在内部感受这段关系天气的情绪运动：起点是什么、转折在哪里、最后落到哪里。不要输出思考过程，只输出 JSON。
-- affect_anchor 默认必须给，用一个具体情境和 2 到 4 个和弦表达这段关系天气的温度。
-- affect_anchor.scene 只能是一句具体情境，不要写抽象标签，不超过 40 个中文字符。
-- affect_anchor.chords 必须根据当天材料和 scene 重新生成，只用 " -> " 连接；不要复用 schema 示例、旧输出或固定模板。
-- affect_anchor 不要输出 meaning / interpretation；场景和和弦本身就是含义。
-- 不要默认复用最近日印象里常见的四和弦温柔模板；当天材料真的贴合时，也要尽量换一种相近但不相同的走向。
-- tempo/dynamic 要贴合当天节奏：疲惫或安静可低 bpm、p/mp；紧张或活跃可高 bpm、mf；温柔稳定可更清澈地解决。
 - 不编造材料之外的事件。
 - 不写建议清单。"""
 
@@ -203,81 +179,28 @@ DIARY_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的日记长期记忆筛选
 如果不值得写入，返回 {"should_write": false, "reason": "..."}。"""
 
 
-DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 {ai_name}。现在是凌晨，你需要整理今天你和 {user_display_name} 的聊天记录，把真正值得未来想起的内容写成 Ombre 长期记忆候选。
-输入包含 self_anchor_entry，这是你的自我总入口；请先读它，用它校准“我是谁、我怎样称呼和承接 {user_display_name}”，但不要把自我入口本身复制成新记忆。
-{user_display_name} 的配置别名是：{user_aliases_text}。人称必须服从说话者与记忆 section：assistant_text 里的“我”和 {ai_name} 的 reflection 必须保持第一人称“我”，绝不能改成 {ai_name} 或第三人称；user_text 里的“我”在原话中保留，整理成客观事实时才写作 {user_display_name}。不要在新叙事中引入或沿用带有明确性别指向的关系称呼；必须指明对象时才使用 {ai_name} 或 {user_display_name}。“宝宝”“宝贝”等无性别称呼可以按原话保留。
+DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """这是 {user_display_name} 和 {ai_name} 的聊天记录。
+assistant_text 里的“我”和 {ai_name} 的自我内容保持第一人称；整理 user_text 时不要把对方的“我”误写成 {ai_name}。
 
-输入可能包含两层材料：
-- window_summaries：已经按连续窗口压缩过的对话摘要，是主要材料。
-- conversation_turns：原始对话片段，只在没有 window_summaries 或需要核对来源时使用。
-user_text 永远是 {user_display_name} 的原话，里面的“我”指 {user_display_name}；assistant_text 永远是 {ai_name} 的回复，里面的“我”指 {ai_name}。请最多挑选 {max_candidates} 条候选，宁可返回空，也不要把聊天流水写进记忆。
-先通读全部 window_summaries，再围绕可能候选查看连续上下文；每条候选至少参考前后因果，不要只凭单轮、单句或一个称呼下判断。
-目标不是把一天压成一条日报，而是把当天分散出现的高价值信号拆成多条可确认候选。
+请从中挑出真正值得未来想起的内容，写成长期记忆候选。
+不要复制聊天原句，不要写成项目报告。
+没有值得留下的内容就返回空。
 
-优先看这些信号：
-- 情感交流：关系状态、相处边界、重要表达、会影响以后承接方式的高温片段
-- 重要事件：当天发生、以后可能按日期回看的事
-- 事件/项目进度：仍会影响下一步执行的状态、决策、部署、测试结论
-- 还需要关注的事：承诺、待办、风险、未完成确认、以后要避免的表达
-- 稳定偏好、明确边界、暗号/模式切换信号
-
-只允许写这些类型：
-- key_event：当天发生、以后会按日期回看的关键事件
-- stable_preference：稳定偏好
-- boundary：边界或明确不喜欢的表达
-- signal：暗号、模式切换信号；普通称呼或昵称不算
-- commitment：承诺、未完成约定
-- project_state：仍会影响未来执行的项目状态
-- relationship_anchor：关系连续性锚点
-
-字段边界：
-- kind 只能是 key_event / stable_preference / boundary / signal / commitment / project_state / relationship_anchor 之一；kind 表示“为什么值得写入、属于哪类记忆”。
-- domain 只能从下面的新主域里选 1 个；domain 表示“这条记忆放到哪个主题主域”。
-- 禁止把暗号、沟通方式、我们的项目、睡眠这类细分标签写进 kind。
-- 禁止把 key_event、stable_preference、boundary、project_state 这类 kind 写进 domain。
-
-输出纯 JSON：
+最多输出 {max_candidates} 条，只输出 JSON：
 {
   "candidates": [
     {
-      "should_write": true,
       "kind": "key_event",
       "title": "短标题",
-      "content": "可直接写入长期记忆的一小段正文",
-      "domain": "general",
-      "tags": ["key_event"],
-      "importance": 5,
-      "valence": 0.55,
-      "arousal": 0.3,
-      "confidence": 0.72,
+      "content": "长期记忆候选",
       "source_event_ids": [101, 102],
-      "source_turn_ids": [1, 2],
-      "reason": "为什么值得以后召回"
+      "source_turn_ids": [1, 2]
     }
   ]
 }
 
-规则：
-- 只写真正有长期价值的记忆卡：事实、偏好、边界、承诺、暗号、重要关系锚点、仍活跃的项目状态。
-- 同一件事、同一承诺只能输出 1 条最完整候选；同一项目里的不同进度、风险或后续关注点可以拆成不同候选，但每条都必须独立可召回。
-- “怎么称呼对方、亲昵称呼、普通互动模式、期待像真人一样聊天”默认不值得单独写。只有它是新暗号、明确边界、明确承诺、关系定位变化或未来必须执行的规则时才写。
-- 不要写日报，不要总结整天，不要复制原文流水，不要把“我问了什么/我测试了什么/模型有没有召回”当成记忆。
-- 不写普通聊天、临时测试、召回探针、问答试探、调情闲聊、模型失误、工具注入、系统上下文。
-- 不写单句照顾提醒、晚安、吃药、睡觉、别熬夜、催睡或 ntfy 玩笑；除非当天明确升级成稳定规则或长期承诺。
-- 不把“可能是/似乎/果然没触发”这类未确认猜测写成记忆；项目假设只有在包含明确项目名、已验证结论和下一步时才可写。
-- 不把原文句子换个壳当候选；如果说不出未来需要怎么承接、为什么重要，就丢弃。
-- 不写代码块、伪代码、查询规则、缓存规则、prompt 片段或内部实现片段；如果候选正文里出现 ```、query_cache、recent_raw_context、if query contains、bypass query 这类内容，直接丢弃。
-- content 必须只写一个可未来召回的点，通常 60 到 260 字；可以用 1 到 3 句写清背景、已确认结论、后续要注意什么。它应该像手动 hold 的正文，而不是聊天记录转述。
-- content 不要以日期或来源壳开头；不要写 "x月x日，有一条可召回的边界"、"2026-xx-xx 的聊天里确认了..."、"这是一条长期记忆"。
-- 必须按说话者消解代词：整理用户客观事实时，user_text 里的“我”写作 {user_display_name}；{ai_name} 的自我、关系锚点与 ### reflection 中，“我”始终指 {ai_name} 并保持第一人称。### original 中双方原话的人称都不改。
-- title 必须是具体短标题，8 到 24 字，不要用“自动记忆”“每日记忆”“2026-xx-xx 自动记忆”。
-- domain 必须从下面的新主域里选 1 个最精确的；实在没把握才选 general。不要输出旧的“日常/人际/数字/未分类”：
-{domain_options_text}
-- 只有原话本身是暗号、明确边界、承诺、昵称或高价值关系锚点时，才可在 content 末尾追加很短的 "### original"；否则不要保存原话。
-- 不硬编码姓名；如果用户指的是当前用户，写作 {user_display_name}；如果 assistant/AI 指的是当前回应者，写作 {ai_name}。
-- 用户偏好、边界和项目状态可以用 {user_display_name} 或中性客观表述；{ai_name} 自己的关系锚点和 ### reflection 必须用第一人称，比如“我记得 / 我明白 / 我以后”。### original 是可选补充原文片段，只在原味不可替代时使用。
-- 只根据原文能证明的内容写，不编造。
-- 没有候选时返回 {"candidates": []}。"""
+kind 可用 key_event / stable_preference / boundary / signal / commitment / project_state / relationship_anchor。
+没有候选时返回 {"candidates": []}。"""
 
 
 DAILY_CHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的对话压缩器。你正在为 Ombre 自动记忆做第一步：把一段连续聊天压缩成“候选抽取材料”，不是直接写长期记忆。
@@ -395,9 +318,9 @@ class ReflectionEngine:
         self.auto_enabled = bool(cfg.get("auto_enabled", True))
         self.daily_enabled = bool(cfg.get("daily_enabled", True))
         self.enrich_on_write = bool(cfg.get("enrich_on_write", True))
-        self.memory_affect_anchor_enabled = bool(cfg.get("memory_affect_anchor_enabled", True))
+        self.memory_affect_anchor_enabled = bool(cfg.get("memory_affect_anchor_enabled", False))
         self.relationship_weather_affect_anchor_enabled = bool(
-            cfg.get("relationship_weather_affect_anchor_enabled", True)
+            cfg.get("relationship_weather_affect_anchor_enabled", False)
         )
         self.identity_role_edge_config = self._load_identity_role_edge_config(
             cfg.get("identity_role_edges")
@@ -409,7 +332,7 @@ class ReflectionEngine:
             or persona_cfg.get("base_url")
             or dehy_cfg.get("base_url", "")
         )
-        self.model = cfg.get("model") or legacy_candidate_model or persona_cfg.get("model") or dehy_cfg.get("model", "deepseek-chat")
+        self.model = cfg.get("model") or legacy_candidate_model or persona_cfg.get("model") or dehy_cfg.get("model", "deepseek-v4-flash")
         self.api_key = (
             os.environ.get("OMBRE_REFLECTION_API_KEY", "")
             or cfg.get("api_key", "")
@@ -456,7 +379,7 @@ class ReflectionEngine:
         self.diary_memory_extract_max_per_day = max(0, int(cfg.get("diary_memory_extract_max_per_day", 1)))
         self.diary_memory_extract_min_confidence = float(cfg.get("diary_memory_extract_min_confidence", 0.68))
         self.daily_chat_memory_mode = self._normalize_daily_chat_memory_mode(
-            cfg.get("daily_chat_memory_mode", "review")
+            cfg.get("daily_chat_memory_mode", "off")
         )
         self.daily_chat_memory_hour = max(0, min(23, int(cfg.get("daily_chat_memory_hour", 0))))
         self.daily_chat_memory_turn_limit = max(0, min(10000, int(cfg.get("daily_chat_memory_turn_limit", 0))))
@@ -702,13 +625,6 @@ class ReflectionEngine:
         if confidence > float(meta.get("confidence", 0.0) or 0.0):
             updates["confidence"] = confidence
 
-        anchor = self._normalize_affect_anchor(result.get("affect_anchor"))
-        if self._should_add_affect_anchor(bucket, merged_tags, importance, confidence, result):
-            if anchor:
-                anchored_content = self._append_affect_anchor(bucket.get("content", ""), anchor)
-                if anchored_content != bucket.get("content", ""):
-                    updates["content"] = anchored_content
-
         if updates:
             updates["last_active"] = meta.get("last_active") or meta.get("created")
             await bucket_mgr.update(bucket_id, **updates)
@@ -878,21 +794,38 @@ class ReflectionEngine:
                 "diary_memory": {"status": "skipped", "reason": "no_materials"},
             }
 
-        reflect_client, _, _ = self._reflect_model_client()
-        if reflect_client:
+        reflect_client, reflect_model, _ = self._reflect_model_client()
+        if not reflect_client or not reflect_model:
+            return self._reflection_generation_skipped(
+                period,
+                key,
+                bucket_id,
+                materials,
+                reason="generator_unavailable",
+            )
+        try:
             result = await self._api_reflect(period, key, materials)
-        else:
-            result = self._fallback_reflection(period, key, materials)
+        except Exception as exc:
+            logger.warning("Reflection generation failed; skipping %s %s: %s", period, key, exc)
+            return self._reflection_generation_skipped(
+                period,
+                key,
+                bucket_id,
+                materials,
+                reason="generator_error",
+            )
 
         title = str(result.get("title") or f"{key} {'日印象' if period == 'daily' else '周印象'}")[:40]
         content = str(result.get("content") or "").strip()
-        if not content:
-            content = self._fallback_reflection(period, key, materials)["content"]
-        if self.relationship_weather_affect_anchor_enabled:
-            content = self._append_affect_anchor(
-                content,
-                self._normalize_affect_anchor(result.get("affect_anchor"))
-                or self._fallback_reflection(period, key, materials).get("affect_anchor", {}),
+        first_person = bool("我" in content or re.search(r"(?i)\b(?:i|me|my|mine|myself)\b", content))
+        has_markdown_section = bool(re.search(r"(?m)^\s{0,3}#{1,6}\s+", content))
+        if not content or not first_person or has_markdown_section:
+            return self._reflection_generation_skipped(
+                period,
+                key,
+                bucket_id,
+                materials,
+                reason="invalid_model_output",
             )
         tags = list(
             dict.fromkeys(
@@ -1426,7 +1359,7 @@ class ReflectionEngine:
     async def _api_reflect(self, period: str, key: str, materials: dict) -> dict:
         client, model, use_dehydration = self._reflect_model_client()
         if not client or not model:
-            return self._fallback_reflection(period, key, materials)
+            raise RuntimeError("reflection_generator_unavailable")
         payload = {"period": period, "date": key, **materials}
         response = await client.chat.completions.create(
             model=model,
@@ -1441,7 +1374,41 @@ class ReflectionEngine:
             ),
         )
         raw = response.choices[0].message.content if response.choices else ""
-        return self._parse_json_object(raw or "") or self._fallback_reflection(period, key, materials)
+        parsed = self._parse_json_object(raw or "")
+        if not parsed:
+            raise ValueError("reflection_invalid_model_output")
+        return parsed
+
+    @staticmethod
+    def _reflection_generation_skipped(
+        period: str,
+        key: str,
+        bucket_id: str,
+        materials: dict,
+        *,
+        reason: str,
+    ) -> dict:
+        diary = materials.get("diary") or {}
+        return {
+            "status": "skipped",
+            "reason": reason,
+            "period": period,
+            "id": bucket_id,
+            "date": key,
+            "diary": {
+                "found": bool(diary),
+                "diary_id": diary.get("id") if diary else None,
+            },
+            "diary_memory": {"status": "skipped", "reason": reason},
+            "materials": {
+                "buckets": len(materials.get("buckets", [])),
+                "daily_impressions": len(materials.get("daily_impressions", [])),
+                "daily_chat_memories": len(materials.get("daily_chat_memories", [])),
+                "persona_events": len(materials.get("persona_events", [])),
+                "conversation_turns": len(materials.get("conversation_turns", [])),
+                "commitments": len(materials.get("commitments", [])),
+            },
+        }
 
     async def _reflection_materials(
         self,
@@ -1568,6 +1535,7 @@ class ReflectionEngine:
             "diary": diary,
         }
 
+    # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
     @staticmethod
     def _conversation_turn_payloads(turns: list[dict] | None, limit: int) -> list[dict]:
         if not turns:
@@ -1600,6 +1568,7 @@ class ReflectionEngine:
         selected.sort(key=lambda item: str(item.get("created_at") or ""))
         return selected[-limit:] if limit > 0 else selected
 
+    # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
     @staticmethod
     def _raw_event_turn_payloads(events: list[dict] | None, limit: int) -> list[dict]:
         if not events:
@@ -2638,131 +2607,46 @@ class ReflectionEngine:
         max_candidates: int | None = None,
     ) -> list[dict]:
         client, model, use_daily_client = self._daily_chat_memory_model_client(candidate=True)
-        if client:
-            summaries = window_summaries or []
-            payload = {
-                "date": key,
-                "identity": {
-                    "ai_name": self.identity["ai_name"],
-                    "user_name": self.identity["user_name"],
-                    "user_display_name": self.identity["user_display_name"],
-                    "user_aliases": self.identity.get("user_aliases", []),
-                },
-                "self_anchor_entry": self_context,
-                "window_summaries": summaries,
-                "conversation_turns": [] if summaries else turns,
-            }
-            try:
-                response = await self._daily_chat_memory_create_completion(
-                    client,
-                    model=model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": self._daily_chat_memory_prompt(max_candidates=max_candidates),
-                        },
-                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                    ],
-                    max_tokens=self.daily_chat_memory_candidate_max_tokens,
-                    temperature=self.temperature,
-                    use_daily_client=use_daily_client,
-                )
-                raw = self._completion_content(response)
-                parsed = self._parse_json_object(raw or "")
-                candidates = parsed.get("candidates") if isinstance(parsed, dict) else []
-                if isinstance(candidates, list):
-                    return [item for item in candidates if isinstance(item, dict)]
-            except Exception as exc:
-                logger.warning("Daily chat memory extraction failed, using heuristic: %s", exc)
-        return self._heuristic_daily_chat_memory_candidates(
-            key,
-            turns,
-            max_candidates=max_candidates,
-        )
-
-    def _heuristic_daily_chat_memory_candidates(
-        self,
-        key: str,
-        turns: list[dict],
-        *,
-        max_candidates: int | None = None,
-    ) -> list[dict]:
-        lines = []
-        for turn in turns:
-            user_text = str(turn.get("user_text") or "").strip()
-            assistant_text = str(turn.get("assistant_text") or "").strip()
-            if user_text:
-                lines.append(f"用户：{user_text}")
-            if assistant_text:
-                lines.append(f"助手：{assistant_text}")
-        normalized = re.sub(r"\s+", " ", " ".join(lines)).strip()
-        if not normalized:
+        if not client:
+            logger.warning("Daily chat memory extraction skipped: model unavailable")
             return []
-        keyword_map = [
-            ("boundary", ["我不喜欢", "我不要", "以后不要", "别再", "边界是"]),
-            ("signal", ["暗号是", "称呼我", "叫我", "模式是", "切换到"]),
-            ("commitment", ["承诺", "约定", "答应", "以后要", "下次要"]),
-            ("project_state", ["项目", "仓库", "分支", "部署", "MCP", "API", "网关", "自动记忆", "raw_events", "原文保险箱"]),
-            ("stable_preference", ["我希望以后", "我希望你", "以后解释", "默认先", "默认不要", "我的偏好"]),
-        ]
-        candidates = []
-        turn_ids = [turn.get("id") for turn in turns if turn.get("id") is not None]
-        raw_event_ids = [
-            event_id
-            for turn in turns
-            for event_id in (turn.get("raw_event_ids") or [])
-            if event_id is not None
-        ]
-        for kind, keywords in keyword_map:
-            if not any(keyword in normalized for keyword in keywords):
-                continue
-            excerpt = self._diary_excerpt(normalized, keywords)
-            content = self._daily_chat_memory_content(kind, key, excerpt)
-            if self._daily_chat_memory_noise(content):
-                continue
-            if self._daily_chat_memory_low_value_social_noise(content, kind):
-                continue
-            if self._daily_chat_memory_low_value_episode(content, kind):
-                continue
-            candidates.append(
-                {
-                    "should_write": True,
-                    "kind": kind,
-                    "title": self._daily_chat_memory_title(content, kind, key),
-                    "content": content,
-                    "domain": self._auto_memory_domain(kind, content, [self._kind_tag(kind)]),
-                    "tags": [self._kind_tag(kind)],
-                    "importance": 5,
-                    "valence": 0.58,
-                    "arousal": 0.3,
-                    "confidence": 0.7,
-                    "source_turn_ids": turn_ids[:8],
-                    "source_event_ids": raw_event_ids[:24],
-                    "reason": f"chat_contains_{kind}",
-                }
+        summaries = window_summaries or []
+        payload = {
+            "date": key,
+            "identity": {
+                "ai_name": self.identity["ai_name"],
+                "user_name": self.identity["user_name"],
+                "user_display_name": self.identity["user_display_name"],
+                "user_aliases": self.identity.get("user_aliases", []),
+            },
+            "self_anchor_entry": self_context,
+            "window_summaries": summaries,
+            "conversation_turns": [] if summaries else turns,
+        }
+        try:
+            response = await self._daily_chat_memory_create_completion(
+                client,
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": self._daily_chat_memory_prompt(max_candidates=max_candidates),
+                    },
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                max_tokens=self.daily_chat_memory_candidate_max_tokens,
+                temperature=self.temperature,
+                use_daily_client=use_daily_client,
             )
-            if len(candidates) >= int(max_candidates or self.daily_chat_memory_max_per_day or 1):
-                break
-        return candidates
-
-    def _daily_chat_memory_content(self, kind: str, key: str, excerpt: str) -> str:
-        user_display_name = self.identity["user_display_name"]
-        ai_name = self.identity["ai_name"]
-        excerpt = self._memory_body_from_excerpt(excerpt)
-        excerpt = re.sub(r"^(用户|助手)：", "", excerpt).strip()
-        if kind == "key_event":
-            return excerpt if excerpt else "关键事件需要后续回看。"
-        if kind == "project_state":
-            return excerpt if self._starts_with_identity(excerpt) else f"项目状态：{excerpt}"
-        if kind == "relationship_anchor":
-            return excerpt if self._starts_with_identity(excerpt) else f"{ai_name}记得这段关系锚点：{excerpt}"
-        if kind == "boundary":
-            return excerpt if self._starts_with_identity(excerpt) else f"{user_display_name}的边界：{excerpt}"
-        if kind == "signal":
-            return excerpt if self._starts_with_identity(excerpt) else f"{user_display_name}与{ai_name}的暗号或模式信号：{excerpt}"
-        if kind == "commitment":
-            return excerpt if self._starts_with_identity(excerpt) else f"后续需要记得的承诺或约定：{excerpt}"
-        return excerpt if self._starts_with_identity(excerpt) else f"{user_display_name}的稳定偏好：{excerpt}"
+            raw = self._completion_content(response)
+            parsed = self._parse_json_object(raw or "")
+            candidates = parsed.get("candidates") if isinstance(parsed, dict) else []
+            if isinstance(candidates, list):
+                return [item for item in candidates if isinstance(item, dict)]
+            logger.warning("Daily chat memory extraction returned invalid candidates; skipping write")
+        except Exception as exc:
+            logger.warning("Daily chat memory extraction failed; skipping write: %s", exc)
+        return []
 
     @staticmethod
     def _daily_chat_memory_noise(content: str) -> bool:
@@ -2812,6 +2696,7 @@ class ReflectionEngine:
             return True
         return False
 
+    # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
     @staticmethod
     def _daily_chat_memory_low_value_social_noise(content: str, kind: str) -> bool:
         text = re.sub(r"\s+", " ", strip_wikilinks(str(content or ""))).strip()
@@ -3583,50 +3468,6 @@ class ReflectionEngine:
         digest = hashlib.sha1(f"{key}|{kind}|{content}".encode("utf-8")).hexdigest()[:10]
         return f"daily_chat_memory_{str(key).replace('-', '')}_{digest}"
 
-    def _fallback_reflection(self, period: str, key: str, materials: dict) -> dict:
-        weather_items = materials.get("daily_impressions", []) if period == "weekly" else []
-        names = [item.get("name") or item.get("id") for item in weather_items[:7]]
-        if not names:
-            names = [item.get("name") or item.get("id") for item in materials.get("buckets", [])[:6]]
-        daily_chat_memories = materials.get("daily_chat_memories", [])
-        conversation_turns = materials.get("conversation_turns", [])
-        commitments = [item.get("name") or item.get("id") for item in materials.get("commitments", [])[:4]]
-        label = "今天" if period == "daily" else "本周"
-        title = f"{key} {'日印象' if period == 'daily' else '周印象'}"
-        diary = materials.get("diary") or {}
-        if names or commitments:
-            main = "、".join([name for name in names if name])
-            owed = "；仍需记住：" + "、".join(commitments) if commitments else ""
-            content = f"{label}的关系天气：围绕{main or '几件轻小的事'}留下痕迹{owed}。"
-        elif daily_chat_memories:
-            first = daily_chat_memories[0].get("content") or daily_chat_memories[0].get("title") or "自动记忆挑出的线头"
-            content = f"{label}的关系天气先从自动记忆挑出的 {len(daily_chat_memories)} 个线头里成形，最清楚的是：{first}。"
-        elif conversation_turns:
-            content = f"{label}的关系天气从 {len(conversation_turns)} 轮短期对话里留下一点原声，先只记温度，不把流水账写成事件清单。"
-        elif diary:
-            diary_title = diary.get("title") or "当天日记"
-            content = f"{label}的关系天气从《{diary_title}》里轻轻留下一点温度，先不把日常写成普通记忆。"
-        else:
-            content = f"{label}的关系天气很轻，暂时没有明显需要带走的脉络。"
-        anchor_scene = names[0] if names else (
-            daily_chat_memories[0].get("title") or daily_chat_memories[0].get("content")
-            if daily_chat_memories
-            else (
-            "当天短期对话的原声"
-            if conversation_turns
-            else (diary.get("title") if diary else ("这一段关系天气很轻" if period == "daily" else "这一周的关系天气慢慢落下"))
-            )
-        )
-        return {
-            "title": title,
-            "content": content,
-            "valence": 0.55,
-            "arousal": 0.3,
-            "confidence": 0.5,
-            "tags": ["relationship_weather"],
-            "affect_anchor": self._fallback_reflection_anchor(period, key, str(anchor_scene), content),
-        }
-
     def _fallback_reflection_anchor(self, period: str, key: str, scene: str, content: str) -> dict:
         seed = f"{period}|{key}|{scene}|{content}"
         index = sum(ord(char) for char in seed) % len(REFLECTION_FALLBACK_ANCHORS)
@@ -4366,7 +4207,6 @@ class ReflectionEngine:
             "tags": list(dict.fromkeys(tags)),
             "importance": importance,
             "confidence": 0.55 if tags else 0.45,
-            "affect_anchor_needed": bool(tags and importance >= 6),
             "edges": [],
         }
 
@@ -4528,8 +4368,8 @@ class ReflectionEngine:
 
     @staticmethod
     def _normalize_daily_chat_memory_mode(value: Any) -> str:
-        mode = str(value or "review").strip().lower()
-        return mode if mode in DAILY_CHAT_MEMORY_MODES else "review"
+        mode = str(value or "off").strip().lower()
+        return mode if mode in DAILY_CHAT_MEMORY_MODES else "off"
 
     @staticmethod
     def _normalize_period(period: str) -> str:

@@ -9,6 +9,7 @@ _NON_KEY_RE = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
 _SPACE_RE = re.compile(r"\s+")
 _TRACE_TZ = ZoneInfo("Asia/Shanghai")
 
+# LOCAL-ADAPTATION: [新增/改动/缺少] 相对 upstream/main@1dac438，含本地新增、采用本地适配版本、未保留部分上游实现。
 _DROP_TERMS = (
     "Lin",
     "Che",
@@ -159,6 +160,7 @@ def select_persona_events(
     return selected
 
 
+# LOCAL-ADAPTATION: [新增/改动] 相对 upstream/main@1dac438，含本地新增、采用本地适配版本。
 def format_persona_event_trace_line(
     event: dict[str, Any],
     *,

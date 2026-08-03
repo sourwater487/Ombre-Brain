@@ -28,6 +28,7 @@ WORKSPACE_ATTACHMENT_RE = re.compile(
     r"<workspace_attachment>[\s\S]*?</workspace_attachment>",
     re.IGNORECASE,
 )
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 LIN_MESSAGE_RE = re.compile(
     r"<lin_message\b[^>]*>\s*(?P<body>[\s\S]*?)\s*</lin_message\s*>",
     re.IGNORECASE,
@@ -88,10 +89,12 @@ CLIENT_CONTEXT_BLOCK_TITLES = {
     "相关记忆",
     "屏幕文本",
 }
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 STICKER_PAYLOAD_KEYS = {"type", "id"}
 STICKER_PAYLOAD_MAX_CHARS = 4096
 
 
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 def is_sticker_payload(text: Any) -> bool:
     """Return true only for the frontend's complete, standalone sticker JSON."""
     raw = str(text or "").strip()
@@ -112,6 +115,7 @@ def is_sticker_payload(text: Any) -> bool:
     return payload.get("type") == "sticker" and isinstance(sticker_id, str) and bool(sticker_id.strip())
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 def strip_raw_client_context(text: str, *, strip_injected_xml: bool = True) -> str:
     cleaned = str(text or "")
     if strip_injected_xml:
@@ -134,6 +138,7 @@ def strip_raw_client_context(text: str, *, strip_injected_xml: bool = True) -> s
     cleaned = _strip_client_context_blocks(cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
     cleaned = cleaned.strip()
     return "" if is_sticker_payload(cleaned) else cleaned
 
@@ -257,9 +262,11 @@ def raw_event_text_looks_injected(text: str, raw: dict[str, Any] | None = None) 
     )
 
 
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 class RawEventStore:
     """Append-only-ish raw dialogue archive with optional FTS search."""
 
+    # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
     def __init__(self, config: dict):
         config = config or {}
         raw_cfg = config.get("raw_events", {}) if isinstance(config.get("raw_events", {}), dict) else {}
@@ -294,6 +301,7 @@ class RawEventStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
     def _init_db(self) -> None:
         conn = self._connect()
         conn.execute(
@@ -388,6 +396,7 @@ class RawEventStore:
                     [(int(item["id"]),) for item in stale_daily],
                 )
 
+    # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
     def ingest(self, events: list[dict[str, Any]], *, source: str = "") -> dict[str, Any]:
         safe_source = self._clean_source(source)
         now = self._now_iso()
@@ -571,6 +580,7 @@ class RawEventStore:
         finally:
             conn.close()
 
+    # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
     def search(
         self,
         query: str = "",
@@ -755,6 +765,7 @@ class RawEventStore:
         ).fetchone()
         return int(row["id"]) if row else None
 
+    # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
     def _normalize_event(
         self,
         raw: dict[str, Any] | None,

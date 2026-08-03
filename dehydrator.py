@@ -113,6 +113,7 @@ DIRECT_BUCKET_CAPSULE_PROMPT = """你是长期记忆证据压缩器。请把一�
 
 # --- Long-note memory digest prompt: split selected durable notes into entries ---
 # --- 长内容摘记提示词：把筛选后的长期记忆片段拆成多个独立条目 ---
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 DIGEST_PROMPT_TEMPLATE = """你是一个长期记忆摘记专家。用户会发送一段已经筛选过、适合进入长期记忆的文本。请将其中真正值得长期召回的内容拆分成多个独立记忆条目。
 
 当前身份口径来自配置：
@@ -188,6 +189,7 @@ DIGEST_PROMPT = _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, generic_iden
 
 # --- Merge prompt: instruct LLM to blend old and new memories ---
 # --- 合并提示词：指导 LLM 揉合新旧记忆 ---
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与新内容合并为一份统一的简洁记录。
 
 当前身份口径来自配置：
@@ -266,8 +268,8 @@ class Dehydrator:
         # --- Read dehydration API config / 读取脱水 API 配置 ---
         dehy_cfg = config.get("dehydration", {})
         self.api_key = dehy_cfg.get("api_key", "")
-        self.model = dehy_cfg.get("model", "deepseek-chat")
-        self.base_url = dehy_cfg.get("base_url", "https://api.deepseek.com/v1")
+        self.model = dehy_cfg.get("model", "deepseek-v4-flash")
+        self.base_url = dehy_cfg.get("base_url", "https://api.deepseek.com")
         self.thinking_mode = self._normalize_thinking_mode(dehy_cfg.get("thinking_mode", ""))
         self.max_tokens = dehy_cfg.get("max_tokens", 1024)
         self.temperature = dehy_cfg.get("temperature", 0.1)

@@ -1,3 +1,4 @@
+# LOCAL-ADAPTATION: [新增] 整个文件为相对 upstream/main@1dac438 的本地新增。
 # ============================================================
 # Ombre Brain Configuration / 配置文件
 # Copy this file to config.yaml and modify as needed
@@ -62,14 +63,14 @@ dehydration:
   # Supports any OpenAI-compatible API: DeepSeek / Ollama / LM Studio / vLLM / Gemini etc.
   # 支持所有 OpenAI 兼容 API：DeepSeek / Ollama / LM Studio / vLLM / Gemini 等
   model: "deepseek-v4-flash"
-  base_url: "https://api.deepseek.com/v1"
+  base_url: "https://api.deepseek.com"
   # Optional thinking mode override for DeepSeek v4 models:
   #   disabled = non-thinking / enabled = thinking / empty = provider default
   # DeepSeek v4 可选思考模式覆盖：
   #   disabled = 非思考 / enabled = 思考 / 留空 = 走模型默认行为
   thinking_mode: "disabled"
   # Common base_url examples / 常见 base_url 示例：
-  #   DeepSeek:    https://api.deepseek.com/v1
+  #   DeepSeek:    https://api.deepseek.com
   #   SiliconFlow: https://api.siliconflow.cn/v1
   #   Ollama:      http://localhost:11434/v1
   #   LM Studio:   http://localhost:1234/v1
@@ -262,25 +263,28 @@ persona:
   enabled: true
   profile_id: "lin_che"
   mode: "llm"
-  base_url: "https://api.deepseek.com/v1"
+  base_url: "https://api.deepseek.com"
   model: "deepseek-v4-flash"
   # Optional thinking mode override for DeepSeek v4 models:
   #   disabled = non-thinking / enabled = thinking / empty = provider default
   thinking_mode: "disabled"
+  json_response_format: true
   # api_key: ""                  # Use OMBRE_PERSONA_API_KEY; falls back to OMBRE_API_KEY
   temperature: 0.1
   max_tokens: 500
   global_decay_hours: 168
   session_mood_half_life_minutes: 90
-  max_personality_delta: 0.01
   max_relationship_delta: 0.03
   max_affect_delta: 0.18
-  initial_personality:
-    openness: 0.56
-    conscientiousness: 0.50
-    extraversion: 0.44
-    agreeableness: 0.66
-    neuroticism: 0.36
+  evaluation_interval_rounds: 3
+  state_change_window_rounds: 15
+  state_change_min_abs: 0.08
+  event_recording_enabled: true
+  event_batch_size: 1
+  conflict_nudge_enabled: false
+  conflict_nudge_context_turns: 3
+  conflict_nudge_min_confidence: 0.55
+  conflict_nudge_timeout_seconds: 4
   initial_relationship:
     affinity: 0.86
     dominance: 0.38
@@ -294,9 +298,11 @@ persona:
     longing: 0.34
     security: 0.68
     protective_drive: 0.52
+    libido: 0.18
     mood_label: "warm_neutral"
     session_defensiveness: 0.12
     residue: ""
+    inner_thought: ""
   # Env vars:
   #   OMBRE_PERSONA_API_KEY
   #   OMBRE_PERSONA_BASE_URL
@@ -307,9 +313,10 @@ persona:
 reflection:
   enabled: true
   auto_enabled: true
+  daily_enabled: true
   enrich_on_write: true
   memory_affect_anchor_enabled: false
-  relationship_weather_affect_anchor_enabled: true
+  relationship_weather_affect_anchor_enabled: false
   enrich_backfill_enabled: true
   enrich_backfill_limit: 5
   base_url: ""                    # empty = persona.base_url
@@ -322,6 +329,7 @@ reflection:
   max_tokens: 700
   timezone: "Asia/Shanghai"
   daily_hour: 4                   # generate daily impression after this local hour
+  daily_chat_memory_mode: off
   weekly_day: 0                   # 0=Monday, 6=Sunday; auto run writes the previous week
   weekly_hour: 4
   check_interval_minutes: 60
@@ -555,9 +563,12 @@ portrait:
   model: ''
   thinking_mode: ''
   temperature: 0.1
-  max_tokens: 1800
+  max_tokens: 3200
+  json_response_format: true
   material_limit: 18
   first_run_material_limit: 160
+  user_rewrite_evidence_delta: 10
+  manual_suppress_days: 14
   source_excerpt_chars: 900
   recent_continuity_days: 3
   persona_events_limit: 24

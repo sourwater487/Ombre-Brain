@@ -140,6 +140,7 @@ class MemoryLayerPolicy:
         return self.diffusion_policy != DIFFUSE_NEVER
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 LAYER_POLICIES: dict[str, MemoryLayerPolicy] = {
     LAYER_CORE: MemoryLayerPolicy(
         layer=LAYER_CORE,

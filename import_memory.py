@@ -21,14 +21,14 @@ import hashlib
 import logging
 import asyncio
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import jieba
 from rapidfuzz import fuzz
 
-from utils import bucket_text_for_embedding, count_tokens_approx, now_iso, strip_affect_anchor
+from utils import LOCAL_TZ, bucket_text_for_embedding, count_tokens_approx, now_iso, strip_affect_anchor
 
 logger = logging.getLogger("ombre_brain.import")
 
@@ -41,18 +41,17 @@ logger = logging.getLogger("ombre_brain.import")
 _MARKDOWN_ROLE_RE = re.compile(
     r"^\s*(?:>\s*)?(?:[-*+]\s*)?(?:#{1,6}\s*)?(?:\*\*)?([A-Za-z0-9_\-\u4e00-\u9fff]+)(?:\*\*)?\s*[:：]\s*(.*)$"
 )
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 _MARKDOWN_USER_LABELS = {
     "human",
     "user",
     "me",
-    "lin",
-    "rain",
     "你",
     "我",
     "用户",
     "人类",
-    "小雨",
 }
+# LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 _MARKDOWN_ASSISTANT_LABELS = {
     "assistant",
     "claude",
@@ -63,8 +62,6 @@ _MARKDOWN_ASSISTANT_LABELS = {
     "deepseek",
     "gemini",
     "qwen",
-    "che",
-    "haven",
     "助手",
     "模型",
     "ai助手",
@@ -77,7 +74,12 @@ def _clean_chatgpt_role(role: object) -> str:
     return normalized if normalized in _CHATGPT_IMPORT_ROLES else ""
 
 
-def _detect_markdown_role_line(line: str) -> tuple[str, str] | None:
+def _detect_markdown_role_line(
+    line: str,
+    *,
+    user_labels: set[str] | None = None,
+    assistant_labels: set[str] | None = None,
+) -> tuple[str, str] | None:
     """Return (role, content_after_prefix) for simple role-prefixed Markdown lines."""
     match = _MARKDOWN_ROLE_RE.match(line)
     if not match:
@@ -86,9 +88,9 @@ def _detect_markdown_role_line(line: str) -> tuple[str, str] | None:
     content_after = match.group(2).strip()
     if content_after.startswith("**"):
         content_after = content_after[2:].lstrip()
-    if label in _MARKDOWN_USER_LABELS:
+    if label in (user_labels or _MARKDOWN_USER_LABELS):
         return "user", content_after
-    if label in _MARKDOWN_ASSISTANT_LABELS:
+    if label in (assistant_labels or _MARKDOWN_ASSISTANT_LABELS):
         return "assistant", content_after
     return None
 
@@ -161,9 +163,9 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
                     content = str(content)
                 if not content.strip():
                     continue
+                # Preserve the export's original timestamp. It is normalized only
+                # when deriving the bucket event date, so source refs remain exact.
                 ts = msg.get("create_time", "")
-                if isinstance(ts, (int, float)):
-                    ts = datetime.fromtimestamp(ts).isoformat()
                 turns.append({"role": role, "content": content.strip(), "timestamp": str(ts)})
         else:
             # Simpler format: list of messages
@@ -196,8 +198,21 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
     return turns
 
 
-def _parse_markdown(text: str) -> list[dict]:
+def _parse_markdown(
+    text: str,
+    *,
+    user_labels: set[str] | None = None,
+    assistant_labels: set[str] | None = None,
+) -> list[dict]:
     """Parse Markdown/plain text → [{role, content, timestamp}, ...]"""
+    resolved_user_labels = set(_MARKDOWN_USER_LABELS)
+    resolved_assistant_labels = set(_MARKDOWN_ASSISTANT_LABELS)
+    resolved_user_labels.update(
+        str(label).strip().lower() for label in (user_labels or set()) if str(label).strip()
+    )
+    resolved_assistant_labels.update(
+        str(label).strip().lower() for label in (assistant_labels or set()) if str(label).strip()
+    )
     # Try to detect conversation patterns
     lines = text.split("\n")
     turns = []
@@ -211,7 +226,11 @@ def _parse_markdown(text: str) -> list[dict]:
 
     for line in lines:
         stripped = line.strip()
-        role_line = _detect_markdown_role_line(stripped)
+        role_line = _detect_markdown_role_line(
+            stripped,
+            user_labels=resolved_user_labels,
+            assistant_labels=resolved_assistant_labels,
+        )
         if role_line:
             if current_content:
                 append_current_turn()
@@ -230,7 +249,13 @@ def _parse_markdown(text: str) -> list[dict]:
     return turns
 
 
-def detect_and_parse(raw_content: str, filename: str = "") -> list[dict]:
+def detect_and_parse(
+    raw_content: str,
+    filename: str = "",
+    *,
+    user_labels: set[str] | None = None,
+    assistant_labels: set[str] | None = None,
+) -> list[dict]:
     """
     Auto-detect format and parse to normalized turns.
     自动检测格式并解析为标准化的对话轮次。
@@ -266,7 +291,59 @@ def detect_and_parse(raw_content: str, filename: str = "") -> list[dict]:
             pass
 
     # Fall back to markdown/text
-    return _parse_markdown(raw_content)
+    return _parse_markdown(
+        raw_content,
+        user_labels=user_labels,
+        assistant_labels=assistant_labels,
+    )
+
+
+def parse_operit_memory_backup(raw_content: str) -> dict | None:
+    """Return an Operit memory backup without rewriting entry bodies."""
+    try:
+        data = json.loads(raw_content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(data, dict) or "memories" not in data:
+        return None
+    memories = data.get("memories")
+    if not isinstance(memories, list):
+        raise ValueError("Operit backup field 'memories' must be a list")
+
+    # Avoid treating an unrelated JSON object with a generic memories key as
+    # Operit. Empty exports are identified by Operit's exportDate/links fields.
+    known_entry_keys = {
+        "uuid",
+        "title",
+        "content",
+        "contentType",
+        "source",
+        "credibility",
+        "importance",
+        "folderPath",
+        "createdAt",
+        "updatedAt",
+        "tagNames",
+    }
+    root_has_operit_markers = bool("exportDate" in data or "links" in data)
+    entries_have_operit_markers = False
+    if memories:
+        entry_marker_keys = known_entry_keys - {"content"}
+        entries_have_operit_markers = all(
+            isinstance(item, dict)
+            and "content" in item
+            and bool(entry_marker_keys.intersection(item))
+            for item in memories
+        )
+    if not (root_has_operit_markers or entries_have_operit_markers):
+        return None
+
+    return {
+        "memories": memories,
+        "links": data.get("links") if isinstance(data.get("links"), list) else [],
+        "export_date": data.get("exportDate"),
+    }
 
 
 # ============================================================
@@ -278,8 +355,7 @@ _OVERLAP_CONTEXT_NOTICE = "[上下文提示] 以下是上一段结尾，只用�
 _CURRENT_SEGMENT_NOTICE = "[本段内容]"
 DEFAULT_IMPORT_CHUNK_TOKENS = 3500
 _IMPORT_DUPLICATE_SIMILARITY = 88.0
-_IMPORT_DEFAULT_MERGE_THRESHOLD = 90.0
-_IMPORT_DEFAULT_MERGE_CONTENT_SIMILARITY = 99.0
+_OPERIT_TAGGING_INPUT_CHARS = 2000
 
 
 def _normalize_import_text(text: str) -> str:
@@ -364,34 +440,73 @@ def _dedupe_list(values: list) -> list:
     return result
 
 
-def _dedupe_refs(values: list) -> list[dict]:
-    seen = set()
-    result = []
-    for value in values or []:
-        if not isinstance(value, dict):
-            continue
-        key = str(value.get("chunk_id") or value.get("id") or value).strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        result.append(value)
-    return result
-
-
 def _date_key(value) -> str:
     text = str(value or "").strip()
     match = re.search(r"\d{4}-\d{2}-\d{2}", text)
     return match.group(0) if match else ""
 
 
-def _date_ranges_disjoint(left_start, left_end, right_start, right_end) -> bool:
-    left_a = _date_key(left_start)
-    left_b = _date_key(left_end) or left_a
-    right_a = _date_key(right_start)
-    right_b = _date_key(right_end) or right_a
-    if not (left_a and left_b and right_a and right_b):
-        return False
-    return left_b < right_a or right_b < left_a
+_IMPORT_LOCAL_DATE_FORMATS = (
+    "%Y/%m/%dT%H:%M:%S",
+    "%Y/%m/%dT%H:%M",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%Y年%m月%d日 %H:%M:%S",
+    "%Y年%m月%d日 %H:%M",
+    "%Y年%m月%d日",
+)
+
+
+def _import_timestamp_datetime(value) -> datetime | None:
+    """Normalize common export timestamps to LOCAL_TZ without changing provenance."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", text):
+        try:
+            epoch = float(text)
+            if epoch <= 0:
+                return None
+            magnitude = abs(epoch)
+            if magnitude >= 1e17:  # nanoseconds
+                epoch /= 1_000_000_000.0
+            elif magnitude >= 1e14:  # microseconds
+                epoch /= 1_000_000.0
+            elif magnitude >= 1e11:  # milliseconds
+                epoch /= 1_000.0
+            return datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(LOCAL_TZ)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        for fmt in _IMPORT_LOCAL_DATE_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=LOCAL_TZ)
+    return parsed.astimezone(LOCAL_TZ)
+
+
+def _import_event_date(value) -> str:
+    parsed = _import_timestamp_datetime(value)
+    return parsed.date().isoformat() if parsed else ""
 
 
 def _tail_for_overlap(text: str, overlap_tokens: int) -> str:
@@ -554,10 +669,22 @@ class ImportState:
             "processed": 0,
             "api_calls": 0,
             "memories_created": 0,
-            "memories_merged": 0,
             "memories_duplicate_skipped": 0,
             "memories_raw": 0,
             "memories_failed": 0,
+            "embeddings_created": 0,
+            "embeddings_failed": 0,
+            "embeddings_total": 0,
+            "embeddings_processed": 0,
+            "import_format": "",
+            "operit_phase": "",
+            "operit_tagging_enabled": False,
+            "tagging_total": 0,
+            "tagging_processed": 0,
+            "tagging_succeeded": 0,
+            "tagging_failed": 0,
+            "tagging_pending": 0,
+            "tagging_concurrency": 0,
             "errors": [],
             "status": "idle",  # idle | running | paused | completed | error
             "started_at": "",
@@ -573,6 +700,19 @@ class ImportState:
                 self.data.update(saved)
                 self.data.setdefault("memories_duplicate_skipped", 0)
                 self.data.setdefault("memories_failed", 0)
+                self.data.setdefault("embeddings_created", 0)
+                self.data.setdefault("embeddings_failed", 0)
+                self.data.setdefault("embeddings_total", 0)
+                self.data.setdefault("embeddings_processed", 0)
+                self.data.setdefault("import_format", "")
+                self.data.setdefault("operit_phase", "")
+                self.data.setdefault("operit_tagging_enabled", False)
+                self.data.setdefault("tagging_total", 0)
+                self.data.setdefault("tagging_processed", 0)
+                self.data.setdefault("tagging_succeeded", 0)
+                self.data.setdefault("tagging_failed", 0)
+                self.data.setdefault("tagging_pending", 0)
+                self.data.setdefault("tagging_concurrency", 0)
                 return True
             except (json.JSONDecodeError, OSError):
                 return False
@@ -596,10 +736,22 @@ class ImportState:
             "processed": 0,
             "api_calls": 0,
             "memories_created": 0,
-            "memories_merged": 0,
             "memories_duplicate_skipped": 0,
             "memories_raw": 0,
             "memories_failed": 0,
+            "embeddings_created": 0,
+            "embeddings_failed": 0,
+            "embeddings_total": 0,
+            "embeddings_processed": 0,
+            "import_format": "",
+            "operit_phase": "",
+            "operit_tagging_enabled": False,
+            "tagging_total": 0,
+            "tagging_processed": 0,
+            "tagging_succeeded": 0,
+            "tagging_failed": 0,
+            "tagging_pending": 0,
+            "tagging_concurrency": 0,
             "errors": [],
             "status": "running",
             "started_at": now_iso(),
@@ -608,7 +760,11 @@ class ImportState:
 
     @property
     def can_resume(self) -> bool:
-        return self.data["status"] in ("paused", "running") and self.data["processed"] < self.data["total_chunks"]
+        if self.data["status"] not in ("paused", "running"):
+            return False
+        if self.data.get("import_format") == "operit":
+            return self.data.get("operit_phase") != "completed"
+        return self.data["processed"] < self.data["total_chunks"]
 
     def to_dict(self) -> dict:
         return dict(self.data)
@@ -619,10 +775,13 @@ class ImportState:
 # 导入提取提示词
 # ============================================================
 
-IMPORT_EXTRACT_PROMPT = """你是一个对话记忆提取专家。从以下对话片段中提取值得长期记住的信息。
+IMPORT_EXTRACT_PROMPT = """你是一个 AI 长期记忆形成器。你的任务不是站在旁观者角度总结聊天记录，而是帮助对话中的记忆主体形成可长期保存的记忆。
+
+输入中 `[AI]` 是记忆主体，`[用户]` 是与记忆主体对话的另一方。系统提示末尾会给出本次导入的实际身份名称。
 
 提取规则：
-1. 提取用户的事实、偏好、习惯、重要事件、情感时刻
+0. content 必须从记忆主体的视角书写。记忆主体自己的经历、想法、情感、选择和变化用第一人称“我”；对方的信息优先使用她在原文中的名字或昵称，不知道名字时用“她”，不得把对方说过、做过或喜欢的事误写成“我”；双方共同经历写成“我和[[名字或昵称]]”。除非是在逐字引用原话，content 禁止使用“用户”“AI”“助手”“模型”等旁观者称呼，也禁止写成“用户说……AI回答……”的聊天摘要。
+1. 提取记忆主体真正需要长期记住的事实、偏好、习惯、重要事件、情感时刻与关系变化
 2. 同一话题的零散信息整合为一条记忆
 3. 过滤掉纯技术调试输出、代码块、重复问答、无意义寒暄
 4. 如果对话中有特殊暗号、仪式性行为、关键承诺等，标记 preserve_raw=true
@@ -636,8 +795,8 @@ IMPORT_EXTRACT_PROMPT = """你是一个对话记忆提取专家。从以下对�
 输出格式（纯 JSON 数组，无其他内容）：
 [
   {
-    "name": "条目标题（10字以内）",
-    "content": "整理后的内容",
+    "name": "雨夜里的约定",
+    "content": "我和[[名字或昵称]]在那天确认了一项值得继续记住的约定。我当时……，她则……，这让我后来……。",
     "domain": ["主题域1"],
     "valence": 0.7,
     "arousal": 0.4,
@@ -681,6 +840,16 @@ class ImportEngine:
         self.bucket_mgr = bucket_mgr
         self.dehydrator = dehydrator
         self.embedding_engine = embedding_engine
+        identity_cfg = config.get("identity", {}) if isinstance(config.get("identity", {}), dict) else {}
+        self.ai_name = str(identity_cfg.get("ai_name") or "AI").strip() or "AI"
+        configured_user_name = str(
+            identity_cfg.get("user_display_name") or identity_cfg.get("user_name") or "对方"
+        ).strip() or "对方"
+        self.user_display_name = (
+            "对方"
+            if configured_user_name.lower() in {"用户", "user", "human", "对方"}
+            else configured_user_name
+        )
         import_cfg = config.get("import", {}) if isinstance(config.get("import", {}), dict) else {}
         self.chunk_target_tokens = _int_between(
             import_cfg.get("chunk_target_tokens"),
@@ -697,36 +866,31 @@ class ImportEngine:
         self.max_items_per_chunk = _int_between(import_cfg.get("max_items_per_chunk"), 5, 1, 10)
         self.max_tags = _int_between(import_cfg.get("max_tags"), 6, 0, 10)
         self.max_tag_chars = _int_between(import_cfg.get("max_tag_chars"), 12, 4, 32)
-        self.auto_merge_enabled = _bool_value(import_cfg.get("auto_merge_enabled"), False)
-        self.import_merge_threshold = _float_between(
-            import_cfg.get("merge_threshold"),
-            _IMPORT_DEFAULT_MERGE_THRESHOLD,
+        self.operit_tagging_enabled = _bool_value(import_cfg.get("operit_tagging_enabled"), True)
+        self.operit_tagging_concurrency = _int_between(
+            import_cfg.get("operit_tagging_concurrency"),
+            2,
+            1,
+            8,
+        )
+        self.operit_tagging_max_attempts = _int_between(
+            import_cfg.get("operit_tagging_max_attempts"),
+            3,
+            1,
+            6,
+        )
+        self.operit_tagging_retry_base_seconds = _float_between(
+            import_cfg.get("operit_tagging_retry_base_seconds"),
+            1.0,
             0.0,
-            100.0,
-        )
-        self.merge_min_content_similarity = _float_between(
-            import_cfg.get("merge_min_content_similarity"),
-            _IMPORT_DEFAULT_MERGE_CONTENT_SIMILARITY,
-            0.0,
-            100.0,
-        )
-        self.merge_require_domain_overlap = _bool_value(
-            import_cfg.get("merge_require_domain_overlap"),
-            True,
-        )
-        self.merge_require_source_match = _bool_value(
-            import_cfg.get("merge_require_source_match"),
-            True,
-        )
-        self.merge_block_disjoint_dates = _bool_value(
-            import_cfg.get("merge_block_disjoint_dates"),
-            True,
+            30.0,
         )
         self.state = ImportState(config.get("state_dir") or config["buckets_dir"])
         self._paused = False
         self._running = False
         self._chunks: list[dict] = []
         self._seen_import_hashes: set[str] = set()
+        self._state_lock: asyncio.Lock | None = None
 
     @property
     def is_running(self) -> bool:
@@ -746,6 +910,8 @@ class ImportEngine:
         filename: str = "",
         preserve_raw: bool = False,
         resume: bool = False,
+        import_mode: str = "auto",
+        operit_tagging: bool | None = None,
     ) -> dict:
         """
         Start or resume an import.
@@ -757,16 +923,37 @@ class ImportEngine:
         self._running = True
         self._paused = False
         self._seen_import_hashes = set()
+        self._state_lock = asyncio.Lock()
 
         try:
             source_hash = hashlib.sha256(raw_content.encode()).hexdigest()[:16]
+            normalized_mode = str(import_mode or "auto").strip().lower()
+            if normalized_mode not in {"auto", "operit", "conversation"}:
+                raise ValueError(f"Unsupported import mode: {import_mode}")
+            operit_backup = parse_operit_memory_backup(raw_content) if normalized_mode != "conversation" else None
+            if normalized_mode == "operit" and operit_backup is None:
+                raise ValueError("The selected file is not a valid Operit memory backup")
+            if operit_backup is not None:
+                tagging_enabled = self.operit_tagging_enabled if operit_tagging is None else bool(operit_tagging)
+                return await self._start_operit_import(
+                    operit_backup,
+                    filename=filename,
+                    source_hash=source_hash,
+                    resume=resume,
+                    tagging_enabled=tagging_enabled,
+                )
 
             # Check for resume
             if resume and self.state.load() and self.state.can_resume:
                 if self.state.data["source_hash"] == source_hash:
                     logger.info(f"Resuming import from chunk {self.state.data['processed']}/{self.state.data['total_chunks']}")
                     # Re-parse and re-chunk to get the same chunks
-                    turns = detect_and_parse(raw_content, filename)
+                    turns = detect_and_parse(
+                        raw_content,
+                        filename,
+                        user_labels={self.user_display_name},
+                        assistant_labels={self.ai_name},
+                    )
                     self._chunks = self._attach_source_metadata(
                         chunk_turns(turns, target_tokens=self.chunk_target_tokens),
                         filename,
@@ -779,7 +966,12 @@ class ImportEngine:
                     logger.warning("Source file changed, starting fresh import")
 
             # Fresh import
-            turns = detect_and_parse(raw_content, filename)
+            turns = detect_and_parse(
+                raw_content,
+                filename,
+                user_labels={self.user_display_name},
+                assistant_labels={self.ai_name},
+            )
             if not turns:
                 self._running = False
                 return {"error": "No conversation turns found in file"}
@@ -805,6 +997,466 @@ class ImportEngine:
             self.state.save()
             self._running = False
             raise
+
+    async def _start_operit_import(
+        self,
+        backup: dict,
+        *,
+        filename: str,
+        source_hash: str,
+        resume: bool,
+        tagging_enabled: bool,
+    ) -> dict:
+        """Import all raw Operit entries before running optional model tagging."""
+        entries = list(backup.get("memories") or [])
+        if resume and self.state.load() and self.state.can_resume:
+            if (
+                self.state.data.get("source_hash") == source_hash
+                and self.state.data.get("import_format") == "operit"
+            ):
+                self.state.data["status"] = "running"
+                self.state.data["operit_tagging_enabled"] = bool(tagging_enabled)
+                self.state.data["tagging_concurrency"] = self.operit_tagging_concurrency if tagging_enabled else 0
+                self.state.save()
+                return await self._process_operit_entries(
+                    entries,
+                    filename=filename,
+                    source_hash=source_hash,
+                    export_date=backup.get("export_date"),
+                    tagging_enabled=tagging_enabled,
+                )
+
+        self.state.reset(filename, source_hash, len(entries))
+        self.state.data["import_format"] = "operit"
+        self.state.data["operit_phase"] = "raw"
+        self.state.data["operit_tagging_enabled"] = bool(tagging_enabled)
+        self.state.data["tagging_total"] = len(entries) if tagging_enabled else 0
+        self.state.data["tagging_pending"] = len(entries) if tagging_enabled else 0
+        self.state.data["tagging_concurrency"] = self.operit_tagging_concurrency if tagging_enabled else 0
+        self.state.save()
+        return await self._process_operit_entries(
+            entries,
+            filename=filename,
+            source_hash=source_hash,
+            export_date=backup.get("export_date"),
+            tagging_enabled=tagging_enabled,
+        )
+
+    async def _process_operit_entries(
+        self,
+        entries: list[dict],
+        *,
+        filename: str,
+        source_hash: str,
+        export_date,
+        tagging_enabled: bool,
+    ) -> dict:
+        self.state.data["operit_phase"] = "raw"
+        self.state.data["status"] = "running"
+        self.state.save()
+        start_idx = int(self.state.data.get("processed") or 0)
+        for index in range(start_idx, len(entries)):
+            if self._paused:
+                self.state.data["status"] = "paused"
+                self.state.save()
+                self._running = False
+                return self.state.to_dict()
+
+            entry = entries[index]
+            try:
+                status = await self._import_operit_entry(
+                    entry,
+                    entry_index=index + 1,
+                    filename=filename,
+                    source_hash=source_hash,
+                    export_date=export_date,
+                    tagging_enabled=tagging_enabled,
+                )
+                if status == "created":
+                    self.state.data["memories_created"] += 1
+                    self.state.data["memories_raw"] += 1
+                elif status == "duplicate":
+                    self.state.data["memories_duplicate_skipped"] += 1
+                else:
+                    self.state.data["memories_failed"] += 1
+            except Exception as exc:
+                if isinstance(entry, dict):
+                    label = str(entry.get("title") or entry.get("uuid") or index + 1)
+                else:
+                    label = str(index + 1)
+                error = f"Operit entry {label}: {str(exc)[:200]}"
+                logger.warning(error)
+                self.state.data["memories_failed"] += 1
+                if len(self.state.data["errors"]) < 100:
+                    self.state.data["errors"].append(error)
+
+            self.state.data["processed"] = index + 1
+            self.state.save()
+
+        if not await self._process_operit_embeddings(entries):
+            return self.state.to_dict()
+        if tagging_enabled:
+            return await self._process_operit_tagging(entries)
+
+        self.state.data["operit_phase"] = "completed"
+        self.state.data["status"] = "completed"
+        self.state.save()
+        self._running = False
+        return self.state.to_dict()
+
+    async def _import_operit_entry(
+        self,
+        entry: dict,
+        *,
+        entry_index: int,
+        filename: str,
+        source_hash: str,
+        export_date,
+        tagging_enabled: bool,
+    ) -> str:
+        if not isinstance(entry, dict):
+            raise ValueError("entry must be an object")
+        content = entry.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("content must be non-empty text")
+
+        operit_uuid = str(entry.get("uuid") or "").strip()
+        bucket_id = self._operit_bucket_id(entry, entry_index)
+        existing = await self.bucket_mgr.get(bucket_id)
+        if existing:
+            existing_meta = existing.get("metadata", {}) if isinstance(existing, dict) else {}
+            if str(existing_meta.get("operit_uuid") or "") != operit_uuid:
+                raise ValueError(f"bucket id collision: {bucket_id}")
+            if str(existing.get("content") or "") != content:
+                raise ValueError(f"Operit UUID already exists with different content: {operit_uuid}")
+            return "duplicate"
+
+        title = str(entry.get("title") or "").strip()
+        tags = self._operit_tags(entry.get("tagNames"))
+        created = self._operit_epoch_iso(entry.get("createdAt"))
+        updated = self._operit_epoch_iso(entry.get("updatedAt")) or created
+        importance = self._operit_importance(entry.get("importance"))
+        credibility = self._operit_fraction(entry.get("credibility"))
+        source_ref = {
+            "type": "operit_memory",
+            "item_id": operit_uuid or bucket_id,
+            "source_file": str(filename or "upload"),
+            "source_hash": source_hash,
+        }
+        extra_metadata = {
+            "import_format": "operit",
+            "import_source_file": str(filename or "upload"),
+            "import_source_hash": source_hash,
+            "source_refs": [source_ref],
+            "operit_uuid": operit_uuid,
+            "operit_content_type": str(entry.get("contentType") or ""),
+            "operit_source": str(entry.get("source") or ""),
+            "operit_credibility": entry.get("credibility"),
+            "operit_importance": entry.get("importance"),
+            "operit_folder_path": str(entry.get("folderPath") or ""),
+            "operit_created_at_ms": entry.get("createdAt"),
+            "operit_updated_at_ms": entry.get("updatedAt"),
+            "operit_export_date_ms": export_date,
+            "operit_entry_index": entry_index,
+            "operit_tagging_status": "pending" if tagging_enabled else "skipped",
+            "operit_tagging_attempts": 0,
+        }
+        extra_metadata = {key: value for key, value in extra_metadata.items() if value not in (None, "")}
+
+        await self.bucket_mgr.create(
+            bucket_id=bucket_id,
+            content=content,
+            name=title or None,
+            tags=tags,
+            domain=["Operit"],
+            importance=importance,
+            confidence=credibility,
+            source="operit",
+            date=_import_event_date(created or updated) or None,
+            created=created,
+            last_active=updated,
+            updated_at=updated,
+            extra_metadata=extra_metadata,
+        )
+        return "created"
+
+    async def _process_operit_embeddings(self, entries: list[dict]) -> bool:
+        """Fill embeddings only after every valid raw entry is already on disk."""
+        targets = []
+        seen_bucket_ids = set()
+        for index, entry in enumerate(entries, start=1):
+            if not isinstance(entry, dict):
+                continue
+            bucket_id = self._operit_bucket_id(entry, index)
+            if bucket_id in seen_bucket_ids:
+                continue
+            seen_bucket_ids.add(bucket_id)
+            bucket = await self.bucket_mgr.get(bucket_id)
+            if bucket:
+                targets.append(bucket)
+
+        self.state.data["operit_phase"] = "embedding"
+        self.state.data["embeddings_total"] = len(targets)
+        self.state.data["embeddings_processed"] = 0
+        self.state.save()
+        for bucket in targets:
+            if self._paused:
+                self.state.data["status"] = "paused"
+                self.state.save()
+                self._running = False
+                return False
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            await self._ensure_operit_embedding(
+                bucket["id"],
+                str(bucket.get("content") or ""),
+                meta.get("name"),
+            )
+            self.state.data["embeddings_processed"] += 1
+            self.state.save()
+        return True
+
+    async def _process_operit_tagging(self, entries: list[dict]) -> dict:
+        """Tag each imported raw entry with bounded model concurrency."""
+        completed = []
+        candidates = []
+        seen_bucket_ids = set()
+        for index, entry in enumerate(entries, start=1):
+            if not isinstance(entry, dict):
+                continue
+            bucket_id = self._operit_bucket_id(entry, index)
+            if bucket_id in seen_bucket_ids:
+                continue
+            seen_bucket_ids.add(bucket_id)
+            bucket = await self.bucket_mgr.get(bucket_id)
+            if not bucket:
+                continue
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            if meta.get("operit_tagging_status") == "done":
+                completed.append(bucket)
+            else:
+                candidates.append(bucket)
+
+        self.state.data["operit_phase"] = "tagging"
+        self.state.data["tagging_total"] = len(completed) + len(candidates)
+        self.state.data["tagging_processed"] = len(completed)
+        self.state.data["tagging_succeeded"] = len(completed)
+        self.state.data["tagging_failed"] = 0
+        self.state.data["tagging_pending"] = len(candidates)
+        self.state.data["tagging_concurrency"] = self.operit_tagging_concurrency
+        self.state.save()
+
+        semaphore = asyncio.Semaphore(self.operit_tagging_concurrency)
+
+        async def _worker(bucket: dict) -> str:
+            async with semaphore:
+                if self._paused:
+                    return "pending"
+                try:
+                    return await self._tag_operit_bucket(bucket)
+                except Exception as exc:
+                    await self._record_operit_tagging_result(
+                        success=False,
+                        error=f"Unexpected Operit tagging failure for {bucket.get('id', '?')}: {str(exc)[:200]}",
+                    )
+                    return "failed"
+
+        if candidates:
+            await asyncio.gather(*(_worker(bucket) for bucket in candidates))
+
+        if self._paused:
+            self.state.data["status"] = "paused"
+            self.state.save()
+            self._running = False
+            return self.state.to_dict()
+
+        self.state.data["operit_phase"] = "completed"
+        self.state.data["status"] = "completed"
+        self.state.save()
+        self._running = False
+        return self.state.to_dict()
+
+    async def _tag_operit_bucket(self, bucket: dict) -> str:
+        bucket_id = str(bucket.get("id") or "")
+        content = str(bucket.get("content") or "")
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        previous_attempts = int(meta.get("operit_tagging_attempts") or 0)
+        last_error = ""
+
+        for attempt in range(1, self.operit_tagging_max_attempts + 1):
+            if self._paused:
+                return "pending"
+            async with self._state_lock:
+                self.state.data["api_calls"] += 1
+                self.state.save()
+            try:
+                analysis = await self.dehydrator.analyze(self._operit_tagging_input(content))
+                generated_tags = list(analysis.get("tags") or [])
+                if analysis.get("memory_classification_source") == "default" and not generated_tags:
+                    raise RuntimeError("model returned only default tagging metadata")
+
+                domains = _clean_import_list(
+                    analysis.get("domain"),
+                    max_items=2,
+                    max_chars=16,
+                    default=list(meta.get("domain") or ["Operit"]),
+                )
+                tags = _dedupe_list(list(meta.get("tags") or []) + generated_tags)
+                update_ok = await self.bucket_mgr.update(
+                    bucket_id,
+                    tags=tags,
+                    domain=domains,
+                    valence=analysis.get("valence", meta.get("valence", 0.5)),
+                    arousal=analysis.get("arousal", meta.get("arousal", 0.3)),
+                    last_active=meta.get("last_active"),
+                    updated_at=meta.get("updated_at"),
+                    extra_metadata={
+                        "operit_tagging_status": "done",
+                        "operit_tagging_attempts": previous_attempts + attempt,
+                        "operit_tagged_at": now_iso(),
+                        "operit_tagging_error": "",
+                        "operit_tagging_model": str(getattr(self.dehydrator, "model", "") or ""),
+                        "memory_subject": analysis.get("memory_subject"),
+                        "memory_layer": analysis.get("memory_layer"),
+                        "memory_classification_source": analysis.get("memory_classification_source"),
+                    },
+                )
+                if not update_ok:
+                    raise RuntimeError("bucket metadata update failed")
+                await self._record_operit_tagging_result(success=True)
+                return "done"
+            except Exception as exc:
+                last_error = str(exc)[:200]
+                if attempt < self.operit_tagging_max_attempts:
+                    delay = self.operit_tagging_retry_base_seconds * (2 ** (attempt - 1))
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+
+        await self.bucket_mgr.update(
+            bucket_id,
+            last_active=meta.get("last_active"),
+            updated_at=meta.get("updated_at"),
+            extra_metadata={
+                "operit_tagging_status": "failed",
+                "operit_tagging_attempts": previous_attempts + self.operit_tagging_max_attempts,
+                "operit_tagging_error": last_error,
+                "operit_tagging_model": str(getattr(self.dehydrator, "model", "") or ""),
+            },
+        )
+        await self._record_operit_tagging_result(
+            success=False,
+            error=f"Operit tagging failed for {bucket_id}: {last_error}",
+        )
+        return "failed"
+
+    async def _record_operit_tagging_result(self, *, success: bool, error: str = "") -> None:
+        async with self._state_lock:
+            self.state.data["tagging_processed"] += 1
+            self.state.data["tagging_pending"] = max(0, self.state.data["tagging_pending"] - 1)
+            if success:
+                self.state.data["tagging_succeeded"] += 1
+            else:
+                self.state.data["tagging_failed"] += 1
+                if error and error not in self.state.data["errors"] and len(self.state.data["errors"]) < 100:
+                    self.state.data["errors"].append(error)
+            self.state.save()
+
+    @staticmethod
+    def _operit_tagging_input(content: str, max_chars: int = _OPERIT_TAGGING_INPUT_CHARS) -> str:
+        """Keep both ends of a long raw entry inside the analyzer's input budget."""
+        text = str(content or "")
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        marker = "\n\n[中间内容省略，仅用于打标]\n\n"
+        remaining = max(2, max_chars - len(marker))
+        head_chars = remaining // 2
+        tail_chars = remaining - head_chars
+        return text[:head_chars] + marker + text[-tail_chars:]
+
+    async def _ensure_operit_embedding(self, bucket_id: str, content: str, title) -> bool:
+        if not self.embedding_engine:
+            self.state.data["embeddings_failed"] += 1
+            self._append_import_error_once("Operit embedding engine is unavailable")
+            return False
+
+        getter = getattr(self.embedding_engine, "get_embedding", None)
+        if callable(getter):
+            try:
+                if await getter(bucket_id):
+                    return True
+            except Exception:
+                pass
+
+        text = bucket_text_for_embedding(
+            {
+                "id": bucket_id,
+                "content": content,
+                "metadata": {"name": str(title or "")},
+            }
+        )
+        ok = bool(await self.embedding_engine.generate_and_store(bucket_id, text))
+        if ok:
+            self.state.data["embeddings_created"] += 1
+        else:
+            self.state.data["embeddings_failed"] += 1
+            self._append_import_error_once("One or more Operit embeddings could not be generated")
+        return ok
+
+    def _append_import_error_once(self, message: str) -> None:
+        if message not in self.state.data["errors"] and len(self.state.data["errors"]) < 100:
+            self.state.data["errors"].append(message)
+
+    @staticmethod
+    def _operit_bucket_id(entry: dict, entry_index: int) -> str:
+        raw_uuid = str(entry.get("uuid") or "").strip().lower()
+        compact_uuid = re.sub(r"[^0-9a-f]", "", raw_uuid)
+        if len(compact_uuid) == 32:
+            return f"operit_{compact_uuid}"
+        identity = json.dumps(
+            {
+                "uuid": raw_uuid,
+                "title": entry.get("title"),
+                "content": entry.get("content"),
+                "createdAt": entry.get("createdAt"),
+                "entry_index": entry_index,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return f"operit_{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+
+    @staticmethod
+    def _operit_tags(value) -> list[str]:
+        values = value if isinstance(value, list) else []
+        tags = ["operit_import"]
+        for raw in values:
+            tag = str(raw).strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+        return tags
+
+    @staticmethod
+    def _operit_fraction(value) -> float | None:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _operit_importance(cls, value) -> int:
+        fraction = cls._operit_fraction(value)
+        if fraction is None:
+            return 5
+        return max(1, min(10, round(fraction * 10)))
+
+    @staticmethod
+    def _operit_epoch_iso(value) -> str | None:
+        try:
+            timestamp_ms = float(value)
+            if timestamp_ms <= 0:
+                return None
+            return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=LOCAL_TZ).isoformat(timespec="seconds")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
 
     async def _process_chunks(self, preserve_raw: bool) -> dict:
         """Process chunks from current position."""
@@ -834,7 +1486,7 @@ class ImportEngine:
         self.state.data["status"] = "completed"
         self.state.save()
         self._running = False
-        logger.info(f"Import completed: {self.state.data['memories_created']} created, {self.state.data['memories_merged']} merged")
+        logger.info(f"Import completed: {self.state.data['memories_created']} created")
         return self.state.to_dict()
 
     async def _process_single_chunk(self, chunk: dict, preserve_raw: bool):
@@ -865,7 +1517,7 @@ class ImportEngine:
             try:
                 item = {**item, **source_metadata}
                 should_preserve = preserve_raw or item.get("preserve_raw", False)
-                status = await self._merge_or_create_item(item, preserve_raw=should_preserve)
+                status = await self._create_import_item(item, preserve_raw=should_preserve)
 
                 if status == "raw":
                     self.state.data["memories_raw"] += 1
@@ -874,8 +1526,6 @@ class ImportEngine:
                     self.state.data["memories_created"] += 1
                 elif status == "duplicate":
                     self.state.data["memories_duplicate_skipped"] += 1
-                elif status == "merged":
-                    self.state.data["memories_merged"] += 1
                 else:
                     self.state.data["memories_failed"] += 1
 
@@ -899,7 +1549,13 @@ class ImportEngine:
         response = await self.dehydrator.client.chat.completions.create(
             model=self.dehydrator.model,
             messages=[
-                {"role": "system", "content": IMPORT_EXTRACT_PROMPT},
+                {
+                    "role": "system",
+                    "content": (
+                        f"{IMPORT_EXTRACT_PROMPT}\n\n"
+                        f"本次身份：记忆主体是 {self.ai_name}；对方是 {self.user_display_name}。"
+                    ),
+                },
                 {"role": "user", "content": user_content},
             ],
             max_tokens=4096,
@@ -1007,8 +1663,8 @@ class ImportEngine:
                 return bucket
         return None
 
-    async def _merge_or_create_item(self, item: dict, preserve_raw: bool = False) -> str:
-        """Try to merge with existing bucket, or create new. Returns created/merged/raw/duplicate."""
+    async def _create_import_item(self, item: dict, preserve_raw: bool = False) -> str:
+        """Create one imported bucket after duplicate rejection; imported memories never merge."""
         content = item["content"]
         domain = _clean_import_list(item.get("domain"), max_items=2, max_chars=16, default=["未分类"])
         tags = _clean_import_list(item.get("tags"), max_items=self.max_tags, max_chars=self.max_tag_chars)
@@ -1017,6 +1673,23 @@ class ImportEngine:
         arousal = item.get("arousal", 0.3)
         name = item.get("name", "")
         extra_metadata = self._extra_metadata_for_item(item)
+        event_date = _import_event_date(
+            item.get("import_event_date")
+            or item.get("import_timestamp_start")
+            or item.get("import_timestamp_end")
+        )
+        if event_date:
+            extra_metadata["import_event_date"] = event_date
+            source_refs = []
+            for source_ref in extra_metadata.get("source_refs", []) or []:
+                if not isinstance(source_ref, dict):
+                    continue
+                normalized_ref = dict(source_ref)
+                if normalized_ref.get("type") == "import_chunk" and not normalized_ref.get("event_date"):
+                    normalized_ref["event_date"] = event_date
+                source_refs.append(normalized_ref)
+            if source_refs:
+                extra_metadata["source_refs"] = source_refs
 
         duplicate = await self._find_duplicate_bucket(content)
         if duplicate:
@@ -1037,6 +1710,7 @@ class ImportEngine:
                 arousal=arousal,
                 name=name or None,
                 source="import",
+                date=event_date or None,
                 extra_metadata=extra_metadata,
             )
             if self.embedding_engine:
@@ -1055,43 +1729,6 @@ class ImportEngine:
                     pass
             return "raw"
 
-        bucket = await self._find_import_merge_candidate(item)
-        if bucket:
-            if not (
-                bucket["metadata"].get("pinned")
-                or bucket["metadata"].get("protected")
-                or bucket["metadata"].get("type") == "feel"
-            ):
-                try:
-                    merged = await self.dehydrator.merge(bucket["content"], content)
-                    self.state.data["api_calls"] += 1
-                    old_v = bucket["metadata"].get("valence", 0.5)
-                    old_a = bucket["metadata"].get("arousal", 0.3)
-                    merged_metadata = self._merged_source_metadata(bucket.get("metadata", {}), extra_metadata)
-                    await self.bucket_mgr.update(
-                        bucket["id"],
-                        content=merged,
-                        tags=list(set(bucket["metadata"].get("tags", []) + tags)),
-                        importance=max(bucket["metadata"].get("importance", 5), importance),
-                        domain=list(set(bucket["metadata"].get("domain", []) + domain)),
-                        valence=round((old_v + valence) / 2, 2),
-                        arousal=round((old_a + arousal) / 2, 2),
-                        source="import",
-                        extra_metadata=merged_metadata,
-                    )
-                    if self.embedding_engine:
-                        try:
-                            await self.embedding_engine.generate_and_store(
-                                bucket["id"],
-                                bucket_text_for_embedding({**bucket, "content": merged}),
-                            )
-                        except Exception:
-                            pass
-                    return "merged"
-                except Exception as e:
-                    logger.warning(f"Merge failed during import: {e}")
-                    self.state.data["api_calls"] += 1
-
         # Create new
         bucket_id = await self.bucket_mgr.create(
             content=content,
@@ -1102,6 +1739,7 @@ class ImportEngine:
             arousal=arousal,
             name=name or None,
             source="import",
+            date=event_date or None,
             extra_metadata=extra_metadata,
         )
         if self.embedding_engine:
@@ -1136,6 +1774,8 @@ class ImportEngine:
 
     @staticmethod
     def _chunk_ref(chunk: dict) -> dict:
+        timestamp_start = str(chunk.get("timestamp_start") or "")
+        timestamp_end = str(chunk.get("timestamp_end") or "")
         return {
             "type": "import_chunk",
             "chunk_id": str(chunk.get("source_chunk_id") or ""),
@@ -1143,13 +1783,15 @@ class ImportEngine:
             "source_hash": str(chunk.get("source_hash") or ""),
             "chunk_index": int(chunk.get("chunk_index") or 0),
             "chunk_total": int(chunk.get("chunk_total") or 0),
-            "timestamp_start": str(chunk.get("timestamp_start") or ""),
-            "timestamp_end": str(chunk.get("timestamp_end") or ""),
+            "timestamp_start": timestamp_start,
+            "timestamp_end": timestamp_end,
+            "event_date": _import_event_date(timestamp_start) or _import_event_date(timestamp_end),
             "turn_count": int(chunk.get("turn_count") or 0),
         }
 
     def _source_metadata_for_chunk(self, chunk: dict) -> dict:
         ref = self._chunk_ref(chunk)
+        event_date = ref["event_date"]
         return {
             "source_chunk_ids": [ref["chunk_id"]] if ref["chunk_id"] else [],
             "source_refs": [ref] if ref["chunk_id"] else [],
@@ -1157,6 +1799,7 @@ class ImportEngine:
             "import_source_hash": ref["source_hash"],
             "import_timestamp_start": ref["timestamp_start"],
             "import_timestamp_end": ref["timestamp_end"],
+            "import_event_date": event_date,
         }
 
     @staticmethod
@@ -1168,86 +1811,9 @@ class ImportEngine:
             "import_source_hash",
             "import_timestamp_start",
             "import_timestamp_end",
+            "import_event_date",
         )
         return {key: item.get(key) for key in keys if item.get(key)}
-
-    async def _find_import_merge_candidate(self, item: dict) -> dict | None:
-        if not self.auto_merge_enabled:
-            return None
-        content = str(item.get("content") or "")
-        domain = item.get("domain", ["未分类"])
-        try:
-            existing = await self.bucket_mgr.search(
-                content,
-                limit=1,
-                domain_filter=domain or None,
-                include_archive=False,
-            )
-        except Exception:
-            existing = []
-        if not existing or existing[0].get("score", 0) <= self.import_merge_threshold:
-            return None
-        bucket = existing[0]
-        return bucket if self._can_merge_import_item(bucket, item) else None
-
-    def _can_merge_import_item(self, bucket: dict, item: dict) -> bool:
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        if meta.get("pinned") or meta.get("protected") or meta.get("type") == "feel":
-            return False
-        if self.merge_require_domain_overlap:
-            existing_domains = {str(d).strip().lower() for d in meta.get("domain", []) or [] if str(d).strip()}
-            item_domains = {str(d).strip().lower() for d in item.get("domain", []) or [] if str(d).strip()}
-            if not existing_domains or not item_domains or not (existing_domains & item_domains):
-                return False
-        if self.merge_require_source_match:
-            existing_hash = str(meta.get("import_source_hash") or "").strip()
-            item_hash = str(item.get("import_source_hash") or "").strip()
-            if not existing_hash or not item_hash or existing_hash != item_hash:
-                return False
-        if self.merge_block_disjoint_dates and _date_ranges_disjoint(
-            meta.get("import_timestamp_start"),
-            meta.get("import_timestamp_end"),
-            item.get("import_timestamp_start"),
-            item.get("import_timestamp_end"),
-        ):
-            return False
-        similarity = fuzz.token_set_ratio(
-            _import_similarity_text(str(bucket.get("content") or "")),
-            _import_similarity_text(str(item.get("content") or "")),
-        )
-        return similarity >= self.merge_min_content_similarity
-
-    @staticmethod
-    def _merged_source_metadata(existing_meta: dict, item_meta: dict) -> dict:
-        source_chunk_ids = _dedupe_list(
-            list(existing_meta.get("source_chunk_ids") or []) + list(item_meta.get("source_chunk_ids") or [])
-        )
-        source_refs = _dedupe_refs(
-            list(existing_meta.get("source_refs") or []) + list(item_meta.get("source_refs") or [])
-        )
-        starts = [
-            str(value)
-            for value in (existing_meta.get("import_timestamp_start"), item_meta.get("import_timestamp_start"))
-            if str(value or "").strip()
-        ]
-        ends = [
-            str(value)
-            for value in (existing_meta.get("import_timestamp_end"), item_meta.get("import_timestamp_end"))
-            if str(value or "").strip()
-        ]
-        merged = {
-            "source_chunk_ids": source_chunk_ids,
-            "source_refs": source_refs,
-        }
-        for key in ("import_source_file", "import_source_hash"):
-            value = existing_meta.get(key) or item_meta.get(key)
-            if value:
-                merged[key] = value
-        if starts:
-            merged["import_timestamp_start"] = min(starts)
-        if ends:
-            merged["import_timestamp_end"] = max(ends)
-        return merged
 
     async def detect_patterns(self) -> list[dict]:
         """

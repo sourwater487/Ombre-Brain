@@ -27,10 +27,12 @@ log_level: "INFO"
 # state_dir: "/path/to/ombre-brain/state"
 
 # --- Identity / 名字口径 ---
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 # These values document the private-fork identity. Runtime identity resolution
 # is locked to Che/Lin and ignores attempted overrides.
 # 这些值记录私有分支身份；运行时固定为 Che/Lin，不接受覆盖。
 identity:
+  # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
   ai_name: "Che"                # Fixed in this private fork
   user_name: "Lin"              # Fixed in this private fork
   user_display_name: "Lin"      # Fixed in this private fork
@@ -43,20 +45,18 @@ identity:
 merge_threshold: 90
 
 # --- Import safety / 大文件导入安全 ---
-# Conversation-history import defaults to smaller chunks and no automatic merge.
-# 对话历史导入默认小窗处理，且不自动合并，避免大文件把无关记忆揉成一个桶。
+# Conversation-history import uses smaller chunks and never merges imported memories.
+# 对话历史导入使用小窗处理；不同记忆永不合并，只跳过同文或近同文重复项。
 import:
   chunk_target_tokens: 3500          # smaller than old 10k windows to reduce mixed-topic chunks
   extract_max_input_chars: 0         # 0 = do not hard-truncate; rely on chunking
   max_items_per_chunk: 5
   max_tags: 6
   max_tag_chars: 12
-  auto_merge_enabled: false          # exact/safe duplicate skip still runs
-  merge_threshold: 90
-  merge_min_content_similarity: 99
-  merge_require_domain_overlap: true
-  merge_require_source_match: true
-  merge_block_disjoint_dates: true
+  operit_tagging_enabled: true        # raw entries land first; model tagging runs afterward
+  operit_tagging_concurrency: 2       # bounded worker count; never fan out the whole backup
+  operit_tagging_max_attempts: 3      # total attempts per entry, including the first call
+  operit_tagging_retry_base_seconds: 1.0
 
 # --- Write path / 写入路径 ---
 # Semantic related-memory lookup is useful, but should not hold MCP responses
@@ -89,15 +89,15 @@ memory_write_gate:
 dehydration:
   # Supports any OpenAI-compatible API: DeepSeek / Ollama / LM Studio / vLLM / Gemini etc.
   # 支持所有 OpenAI 兼容 API：DeepSeek / Ollama / LM Studio / vLLM / Gemini 等
-  model: "deepseek-chat"
-  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com"
   # Optional thinking mode override for DeepSeek v4 models:
   #   disabled = non-thinking / enabled = thinking / empty = provider default
   # DeepSeek v4 可选思考模式覆盖：
   #   disabled = 非思考 / enabled = 思考 / 留空 = 走模型默认行为
-  thinking_mode: ""
+  thinking_mode: "disabled"
   # Common base_url examples / 常见 base_url 示例：
-  #   DeepSeek:    https://api.deepseek.com/v1
+  #   DeepSeek:    https://api.deepseek.com
   #   SiliconFlow: https://api.siliconflow.cn/v1
   #   Ollama:      http://localhost:11434/v1
   #   LM Studio:   http://localhost:1234/v1
@@ -265,6 +265,7 @@ word_map:
 raw_events:
   db_path: ""                          # empty = state_dir/raw_events.sqlite
   max_ingest_batch: 1000
+  # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
   client_context_enabled: true         # keep bounded app weather/location snapshots outside dialogue text
   client_context_max_records: 5000     # global hard cap; oldest snapshots are pruned first
   client_context_max_per_day: 24       # per-day hard cap after exact same-day snapshot dedupe
@@ -303,6 +304,7 @@ gateway:
   port: 8010
   default_session_id: "main"      # used only by compatible routes when the header is omitted
   upstream_base_url: "https://api.openai.com/v1"
+  # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
   upstream_protocol: "openai"
   upstream_default_model: "gpt-4.1-mini"
   upstream_models:
@@ -315,6 +317,7 @@ gateway:
   # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；
   # anthropic: 给只认顶层 cache_control 的中转站使用；
   # anthropic_explicit: 在 system/tools/上一条 assistant 历史上显式打断点。
+  # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
   prompt_cache: ""
   # prompt_cache_retention: "24h"  # Optional for supported OpenAI models / 支持模型可选
   # Optional multi-upstream mode / 可选多上游模式
@@ -327,20 +330,18 @@ gateway:
   # upstreams:
   #   - name: "deepseek"
   #     protocol: "openai"  # default; forwards to /chat/completions
-  #     base_url: "https://api.deepseek.com/v1"
+  #     base_url: "https://api.deepseek.com"
   #     api_key_env: "OMBRE_GATEWAY_DEEPSEEK_API_KEY"
   #     # Optional fallback keys. Retryable errors switch to the next key.
   #     # 可选备用 key。遇到可重试错误时自动换下一个 key。
   #     # api_key_envs:
   #     #   - "OMBRE_GATEWAY_DEEPSEEK_API_KEY_1"
   #     #   - "OMBRE_GATEWAY_DEEPSEEK_API_KEY_2"
-  #     default_model: "deepseek-chat"
+  #     default_model: "deepseek-v4-flash"
   #     prompt_cache: ""  # DeepSeek uses automatic prefix cache / DeepSeek 使用自动前缀缓存
   #     models:
-  #       - "deepseek-chat"
-  #       - "deepseek-reasoner"
-  #       - id: "deepseek-a/deepseek-v4"
-  #         upstream_model: "deepseek-v4"
+  #       - "deepseek-v4-flash"
+  #       - "deepseek-v4-pro"
   #   - name: "siliconflow"
   #     protocol: "openai"
   #     base_url: "https://api.siliconflow.cn/v1"
@@ -373,6 +374,7 @@ gateway:
   semantic_session_dedupe_lexical_threshold: 0.82
   inject_total_budget: 1800
   core_memory_budget: 0
+  # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
   recent_context_mode: auto # auto | explicit_only | off
   recent_context_budget: 300
   just_now_context_enabled: true     # 刚刚/刚才/上一句: use short-term conversation_turns, not long-term memory
@@ -392,6 +394,7 @@ gateway:
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
   date_persona_trace_include_daily: true
+  # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
   date_recall_max_client_contexts: 6 # bounded weather/location snapshots for explicit date queries
   recalled_memory_budget: 900
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
@@ -421,7 +424,7 @@ gateway:
   favorite_memory_max_cards: 1
   related_memory_budget: 220
   core_memory_interval_rounds: 0
-  current_inner_state_interval_rounds: 0
+  current_inner_state_interval_rounds: 15 # compare the latest 15 rounds; inject nothing without a clear net change
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
   word_map_hint_enabled: false       # true lets derived Word Map add weak recall candidates; still gated by RecallPolicy
@@ -578,42 +581,47 @@ memory_relevance:
   section_hints: {}
 
 # --- Persona State Engine / 人格状态引擎 ---
-# Tracks slow personality drift, relationship state, and per-session affect.
-# 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
+# Tracks relationship state and per-session affect. Personality drift is retired.
+# 追踪关系状态，以及按会话保存的短期情绪；不再数值化人格变化。
 persona:
   enabled: true
   profile_id: "main_profile"
   mode: "llm"
-  base_url: "https://api.deepseek.com/v1"
-  model: "deepseek-chat"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-v4-flash"
   # Optional thinking mode override for DeepSeek v4 models:
   #   disabled = non-thinking / enabled = thinking / empty = provider default
-  thinking_mode: ""
+  thinking_mode: "disabled"
+  json_response_format: true     # request provider-native JSON output for Persona evaluators
   # api_key: ""                  # Use OMBRE_PERSONA_API_KEY; falls back to OMBRE_API_KEY
   temperature: 0.1
   max_tokens: 500
   global_decay_hours: 168
   session_mood_half_life_minutes: 90
-  max_personality_delta: 0.01
   max_relationship_delta: 0.03
   max_affect_delta: 0.18
   # Recent Persona Events is a sparse log, not a per-message transcript.
-  # Strong relationship/personality/affect signals write immediately; ordinary turns batch.
+  # Evaluate numeric state once per N successful Gateway rounds.
+  evaluation_interval_rounds: 3
+  state_change_window_rounds: 15
+  state_change_min_abs: 0.08       # inject only the single strongest meaningful change
+  # Strong relationship/affect signals write immediately; ordinary evaluated turns batch.
   # Turn this off to keep evaluating numeric state without writing persona_events.
   event_recording_enabled: true
-  event_batch_size: 2
+  event_batch_size: 1             # one event opportunity per 3-round evaluation
   event_affect_total_threshold: 0.45
   event_affect_single_threshold: 0.14
   event_similarity_threshold: 0.82
   event_force_after_minutes: 30
   event_excerpt_chars: 220          # short evidence snippets for future date traces, not full transcripts
   evaluation_context_turns: 3       # previous same-session turns sent to the post-reply Persona evaluator
-  initial_personality:
-    openness: 0.56
-    conscientiousness: 0.50
-    extraversion: 0.44
-    agreeableness: 0.66
-    neuroticism: 0.36
+  # Optional pre-reply conflict scout. It is read-only and fail-soft: on a
+  # confident conflict/withdrawal signal it injects one private anti-retreat
+  # reminder, never a reply script or an action decision.
+  conflict_nudge_enabled: false
+  conflict_nudge_context_turns: 3
+  conflict_nudge_min_confidence: 0.55
+  conflict_nudge_timeout_seconds: 4
   initial_relationship:
     affinity: 0.86
     dominance: 0.38
@@ -627,6 +635,7 @@ persona:
     longing: 0.34
     security: 0.68
     protective_drive: 0.52
+    libido: 0.18                 # tone temperature only; never action or consent inference
     mood_label: "warm_neutral"
     session_defensiveness: 0.12
     residue: ""
@@ -643,8 +652,8 @@ reflection:
   auto_enabled: true
   daily_enabled: true              # daily relationship-weather impressions; persona_events only supplement
   enrich_on_write: true
-  memory_affect_anchor_enabled: true      # ordinary memory enrich may append affect_anchor; turn off for quieter buckets
-  relationship_weather_affect_anchor_enabled: true  # daily/weekly relationship weather keeps affect_anchor by default
+  memory_affect_anchor_enabled: false     # legacy compatibility only; new writes do not append affect_anchor sections
+  relationship_weather_affect_anchor_enabled: false  # legacy compatibility only; feel content stays body-only
   enrich_backfill_enabled: true      # hourly scheduler backfills missing tags/confidence/edges
   enrich_backfill_limit: 5           # max buckets to backfill per scheduler tick
   edge_backfill_limit: 5             # default limit for manual edge_backfill; only writes memory_edges
@@ -658,7 +667,7 @@ reflection:
   daily_hour: 4                   # generate daily impression after this local hour
   daily_min_memory_items: 5        # ordinary memory/update items required before daily impression writes
   daily_conversation_turn_limit: 12 # small short-term turn window for daily impression material
-  daily_chat_memory_mode: review   # review = pending candidates; auto = write selected Gateway chat memories; off = disabled
+  daily_chat_memory_mode: off      # off = disabled; review = pending candidates; auto = write selected Gateway chat memories
   daily_chat_memory_hour: 0        # organize the previous day's Gateway chats after local midnight
   daily_chat_memory_turn_limit: 0  # 0 = use all raw_events for that date; >0 caps restored turns
   daily_chat_memory_max_per_day: 10 # cap for selected long-term memory candidates
@@ -729,6 +738,8 @@ portrait:
   json_response_format: true
   material_limit: 18
   first_run_material_limit: 160
+  user_rewrite_evidence_delta: 10 # regenerate User Portrait after 10 new visible evidence items
+  manual_suppress_days: 14        # keep manually deleted evidence/recent items from immediately returning
   source_excerpt_chars: 900
   recent_continuity_days: 3
   persona_events_limit: 24

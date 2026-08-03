@@ -65,6 +65,7 @@ class WorkerConfig:
     settle_seconds: float
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     runtime_config = load_config()
     default_state = Path(runtime_config["state_dir"]) / "local_memory_worker.json"
@@ -153,6 +154,7 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 def read_bridge_messages(
     db_path: Path,
     *,
@@ -210,6 +212,7 @@ def row_to_message(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 def build_selector_prompt(messages: list[dict[str, Any]], max_items: int) -> str:
     transcript = format_messages(messages)
     return "\n".join(

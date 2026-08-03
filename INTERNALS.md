@@ -328,8 +328,8 @@
 | `log_level` | `"INFO"` | 日志级别 |
 | `buckets_dir` | `"./buckets"` | 记忆桶目录 |
 | `merge_threshold` | `90` | 合并相似度阈值 (0-100) |
-| `dehydration.model` | `"deepseek-chat"` | 脱水用 LLM 模型 |
-| `dehydration.base_url` | `"https://api.deepseek.com/v1"` | API 地址 |
+| `dehydration.model` | `"deepseek-v4-flash"` | 记忆分析/旧兼容压缩用 LLM 模型 |
+| `dehydration.base_url` | `"https://api.deepseek.com"` | API 地址 |
 | `dehydration.api_key` | `""` | API 密钥 |
 | `dehydration.max_tokens` | `1024` | 脱水返回 token 上限 |
 | `dehydration.temperature` | `0.1` | 脱水温度 |

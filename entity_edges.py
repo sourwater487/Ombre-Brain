@@ -30,6 +30,7 @@ USER_RELATION_SPECS = (
     ("habit", r"(?:有个)?习惯是\s*([^。；;，,\n]{1,40})"),
 )
 
+# LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
 AI_PARTICIPATION_VERB = (
     r"(?:参与|协作|负责|帮忙|帮Lin|帮对方|陪Lin|陪对方|"
     r"一起(?:做|写|修|开发|实现|调试|搭建)?|共同(?:做|写|开发|实现|调试|搭建)?|"
@@ -138,6 +139,7 @@ QUERY_HINTS = (
     ),
 )
 
+# LOCAL-ADAPTATION: [新增/缺少] 相对 upstream/main@1dac438，含本地新增、未保留部分上游实现。
 NOISY_OBJECTS = {
     "你",
     "你啦",

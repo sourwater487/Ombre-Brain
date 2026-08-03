@@ -1253,8 +1253,8 @@ first_deploy() {
   user_display_name="$(prompt_text '用户显示名' '小雨')"
 
   local dehy_base_url dehy_model dehy_key
-  dehy_base_url="$(prompt_text '脱水/导入抽取 base_url' 'https://api.deepseek.com/v1')"
-  dehy_model="$(prompt_text '脱水/导入抽取模型' 'deepseek-chat')"
+  dehy_base_url="$(prompt_text '脱水/导入抽取 base_url' 'https://api.deepseek.com')"
+  dehy_model="$(prompt_text '脱水/导入抽取模型' 'deepseek-v4-flash')"
   dehy_key="$(prompt_secret '脱水模型 key（OMBRE_API_KEY，必填）' true)"
 
   local embedding_enabled embedding_base_url embedding_model embedding_key
@@ -1529,6 +1529,7 @@ safe_backup_label() {
 
 backup_current_deployment() {
   local label stamp archive_name archive tmp_archive
+  local service config_bind_source env_bind_source
   label="$(safe_backup_label "${1:-manual}")"
   stamp="$(date +%Y%m%d_%H%M%S)"
   archive_name="ombre_backup_${label}_${stamp}.tar.gz"
@@ -1553,13 +1554,30 @@ backup_current_deployment() {
     }
     printf '已写入备份：%s\n' "${archive}"
   else
+    service="${OMBRE_SERVICE:-ombre-brain}"
     archive="/state/backups/${archive_name}"
-    run_target_shell "set -e; mkdir -p /state/backups; items=''; for item in /data /state /app/config.yaml /app/.env; do [ -e \"\$item\" ] && items=\"\$items \$item\"; done; if [ -z \"\$items\" ]; then echo '没有找到可备份的 /data /state /app/config.yaml /app/.env'; exit 1; fi; tar --exclude=/state/backups --exclude=state/backups -czf '/tmp/${archive_name}' \$items; cp '/tmp/${archive_name}' '${archive}'" || return 1
-    backup_file ".env"
-    backup_file "config.yaml"
+    run_target_shell "set -e; mkdir -p /state/backups; items=''; for item in /data /state /app/config.lin.production.yaml /app/config.yaml /app/.env; do [ -e \"\$item\" ] && items=\"\$items \$item\"; done; if [ -z \"\$items\" ]; then echo '没有找到可备份的 /data /state /app/config.lin.production.yaml /app/config.yaml /app/.env'; exit 1; fi; tar --exclude=/state/backups --exclude=state/backups -czf '/tmp/${archive_name}' \$items; cp '/tmp/${archive_name}' '${archive}'" || return 1
+    if env_bind_source="$(ombre_compose_bind_source "${COMPOSE_FILE}" "${service}" "/app/.env")"; then
+      backup_file "${env_bind_source}"
+    else
+      backup_file ".env"
+    fi
+    if config_bind_source="$(ombre_compose_bind_source "${COMPOSE_FILE}" "${service}" "/app/config.lin.production.yaml")" \
+      || config_bind_source="$(ombre_compose_bind_source "${COMPOSE_FILE}" "${service}" "/app/config.yaml")"; then
+      backup_file "${config_bind_source}"
+    elif [[ -f config.lin.production.yaml ]]; then
+      backup_file "config.lin.production.yaml"
+    else
+      backup_file "config.yaml"
+    fi
     backup_file "${COMPOSE_FILE}"
     printf '已写入容器数据备份：%s\n' "${archive}"
-    printf '如果当前目录有 .env / config.yaml / compose，也已在宿主机备份。\n'
+    printf '宿主机中存在的实际 .env / config 挂载源和 compose 也已分别备份。\n'
+    if ombre_compose_bind_source "${COMPOSE_FILE}" "${service}" "/app/config.lin.production.yaml" >/dev/null; then
+      ombre_validate_compose_file_bind "${COMPOSE_FILE}" "${service}" "/app/config.lin.production.yaml" "config.lin.production.yaml" || return 1
+    else
+      ombre_validate_compose_file_bind "${COMPOSE_FILE}" "${service}" "/app/config.yaml" "config.yaml" || return 1
+    fi
   fi
 }
 
