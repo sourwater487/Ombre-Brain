@@ -13,7 +13,8 @@ WORKDIR /app
 # Install dependencies first (leverage Docker cache)
 # 先装依赖（利用 Docker 缓存）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -c "from mcp.server.fastmcp import Context, FastMCP"
 
 # Copy project files / 复制项目文件
 COPY *.py .
