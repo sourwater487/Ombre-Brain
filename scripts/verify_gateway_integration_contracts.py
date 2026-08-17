@@ -118,10 +118,10 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
                 "protocol": "anthropic",
                 "api_key": "configured-linkapi-key",
                 "models": ["claude-sonnet-5"],
-                # Simulate a dashboard/runtime entry saved before Link's 1h
-                # default was introduced. Effective routing must normalize it
+                # Simulate a stale dashboard/runtime entry saved with Link 1h.
+                # Effective routing must normalize it to the current 5m policy
                 # without mutating the persisted config object.
-                "prompt_cache_retention": "5m",
+                "prompt_cache_retention": "1h",
             },
         ]
     }
@@ -129,9 +129,9 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
     service.upstream_default_model = "anthropic/claude-opus-4.6"
     assert service.upstreams[0]["prompt_cache"] == ""
     assert service.upstreams[1]["prompt_cache"] == "anthropic_explicit"
-    assert service.upstreams[1]["prompt_cache_retention"] == "1h"
+    assert service.upstreams[1]["prompt_cache_retention"] == "5m"
     assert "prompt_cache" not in service.gateway_cfg["upstreams"][1]
-    assert service.gateway_cfg["upstreams"][1]["prompt_cache_retention"] == "5m"
+    assert service.gateway_cfg["upstreams"][1]["prompt_cache_retention"] == "1h"
 
     payload = {
         "model": "claude-sonnet-5",
@@ -188,7 +188,7 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
         "protocol": "anthropic",
         "base_url": "https://linkapi.ai/v1",
         "prompt_cache": "anthropic_explicit",
-        "prompt_cache_retention": "1h",
+        "prompt_cache_retention": "5m",
     }
     route = {
         "upstream": upstream,
@@ -232,8 +232,8 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
 
     converted = service._anthropic_payload_for_upstream(payload, route)
     assert converted["thinking"] == {"type": "enabled", "budget_tokens": 4096}
-    assert converted["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
-    assert converted["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert converted["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert converted["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
     assistant_blocks = converted["messages"][0]["content"]
     assert assistant_blocks[0] == {
         "type": "thinking",
@@ -241,14 +241,14 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
         "signature": "opaque-signature",
     }
     assert assistant_blocks[-1]["type"] == "tool_use"
-    assert assistant_blocks[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert assistant_blocks[-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
     assert service._anthropic_cache_control_plan(converted) == [
-        {"location": "tools[0]", "type": "ephemeral", "ttl": "1h"},
-        {"location": "system[0]", "type": "ephemeral", "ttl": "1h"},
+        {"location": "tools[0]", "type": "ephemeral", "ttl": "5m"},
+        {"location": "system[0]", "type": "ephemeral", "ttl": "5m"},
         {
             "location": f"messages[0].content[{len(assistant_blocks) - 1}]",
             "type": "ephemeral",
-            "ttl": "1h",
+            "ttl": "5m",
         },
     ]
 
@@ -257,7 +257,7 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
             {
                 "name": "legacy_tool",
                 "input_schema": {"type": "object"},
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
             }
         ],
         "system": [
@@ -283,11 +283,11 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
     }
     service._apply_explicit_anthropic_cache_control(
         mixed_ttl_payload,
-        {"type": "ephemeral", "ttl": "1h"},
+        {"type": "ephemeral", "ttl": "5m"},
     )
     normalized_plan = service._anthropic_cache_control_plan(mixed_ttl_payload)
     assert len(normalized_plan) == 3
-    assert all(entry["ttl"] == "1h" for entry in normalized_plan)
+    assert all(entry["ttl"] == "5m" for entry in normalized_plan)
 
     response_message = service._anthropic_response_body_to_openai_message(
         {
@@ -341,7 +341,7 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
 
     trusted = service._trusted_request_upstream("linkapi-claude", "claude-opus-4-6")
     assert trusted["prompt_cache"] == "anthropic_explicit"
-    assert trusted["prompt_cache_retention"] == "1h"
+    assert trusted["prompt_cache_retention"] == "5m"
 
 
 def verify_embedding_hot_update_rebuilds_gateway_engine() -> None:

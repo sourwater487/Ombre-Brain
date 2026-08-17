@@ -168,7 +168,7 @@ gateway:
       anthropic_version: "2023-06-01"
       # Native Anthropic breakpoints, independent from Lin-Che's OpenRouter BP layout.
       prompt_cache: "anthropic_explicit"
-      prompt_cache_retention: "1h"
+      prompt_cache_retention: "5m"
       models:
         - "claude-sonnet-5"
         - "claude-fable-5"

@@ -6090,8 +6090,8 @@ class GatewayService:
             or upstream.get("prompt_cache_retention")
             or ""
         ).strip()
-        if retention == "1h":
-            cache_control["ttl"] = "1h"
+        if retention in {"5m", "1h"}:
+            cache_control["ttl"] = retention
         return cache_control
 
     def _apply_explicit_anthropic_cache_control(
@@ -6099,10 +6099,9 @@ class GatewayService:
         payload: dict[str, Any],
         cache_control: dict[str, str],
     ) -> None:
-        # The Anthropic prefix order is tools -> system -> messages. A legacy
-        # implicit 5m marker anywhere before a new 1h marker makes the whole
-        # request invalid. This strategy owns the explicit breakpoint plan,
-        # so discard inherited markers and rebuild one consistent TTL plan.
+        # The Anthropic prefix order is tools -> system -> messages, and mixed
+        # TTLs are order-sensitive. This strategy owns the explicit breakpoint
+        # plan, so discard inherited markers and rebuild one consistent plan.
         removed_cache_controls = self._strip_anthropic_cache_controls(payload)
         self._attach_cache_control_to_anthropic_content(payload, "system", cache_control)
         self._attach_cache_control_to_anthropic_tools(payload, cache_control)
@@ -21489,11 +21488,11 @@ class GatewayService:
                 prompt_cache = str(raw.get("prompt_cache") or "").strip().lower()
                 prompt_cache_retention = str(raw.get("prompt_cache_retention") or "").strip()
                 if protocol == "anthropic" and "linkapi.ai" in base_url.lower():
-                    # Normalize runtime entries saved before LinkAPI's native
-                    # Claude defaults. In particular, an old explicit 5m value
-                    # must not coexist with request-scoped 1h breakpoints.
+                    # LinkAPI's native Claude route is deliberately normalized
+                    # at request time so stale dashboard/runtime values cannot
+                    # reintroduce mixed 1h/5m cache breakpoint plans.
                     prompt_cache = prompt_cache or "anthropic_explicit"
-                    prompt_cache_retention = "1h"
+                    prompt_cache_retention = "5m"
                 anthropic_version = str(raw.get("anthropic_version") or "2023-06-01").strip()
                 anthropic_beta = str(raw.get("anthropic_beta") or "").strip()
                 upstreams.append(
@@ -21607,7 +21606,7 @@ class GatewayService:
             "models": [normalized_model] if normalized_model else [],
             "model_map": {normalized_model: normalized_model} if normalized_model else {},
             "prompt_cache": "anthropic_explicit" if name == "linkapi-claude" else "",
-            "prompt_cache_retention": "1h" if name == "linkapi-claude" else "",
+            "prompt_cache_retention": "5m" if name == "linkapi-claude" else "",
             "anthropic_version": definition.get("anthropic_version", "2023-06-01"),
             "anthropic_beta": "",
         }

@@ -232,7 +232,7 @@ Operit 会把时间、设备、工作区、照顾备忘和其它 app context 包
 
 Gateway 会兼容记录 OpenAI 与 Anthropic 返回的 cache read / creation / cached token 字段，可通过 `/api/debug/upstream-usage` 查看实际是否命中。缓存只减少重复前缀费用或延迟，不缓存 Ombre 的召回结果；每轮动态记忆仍会重新经过门控。
 
-LinkAPI 的 Claude Native 路由默认使用 `anthropic_explicit` 和 `1h`：断点会滚动到当前请求之前最新的完整 assistant 回合。该缓存按相同模型、上游缓存作用域与完全一致的提示前缀命中，不使用或依赖 `X-Ombre-Session-Id`；OpenRouter 仍保留 Lin-Che 原有的缓存断点结构。Gateway 会先移除 Native 请求中继承的旧缓存断点，再按 Anthropic 的 `tools → system → messages` 顺序重建统一的 1h 断点，避免隐式 5m 与 1h 混排。Gateway 不会在 Link 拒绝 1h 时静默降级到 5 分钟或无缓存，便于直接发现兼容性问题。Lin-Che 的 Anthropic Provider Test 会同时覆盖 tools、system 和历史消息三个 1h 断点；成功代表这一完整参数结构被接受，实际保留时间仍以 cache usage 为准。
+LinkAPI 的 Claude Native 路由默认使用 `anthropic_explicit` 和统一的 `5m`：断点会滚动到当前请求之前最新的完整 assistant 回合。该缓存按相同模型、上游缓存作用域与完全一致的提示前缀命中，不使用或依赖 `X-Ombre-Session-Id`；OpenRouter 仍保留 Lin-Che 原有的缓存断点结构。Gateway 会先移除 Native 请求中继承的旧缓存断点，再按 Anthropic 的 `tools → system → messages` 顺序重建全部显式为 5m 的断点，避免旧 1h 标记与中转侧 5m 标记混排。Gateway 不会在 Link 拒绝缓存参数时静默降级到无缓存，便于直接发现兼容性问题。Lin-Che 的 Anthropic Provider Test 会同时覆盖 tools、system 和历史消息三个 5m 断点；成功代表这一完整参数结构被接受，实际命中仍以 cache usage 为准。
 
 Lin-Che 会对全部历史图片重放原始图片数据，不再按最近回合数或累计字节数替换为文字占位符；即使旧文本进入 rolling summary，含图片的完整回合仍会保留在 provider 上下文中。图片文件缺失或不可读时请求会以 `provider_image_replay_incomplete` 明确失败，避免在不知情的情况下改变可缓存提示前缀。
 
