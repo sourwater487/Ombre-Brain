@@ -166,7 +166,9 @@ gateway:
       allow_request_api_key: true
       default_model: "claude-sonnet-5"
       anthropic_version: "2023-06-01"
-      prompt_cache: ""
+      # Native Anthropic breakpoints, independent from Lin-Che's OpenRouter BP layout.
+      prompt_cache: "anthropic_explicit"
+      prompt_cache_retention: "1h"
       models:
         - "claude-sonnet-5"
         - "claude-fable-5"

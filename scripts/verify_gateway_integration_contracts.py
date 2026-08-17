@@ -123,6 +123,9 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
     }
     service.upstreams = service._load_upstreams()
     service.upstream_default_model = "anthropic/claude-opus-4.6"
+    assert service.upstreams[0]["prompt_cache"] == ""
+    assert service.upstreams[1]["prompt_cache"] == "anthropic_explicit"
+    assert "prompt_cache" not in service.gateway_cfg["upstreams"][1]
 
     payload = {
         "model": "claude-sonnet-5",
@@ -169,6 +172,124 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
     assert fallback_route["upstream"]["base_url"] == "https://linkapi.ai/v1"
     assert fallback_route["upstream"]["protocol"] == "anthropic"
     assert [upstream["name"] for upstream in service.upstreams] == ["openrouter"]
+
+
+def verify_native_anthropic_thinking_and_cache_contracts() -> None:
+    service = make_service()
+    service.gateway_cfg = {"anthropic_max_tokens": 8192}
+    upstream = {
+        "name": "linkapi-claude",
+        "protocol": "anthropic",
+        "base_url": "https://linkapi.ai/v1",
+        "prompt_cache": "anthropic_explicit",
+        "prompt_cache_retention": "1h",
+    }
+    route = {
+        "upstream": upstream,
+        "upstream_model": "claude-opus-4-6",
+    }
+    payload = {
+        "model": "claude-opus-4-6",
+        "reasoning": {"enabled": True, "max_tokens": 4096},
+        "messages": [
+            {"role": "system", "content": "stable system"},
+            {
+                "role": "assistant",
+                "content": "I will inspect it.",
+                "reasoning_details": [
+                    {"type": "thinking", "index": 0, "thinking": "Need "},
+                    {"type": "thinking", "index": 0, "thinking": "context."},
+                    {"type": "thinking", "index": 0, "signature": "opaque-signature"},
+                ],
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "journal_read", "arguments": '{"id":1}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "journal_read",
+                    "description": "Read a journal entry.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+        "tool_choice": "auto",
+    }
+
+    converted = service._anthropic_payload_for_upstream(payload, route)
+    assert converted["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert converted["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert converted["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assistant_blocks = converted["messages"][0]["content"]
+    assert assistant_blocks[0] == {
+        "type": "thinking",
+        "thinking": "Need context.",
+        "signature": "opaque-signature",
+    }
+    assert assistant_blocks[-1]["type"] == "tool_use"
+    assert assistant_blocks[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+    response_message = service._anthropic_response_body_to_openai_message(
+        {
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "Checking context.",
+                    "signature": "response-signature",
+                },
+                {"type": "text", "text": "Done."},
+            ]
+        }
+    )
+    assert response_message["reasoning_content"] == "Checking context."
+    assert response_message["reasoning_details"] == [
+        {
+            "type": "thinking",
+            "index": 0,
+            "thinking": "Checking context.",
+            "signature": "response-signature",
+        }
+    ]
+
+    thinking_chunks = service._openai_chunks_from_anthropic_event(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "streamed thought"},
+        },
+        chunk_id="chatcmpl-test",
+        created=1,
+        model="claude-opus-4-6",
+    )
+    thinking_delta = thinking_chunks[0]["chunk"]["choices"][0]["delta"]
+    assert thinking_delta["reasoning_content"] == "streamed thought"
+    assert thinking_delta["reasoning_details"][0]["thinking"] == "streamed thought"
+
+    signature_chunks = service._openai_chunks_from_anthropic_event(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "stream-signature"},
+        },
+        chunk_id="chatcmpl-test",
+        created=1,
+        model="claude-opus-4-6",
+    )
+    signature_delta = signature_chunks[0]["chunk"]["choices"][0]["delta"]
+    assert signature_delta["thinking_signature"] == "stream-signature"
+    assert signature_delta["reasoning_details"][0]["signature"] == "stream-signature"
+
+    trusted = service._trusted_request_upstream("linkapi-claude", "claude-opus-4-6")
+    assert trusted["prompt_cache"] == "anthropic_explicit"
+    assert trusted["prompt_cache_retention"] == "1h"
 
 
 def verify_embedding_hot_update_rebuilds_gateway_engine() -> None:
@@ -275,6 +396,7 @@ def main() -> None:
     verify_live_context_requires_a_valid_leading_envelope()
     verify_upstream_configuration_remains_authoritative()
     verify_authenticated_profile_key_override_is_request_scoped()
+    verify_native_anthropic_thinking_and_cache_contracts()
     verify_embedding_hot_update_rebuilds_gateway_engine()
     verify_dashboard_gateway_and_env_contracts()
     asyncio.run(verify_debug_endpoint_filters_exact_request())

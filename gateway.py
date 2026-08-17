@@ -2069,6 +2069,8 @@ class GatewayService:
                     route=inbound_route,
                 )
                 assistant_message = self._extract_assistant_message_from_anthropic_response(upstream_response)
+                if assistant_message:
+                    self._update_reasoning_cache(session_id, assistant_message)
                 await self._record_successful_round(
                     session_id,
                     recalled_ids,
@@ -2227,6 +2229,8 @@ class GatewayService:
                     route="/v1/messages",
                 )
                 assistant_message = self._extract_assistant_message_from_anthropic_response(upstream_response)
+                if assistant_message:
+                    self._update_reasoning_cache(session_id, assistant_message)
                 await self._record_successful_round(
                     session_id,
                     recalled_ids,
@@ -4193,6 +4197,9 @@ class GatewayService:
         reasoning = assistant_message.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning.strip():
             return True
+        reasoning_details = assistant_message.get("reasoning_details")
+        if isinstance(reasoning_details, list) and reasoning_details:
+            return True
         tool_calls = assistant_message.get("tool_calls")
         return isinstance(tool_calls, list) and bool(tool_calls)
 
@@ -5792,6 +5799,9 @@ class GatewayService:
             }
         if cache_creation is not None:
             openai_usage["cache_creation_input_tokens"] = self._usage_int(cache_creation)
+        cache_creation_detail = usage.get("cache_creation")
+        if isinstance(cache_creation_detail, dict):
+            openai_usage["cache_creation"] = deepcopy(cache_creation_detail)
         return openai_usage
 
     @staticmethod
@@ -5802,7 +5812,11 @@ class GatewayService:
             return 0
 
     def _openai_message_to_anthropic_content(self, message: dict[str, Any]) -> list[dict[str, Any]]:
-        content_blocks: list[dict[str, Any]] = []
+        # Native Claude tool continuations must replay signed thinking blocks
+        # byte-for-byte. Lin-Che transports their streamed fragments through
+        # reasoning_details; rebuild the complete blocks before visible text
+        # and tool_use blocks.
+        content_blocks = self._anthropic_thinking_blocks_from_openai_message(message)
         text = self._coerce_message_text(message.get("content"))
         if text:
             content_blocks.append({"type": "text", "text": text})
@@ -5827,6 +5841,72 @@ class GatewayService:
                     }
                 )
         return content_blocks
+
+    def _anthropic_thinking_blocks_from_openai_message(
+        self,
+        message: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        raw_details = message.get("reasoning_details")
+        if not isinstance(raw_details, list) or not raw_details:
+            raw_details = message.get("thinking_blocks")
+        if not isinstance(raw_details, list):
+            return []
+
+        groups: dict[tuple[str, int], dict[str, Any]] = {}
+        order: list[tuple[str, int]] = []
+        unindexed = 0
+        for detail in raw_details:
+            if not isinstance(detail, dict):
+                continue
+            detail_type = str(detail.get("type") or "").strip()
+            if detail_type not in {"thinking", "redacted_thinking"}:
+                continue
+            try:
+                detail_index = int(detail.get("index"))
+            except (TypeError, ValueError):
+                detail_index = 1_000_000 + unindexed
+                unindexed += 1
+            key = (detail_type, detail_index)
+            group = groups.get(key)
+            if group is None:
+                group = {"type": detail_type, "index": detail_index}
+                groups[key] = group
+                order.append(key)
+
+            if detail_type == "thinking":
+                thinking = detail.get("thinking")
+                if isinstance(thinking, str):
+                    group["thinking"] = str(group.get("thinking") or "") + thinking
+                signature = detail.get("signature")
+                if isinstance(signature, str):
+                    group["signature"] = str(group.get("signature") or "") + signature
+                continue
+
+            data = detail.get("data")
+            if isinstance(data, str):
+                group["data"] = str(group.get("data") or "") + data
+
+        blocks: list[dict[str, Any]] = []
+        for key in sorted(order, key=lambda item: item[1]):
+            group = groups[key]
+            if group["type"] == "thinking":
+                signature = str(group.get("signature") or "")
+                if not signature:
+                    # Unsigned plaintext reasoning is display-only and cannot
+                    # be replayed as a valid Anthropic thinking block.
+                    continue
+                blocks.append(
+                    {
+                        "type": "thinking",
+                        "thinking": str(group.get("thinking") or ""),
+                        "signature": signature,
+                    }
+                )
+                continue
+            data = str(group.get("data") or "")
+            if data:
+                blocks.append({"type": "redacted_thinking", "data": data})
+        return blocks
 
     def _parse_tool_arguments(self, raw_arguments: Any) -> Any:
         if isinstance(raw_arguments, dict):
@@ -5872,10 +5952,11 @@ class GatewayService:
         route: dict[str, Any],
     ) -> dict[str, Any]:
         upstream = route["upstream"]
+        max_tokens = self._anthropic_max_tokens(payload)
         upstream_payload: dict[str, Any] = {
             "model": route["upstream_model"],
             "messages": [],
-            "max_tokens": self._anthropic_max_tokens(payload),
+            "max_tokens": max_tokens,
         }
 
         system_parts: list[str] = []
@@ -5929,8 +6010,52 @@ class GatewayService:
         if tool_choice is not None:
             upstream_payload["tool_choice"] = tool_choice
 
+        thinking = self._anthropic_thinking_config(payload, max_tokens=max_tokens)
+        if (
+            isinstance(thinking, dict)
+            and thinking.get("type") == "enabled"
+            and isinstance(tool_choice, dict)
+            and tool_choice.get("type") in {"any", "tool"}
+        ):
+            # Manual extended thinking cannot be combined with forced tool
+            # choice. Preserve the caller's explicit tool requirement.
+            thinking = None
+        if thinking is not None:
+            upstream_payload["thinking"] = thinking
+
         self._apply_anthropic_prompt_cache(upstream_payload, upstream)
         return upstream_payload
+
+    def _anthropic_thinking_config(
+        self,
+        payload: dict[str, Any],
+        *,
+        max_tokens: int,
+    ) -> dict[str, Any] | None:
+        native_thinking = payload.get("thinking")
+        if isinstance(native_thinking, dict) and native_thinking.get("type"):
+            return deepcopy(native_thinking)
+
+        reasoning = payload.get("reasoning")
+        if not isinstance(reasoning, dict):
+            return None
+        enabled = reasoning.get("enabled")
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() not in {"", "0", "false", "no", "off"}
+        if enabled is not True:
+            return None
+
+        requested_budget = reasoning.get("max_tokens")
+        if requested_budget is None:
+            requested_budget = reasoning.get("budget_tokens")
+        try:
+            budget_tokens = int(requested_budget or 4096)
+        except (TypeError, ValueError):
+            budget_tokens = 4096
+        budget_tokens = min(max(1024, budget_tokens), max_tokens - 1)
+        if budget_tokens < 1024:
+            return None
+        return {"type": "enabled", "budget_tokens": budget_tokens}
 
     def _anthropic_max_tokens(self, payload: dict[str, Any]) -> int:
         try:
@@ -5956,7 +6081,6 @@ class GatewayService:
         self._apply_explicit_anthropic_cache_control(
             payload,
             cache_control,
-            model=str(payload.get("model") or ""),
         )
 
     def _anthropic_cache_control(self, upstream: dict[str, Any]) -> dict[str, str]:
@@ -5974,7 +6098,6 @@ class GatewayService:
         self,
         payload: dict[str, Any],
         cache_control: dict[str, str],
-        model: str = "",
     ) -> None:
         self._attach_cache_control_to_anthropic_content(payload, "system", cache_control)
         self._attach_cache_control_to_anthropic_tools(payload, cache_control)
@@ -5982,79 +6105,26 @@ class GatewayService:
         if not isinstance(messages, list):
             return
 
-        breakpoint_index = self._find_cache_breakpoint(messages, model=model)
+        breakpoint_index = self._find_cache_breakpoint(messages)
         if breakpoint_index is None:
             return
         message = messages[breakpoint_index]
         if isinstance(message, dict):
             self._attach_cache_control_to_anthropic_content(message, "content", cache_control)
 
-    @staticmethod
-    def _cache_min_tokens_for_model(model: str) -> int:
-        lowered = str(model or "").lower()
-        if "sonnet" in lowered:
-            return 2048
-        return 4096
-
-    @staticmethod
-    def _cache_tail_tokens_for_model(model: str) -> int:
-        return 4000
-
-    def _find_cache_breakpoint(self, messages: list[Any], *, model: str = "") -> int | None:
-        if not isinstance(messages, list) or len(messages) < 3:
+    def _find_cache_breakpoint(self, messages: list[Any]) -> int | None:
+        if not isinstance(messages, list) or len(messages) < 2:
             return None
-        min_tokens = self._cache_min_tokens_for_model(model)
-        tail_target = self._cache_tail_tokens_for_model(model)
-        estimates = [
-            self._anthropic_message_token_estimate(message)
-            if isinstance(message, dict)
-            else count_tokens_approx(str(message or ""))
-            for message in messages
-        ]
-        prefix_tokens = sum(estimates)
-        tail_tokens = 0
+        # Cache through the newest completed assistant turn while leaving the
+        # current user/tool-result tail outside the breakpoint. The previous
+        # 4k-tail heuristic prevented ordinary conversations from ever moving
+        # the history cache beyond system/tools.
         for index in range(len(messages) - 2, -1, -1):
-            tail_tokens += estimates[index + 1]
-            prefix_tokens -= estimates[index + 1]
             message = messages[index]
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
-            if prefix_tokens >= min_tokens and tail_tokens >= tail_target:
-                return index
+            return index
         return None
-
-    def _anthropic_message_token_estimate(self, message: dict[str, Any]) -> int:
-        if not isinstance(message, dict):
-            return 0
-        return count_tokens_approx(
-            " ".join(
-                part
-                for part in (
-                    str(message.get("role") or ""),
-                    self._anthropic_content_text(message.get("content")),
-                )
-                if part
-            )
-        )
-
-    def _anthropic_content_text(self, content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict):
-                    text = block.get("text")
-                    if text is not None:
-                        parts.append(str(text))
-                    else:
-                        parts.append(json.dumps(block, ensure_ascii=False, sort_keys=True, default=str))
-            return "\n".join(parts)
-        if content is None:
-            return ""
-        return json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
 
     def _attach_cache_control_to_anthropic_tools(
         self,
@@ -6098,7 +6168,7 @@ class GatewayService:
                 continue
             if block.get("cache_control"):
                 return True
-            if block.get("type") in {"text", "image", "document", "tool_result"}:
+            if block.get("type") in {"text", "image", "document", "tool_use", "tool_result"}:
                 block["cache_control"] = deepcopy(cache_control)
                 return True
         return False
@@ -6202,6 +6272,8 @@ class GatewayService:
         if not isinstance(content, list):
             return None
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        reasoning_details: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
         for index, block in enumerate(content):
             if not isinstance(block, dict):
@@ -6211,6 +6283,26 @@ class GatewayService:
                 text = str(block.get("text") or "")
                 if text:
                     text_parts.append(text)
+                continue
+            if block_type == "thinking":
+                thinking = str(block.get("thinking") or "")
+                signature = str(block.get("signature") or "")
+                if thinking:
+                    reasoning_parts.append(thinking)
+                detail: dict[str, Any] = {"type": "thinking", "index": index}
+                if thinking:
+                    detail["thinking"] = thinking
+                if signature:
+                    detail["signature"] = signature
+                if thinking or signature:
+                    reasoning_details.append(detail)
+                continue
+            if block_type == "redacted_thinking":
+                data = str(block.get("data") or "")
+                if data:
+                    reasoning_details.append(
+                        {"type": "redacted_thinking", "index": index, "data": data}
+                    )
                 continue
             if block_type == "tool_use":
                 name = str(block.get("name") or "")
@@ -6230,9 +6322,13 @@ class GatewayService:
                     }
                 )
 
-        if not text_parts and not tool_calls:
+        if not text_parts and not tool_calls and not reasoning_details:
             return None
         message: dict[str, Any] = {"role": "assistant", "content": "\n".join(text_parts) if text_parts else None}
+        if reasoning_parts:
+            message["reasoning_content"] = "".join(reasoning_parts)
+        if reasoning_details:
+            message["reasoning_details"] = reasoning_details
         if tool_calls:
             message["tool_calls"] = tool_calls
         return message
@@ -7000,9 +7096,54 @@ class GatewayService:
             return [{"final": True}]
         if event_type == "content_block_start":
             content_block = event.get("content_block")
-            if not isinstance(content_block, dict) or content_block.get("type") != "tool_use":
+            if not isinstance(content_block, dict):
                 return []
             index = self._usage_int(event.get("index"))
+            block_type = content_block.get("type")
+            if block_type == "thinking":
+                thinking = str(content_block.get("thinking") or "")
+                signature = str(content_block.get("signature") or "")
+                detail: dict[str, Any] = {"type": "thinking", "index": index}
+                delta: dict[str, Any] = {}
+                if thinking:
+                    detail["thinking"] = thinking
+                    delta["reasoning_content"] = thinking
+                if signature:
+                    detail["signature"] = signature
+                    delta["thinking_signature"] = signature
+                if not thinking and not signature:
+                    return []
+                delta["reasoning_details"] = [detail]
+                return [
+                    {
+                        "chunk": self._openai_stream_chunk(
+                            chunk_id=chunk_id,
+                            created=created,
+                            model=model,
+                            delta=delta,
+                        )
+                    }
+                ]
+            if block_type == "redacted_thinking":
+                data = str(content_block.get("data") or "")
+                if not data:
+                    return []
+                return [
+                    {
+                        "chunk": self._openai_stream_chunk(
+                            chunk_id=chunk_id,
+                            created=created,
+                            model=model,
+                            delta={
+                                "reasoning_details": [
+                                    {"type": "redacted_thinking", "index": index, "data": data}
+                                ]
+                            },
+                        )
+                    }
+                ]
+            if block_type != "tool_use":
+                return []
             input_value = content_block.get("input")
             arguments = (
                 json.dumps(input_value, ensure_ascii=False)
@@ -7049,6 +7190,44 @@ class GatewayService:
                         created=created,
                         model=model,
                         delta={"content": text},
+                    )
+                }
+            ]
+        if delta.get("type") == "thinking_delta":
+            thinking = str(delta.get("thinking") or "")
+            if not thinking:
+                return []
+            return [
+                {
+                    "chunk": self._openai_stream_chunk(
+                        chunk_id=chunk_id,
+                        created=created,
+                        model=model,
+                        delta={
+                            "reasoning_content": thinking,
+                            "reasoning_details": [
+                                {"type": "thinking", "index": index, "thinking": thinking}
+                            ],
+                        },
+                    )
+                }
+            ]
+        if delta.get("type") == "signature_delta":
+            signature = str(delta.get("signature") or "")
+            if not signature:
+                return []
+            return [
+                {
+                    "chunk": self._openai_stream_chunk(
+                        chunk_id=chunk_id,
+                        created=created,
+                        model=model,
+                        delta={
+                            "reasoning_details": [
+                                {"type": "thinking", "index": index, "signature": signature}
+                            ],
+                            "thinking_signature": signature,
+                        },
                     )
                 }
             ]
@@ -20452,16 +20631,25 @@ class GatewayService:
         for message in messages:
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
-            if message.get("reasoning_content") or message.get("reasoning_details"):
-                continue
             signature = self._tool_call_signature(message)
             if not signature:
                 continue
             cached_message = cache.get(signature)
-            if not cached_message or not cached_message.get("reasoning_content"):
+            if not cached_message:
                 continue
-            message["reasoning_content"] = cached_message["reasoning_content"]
-            restored += 1
+            restored_current = False
+            if not message.get("reasoning_details") and cached_message.get("reasoning_details"):
+                message["reasoning_details"] = deepcopy(cached_message["reasoning_details"])
+                restored_current = True
+            if (
+                not message.get("reasoning_details")
+                and not message.get("reasoning_content")
+                and cached_message.get("reasoning_content")
+            ):
+                message["reasoning_content"] = cached_message["reasoning_content"]
+                restored_current = True
+            if restored_current:
+                restored += 1
 
         if restored:
             logger.info(
@@ -20506,10 +20694,12 @@ class GatewayService:
     def _update_reasoning_cache(self, session_id: str, assistant_message: dict[str, Any]) -> None:
         signature = self._tool_call_signature(assistant_message)
         reasoning_content = assistant_message.get("reasoning_content")
-        if signature and reasoning_content:
+        reasoning_details = assistant_message.get("reasoning_details")
+        if signature and (reasoning_content or reasoning_details):
             cache = self.pending_tool_reasoning.setdefault(session_id, {})
             cache[signature] = {
                 "reasoning_content": reasoning_content,
+                "reasoning_details": deepcopy(reasoning_details) if reasoning_details else None,
                 "tool_calls": deepcopy(assistant_message.get("tool_calls", [])),
             }
             logger.info(
@@ -20567,9 +20757,11 @@ class GatewayService:
                 "role": "assistant",
                 "content": "",
                 "reasoning_content": "",
+                "reasoning_details": [],
             },
             "usage": {},
             "tool_calls_by_index": {},
+            "anthropic_reasoning_by_index": {},
         }
 
     def _consume_stream_capture_chunk(
@@ -20667,6 +20859,23 @@ class GatewayService:
                 if text:
                     stream_state["message"]["content"] += text
                 return
+            if content_block.get("type") == "thinking":
+                detail = stream_state["anthropic_reasoning_by_index"].setdefault(
+                    index,
+                    {"type": "thinking", "index": index, "thinking": "", "signature": ""},
+                )
+                detail["thinking"] += str(content_block.get("thinking") or "")
+                detail["signature"] += str(content_block.get("signature") or "")
+                return
+            if content_block.get("type") == "redacted_thinking":
+                data = str(content_block.get("data") or "")
+                if data:
+                    stream_state["anthropic_reasoning_by_index"][index] = {
+                        "type": "redacted_thinking",
+                        "index": index,
+                        "data": data,
+                    }
+                return
             if content_block.get("type") == "tool_use":
                 name = str(content_block.get("name") or "")
                 tool_id = str(content_block.get("id") or f"call_{index}")
@@ -20696,6 +20905,27 @@ class GatewayService:
             text = str(delta.get("text") or "")
             if text:
                 stream_state["message"]["content"] += text
+            return
+        if delta.get("type") == "thinking_delta":
+            thinking = str(delta.get("thinking") or "")
+            if not thinking:
+                return
+            stream_state["message"]["reasoning_content"] += thinking
+            detail = stream_state["anthropic_reasoning_by_index"].setdefault(
+                index,
+                {"type": "thinking", "index": index, "thinking": "", "signature": ""},
+            )
+            detail["thinking"] = str(detail.get("thinking") or "") + thinking
+            return
+        if delta.get("type") == "signature_delta":
+            signature = str(delta.get("signature") or "")
+            if not signature:
+                return
+            detail = stream_state["anthropic_reasoning_by_index"].setdefault(
+                index,
+                {"type": "thinking", "index": index, "thinking": "", "signature": ""},
+            )
+            detail["signature"] = str(detail.get("signature") or "") + signature
             return
         if delta.get("type") == "input_json_delta":
             partial_json = str(delta.get("partial_json") or "")
@@ -20755,6 +20985,8 @@ class GatewayService:
             message["content"] += delta["content"]
         if isinstance(delta.get("reasoning_content"), str):
             message["reasoning_content"] += delta["reasoning_content"]
+        if isinstance(delta.get("reasoning_details"), list):
+            message.setdefault("reasoning_details", []).extend(deepcopy(delta["reasoning_details"]))
 
         tool_calls = delta.get("tool_calls")
         if not isinstance(tool_calls, list):
@@ -20787,6 +21019,8 @@ class GatewayService:
             target["content"] = message["content"]
         if isinstance(message.get("reasoning_content"), str):
             target["reasoning_content"] = message["reasoning_content"]
+        if isinstance(message.get("reasoning_details"), list):
+            target["reasoning_details"] = deepcopy(message["reasoning_details"])
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list):
             stream_state["tool_calls_by_index"] = {
@@ -20811,13 +21045,23 @@ class GatewayService:
 
         content = message.get("content", "")
         reasoning_content = message.get("reasoning_content", "")
-        if not (tool_calls or content or reasoning_content):
+        reasoning_details = message.get("reasoning_details", [])
+        native_reasoning_by_index = stream_state.get("anthropic_reasoning_by_index", {})
+        if isinstance(native_reasoning_by_index, dict) and native_reasoning_by_index:
+            reasoning_details = [
+                deepcopy(native_reasoning_by_index[index])
+                for index in sorted(native_reasoning_by_index)
+                if isinstance(native_reasoning_by_index[index], dict)
+            ]
+        if not (tool_calls or content or reasoning_content or reasoning_details):
             return None
 
         assistant_message: dict[str, Any] = {"role": message.get("role", "assistant")}
         assistant_message["content"] = content if content else None
         if reasoning_content:
             assistant_message["reasoning_content"] = reasoning_content
+        if reasoning_details:
+            assistant_message["reasoning_details"] = reasoning_details
         if tool_calls:
             assistant_message["tool_calls"] = tool_calls
         return assistant_message
@@ -21165,6 +21409,11 @@ class GatewayService:
                 )
                 prompt_cache = str(raw.get("prompt_cache") or "").strip().lower()
                 prompt_cache_retention = str(raw.get("prompt_cache_retention") or "").strip()
+                if protocol == "anthropic" and "linkapi.ai" in base_url.lower():
+                    # Keep caching enabled for runtime upstream entries saved
+                    # before LinkAPI's native-Claude defaults were introduced.
+                    prompt_cache = prompt_cache or "anthropic_explicit"
+                    prompt_cache_retention = prompt_cache_retention or "1h"
                 anthropic_version = str(raw.get("anthropic_version") or "2023-06-01").strip()
                 anthropic_beta = str(raw.get("anthropic_beta") or "").strip()
                 upstreams.append(
@@ -21277,8 +21526,8 @@ class GatewayService:
             "default_model": normalized_model,
             "models": [normalized_model] if normalized_model else [],
             "model_map": {normalized_model: normalized_model} if normalized_model else {},
-            "prompt_cache": "",
-            "prompt_cache_retention": "",
+            "prompt_cache": "anthropic_explicit" if name == "linkapi-claude" else "",
+            "prompt_cache_retention": "1h" if name == "linkapi-claude" else "",
             "anthropic_version": definition.get("anthropic_version", "2023-06-01"),
             "anthropic_beta": "",
         }

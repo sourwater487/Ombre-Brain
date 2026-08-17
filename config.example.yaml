@@ -313,10 +313,10 @@ gateway:
   # Optional prompt cache hints / 可选提示缓存参数
   # openai: send prompt_cache_key using X-Ombre-Session-Id; leave empty for other providers.
   # anthropic: send top-level cache_control for proxies that require it.
-  # anthropic_explicit: put cache_control on system/tools/prior assistant history.
+  # anthropic_explicit: put cache_control on system/tools/latest completed assistant history.
   # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；
   # anthropic: 给只认顶层 cache_control 的中转站使用；
-  # anthropic_explicit: 在 system/tools/上一条 assistant 历史上显式打断点。
+  # anthropic_explicit: 在 system/tools/最新完整 assistant 历史上显式打断点。
   # LOCAL-ADAPTATION: [改动] 相对 upstream/main@1dac438，采用本地适配版本。
   prompt_cache: ""
   # prompt_cache_retention: "24h"  # Optional for supported OpenAI models / 支持模型可选
