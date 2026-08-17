@@ -5776,8 +5776,14 @@ class GatewayService:
         )
 
     def _anthropic_usage_to_openai_usage(self, usage: dict[str, Any]) -> dict[str, Any]:
-        prompt_tokens = self._usage_int(
-            usage.get("prompt_tokens") if usage.get("prompt_tokens") is not None else usage.get("input_tokens")
+        cache_read = self._usage_int(usage.get("cache_read_input_tokens"))
+        cache_creation = self._usage_int(usage.get("cache_creation_input_tokens"))
+        raw_prompt_tokens = usage.get("prompt_tokens")
+        uncached_input_tokens = self._usage_int(usage.get("input_tokens"))
+        prompt_tokens = (
+            self._usage_int(raw_prompt_tokens)
+            if raw_prompt_tokens is not None
+            else uncached_input_tokens + cache_read + cache_creation
         )
         completion_tokens = self._usage_int(
             usage.get("completion_tokens")
@@ -5788,20 +5794,28 @@ class GatewayService:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
+            "input_tokens": uncached_input_tokens,
+            "uncached_input_tokens": uncached_input_tokens,
         }
 
-        cache_read = usage.get("cache_read_input_tokens")
-        cache_creation = usage.get("cache_creation_input_tokens")
-        if cache_read is not None:
-            openai_usage["cache_read_input_tokens"] = self._usage_int(cache_read)
+        if usage.get("cache_read_input_tokens") is not None:
+            openai_usage["cache_read_input_tokens"] = cache_read
             openai_usage["prompt_tokens_details"] = {
-                "cached_tokens": openai_usage["cache_read_input_tokens"]
+                "cached_tokens": cache_read
             }
-        if cache_creation is not None:
-            openai_usage["cache_creation_input_tokens"] = self._usage_int(cache_creation)
+        if usage.get("cache_creation_input_tokens") is not None:
+            openai_usage["cache_creation_input_tokens"] = cache_creation
         cache_creation_detail = usage.get("cache_creation")
         if isinstance(cache_creation_detail, dict):
             openai_usage["cache_creation"] = deepcopy(cache_creation_detail)
+        output_details = usage.get("output_tokens_details")
+        if isinstance(output_details, dict):
+            openai_usage["output_tokens_details"] = deepcopy(output_details)
+            thinking_tokens = output_details.get("thinking_tokens")
+            if thinking_tokens is not None:
+                openai_usage["completion_tokens_details"] = {
+                    "reasoning_tokens": self._usage_int(thinking_tokens)
+                }
         return openai_usage
 
     @staticmethod
@@ -5960,6 +5974,7 @@ class GatewayService:
         }
 
         system_parts: list[str] = []
+        deferred_live_context_parts: list[str] = []
         for message in payload.get("messages", []):
             if not isinstance(message, dict):
                 continue
@@ -5967,7 +5982,16 @@ class GatewayService:
             if role == "system":
                 system_text = self._coerce_message_text(message.get("content")).strip()
                 if system_text:
-                    system_parts.append(system_text)
+                    if LEADING_OMBRE_LIVE_CONTEXT_RE.match(system_text):
+                        # Tool continuations have no trailing OpenAI user role,
+                        # so generic injection temporarily falls back to a
+                        # synthetic system message. Native Anthropic caching
+                        # processes system before all messages; keep this
+                        # request-scoped context in the final user/tool-result
+                        # tail instead of invalidating the stable prefix.
+                        deferred_live_context_parts.append(system_text)
+                    else:
+                        system_parts.append(system_text)
                 continue
             if role == "tool":
                 tool_use_id = str(message.get("tool_call_id") or message.get("tool_use_id") or "").strip()
@@ -5994,6 +6018,14 @@ class GatewayService:
             )
             upstream_payload["messages"].append({"role": role, "content": content or ""})
 
+        if deferred_live_context_parts:
+            moved_to_tail = self._append_anthropic_live_context_to_tail(
+                upstream_payload["messages"],
+                "\n\n".join(deferred_live_context_parts),
+            )
+            if not moved_to_tail:
+                system_parts.extend(deferred_live_context_parts)
+
         if system_parts:
             upstream_payload["system"] = "\n\n".join(system_parts)
 
@@ -6010,7 +6042,11 @@ class GatewayService:
         if tool_choice is not None:
             upstream_payload["tool_choice"] = tool_choice
 
-        thinking = self._anthropic_thinking_config(payload, max_tokens=max_tokens)
+        thinking = self._anthropic_thinking_config(
+            payload,
+            max_tokens=max_tokens,
+            model=route["upstream_model"],
+        )
         if (
             isinstance(thinking, dict)
             and thinking.get("type") == "enabled"
@@ -6022,19 +6058,66 @@ class GatewayService:
             thinking = None
         if thinking is not None:
             upstream_payload["thinking"] = thinking
+            if thinking.get("type") == "adaptive":
+                reasoning = payload.get("reasoning")
+                effort = (
+                    str(reasoning.get("effort") or "").strip().lower()
+                    if isinstance(reasoning, dict)
+                    else ""
+                )
+                if effort in {"low", "medium", "high", "xhigh", "max"}:
+                    upstream_payload["output_config"] = {"effort": effort}
+
+        logger.info(
+            "Gateway Anthropic request features | upstream=%s model=%s thinking_type=%s "
+            "thinking_display=%s effort=%s max_tokens=%s",
+            upstream.get("name"),
+            route["upstream_model"],
+            thinking.get("type") if isinstance(thinking, dict) else "",
+            thinking.get("display") if isinstance(thinking, dict) else "",
+            (upstream_payload.get("output_config") or {}).get("effort", ""),
+            max_tokens,
+        )
 
         self._apply_anthropic_prompt_cache(upstream_payload, upstream)
         return upstream_payload
+
+    @staticmethod
+    def _append_anthropic_live_context_to_tail(
+        messages: list[dict[str, Any]],
+        live_context: str,
+    ) -> bool:
+        context = str(live_context or "").strip()
+        if not context or not messages:
+            return False
+        message = messages[-1]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            return False
+        content = message.get("content")
+        if isinstance(content, list):
+            content.append({"type": "text", "text": context})
+        elif isinstance(content, str) and content:
+            message["content"] = [
+                {"type": "text", "text": content},
+                {"type": "text", "text": context},
+            ]
+        else:
+            message["content"] = [{"type": "text", "text": context}]
+        return True
 
     def _anthropic_thinking_config(
         self,
         payload: dict[str, Any],
         *,
         max_tokens: int,
+        model: str = "",
     ) -> dict[str, Any] | None:
         native_thinking = payload.get("thinking")
         if isinstance(native_thinking, dict) and native_thinking.get("type"):
-            return deepcopy(native_thinking)
+            normalized = deepcopy(native_thinking)
+            if normalized.get("type") in {"adaptive", "enabled"}:
+                normalized.setdefault("display", "summarized")
+            return normalized
 
         reasoning = payload.get("reasoning")
         if not isinstance(reasoning, dict):
@@ -6044,6 +6127,9 @@ class GatewayService:
             enabled = enabled.strip().lower() not in {"", "0", "false", "no", "off"}
         if enabled is not True:
             return None
+
+        if self._anthropic_model_uses_adaptive_thinking(model):
+            return {"type": "adaptive", "display": "summarized"}
 
         requested_budget = reasoning.get("max_tokens")
         if requested_budget is None:
@@ -6055,7 +6141,20 @@ class GatewayService:
         budget_tokens = min(max(1024, budget_tokens), max_tokens - 1)
         if budget_tokens < 1024:
             return None
-        return {"type": "enabled", "budget_tokens": budget_tokens}
+        return {
+            "type": "enabled",
+            "budget_tokens": budget_tokens,
+            "display": "summarized",
+        }
+
+    @staticmethod
+    def _anthropic_model_uses_adaptive_thinking(model: str) -> bool:
+        normalized = str(model or "").strip().lower().replace("_", "-").replace(".", "-")
+        if re.search(r"claude-(?:opus|sonnet)-4-(?:6|7|8)(?:-|$)", normalized):
+            return True
+        if re.search(r"claude-(?:opus|sonnet|fable|mythos)-[5-9](?:-|$)", normalized):
+            return True
+        return "mythos-preview" in normalized
 
     def _anthropic_max_tokens(self, payload: dict[str, Any]) -> int:
         try:
@@ -6107,17 +6206,24 @@ class GatewayService:
         self._attach_cache_control_to_anthropic_tools(payload, cache_control)
         messages = payload.get("messages", [])
         if isinstance(messages, list):
-            breakpoint_index = self._find_cache_breakpoint(messages)
-            if breakpoint_index is not None:
+            # Keep the previous rolling assistant breakpoint in place while
+            # adding the newest one. This spends the remaining two Anthropic
+            # breakpoint slots (tools + system + 2 messages = 4) and gives the
+            # next turn an exact lookup point for the large cache written by
+            # the preceding request, even when its dynamic tail is long.
+            for breakpoint_index in self._find_cache_breakpoints(messages, limit=2):
                 message = messages[breakpoint_index]
                 if isinstance(message, dict):
                     self._attach_cache_control_to_anthropic_content(message, "content", cache_control)
 
         cache_plan = self._anthropic_cache_control_plan(payload)
+        live_context_locations = self._anthropic_live_context_locations(payload)
         logger.info(
-            "Gateway Anthropic cache plan | removed_inherited=%s breakpoints=%s",
+            "Gateway Anthropic cache plan | removed_inherited=%s breakpoints=%s "
+            "live_context_locations=%s",
             removed_cache_controls,
             cache_plan,
+            live_context_locations,
         )
 
     @staticmethod
@@ -6190,19 +6296,56 @@ class GatewayService:
                         )
         return plan
 
+    @staticmethod
+    def _anthropic_live_context_locations(payload: dict[str, Any]) -> list[str]:
+        locations: list[str] = []
+
+        def has_live_context(value: Any) -> bool:
+            return "<ombre_live_context>" in str(value or "").lower()
+
+        system = payload.get("system")
+        if isinstance(system, str) and has_live_context(system):
+            locations.append("system")
+        elif isinstance(system, list):
+            for index, block in enumerate(system):
+                if isinstance(block, dict) and has_live_context(block.get("text")):
+                    locations.append(f"system[{index}]")
+
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            for message_index, message in enumerate(messages):
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if isinstance(content, str) and has_live_context(content):
+                    locations.append(f"messages[{message_index}]")
+                elif isinstance(content, list):
+                    for block_index, block in enumerate(content):
+                        if isinstance(block, dict) and has_live_context(block.get("text")):
+                            locations.append(f"messages[{message_index}].content[{block_index}]")
+        return locations
+
     def _find_cache_breakpoint(self, messages: list[Any]) -> int | None:
+        breakpoints = self._find_cache_breakpoints(messages, limit=1)
+        return breakpoints[-1] if breakpoints else None
+
+    @staticmethod
+    def _find_cache_breakpoints(messages: list[Any], *, limit: int = 2) -> list[int]:
         if not isinstance(messages, list) or len(messages) < 2:
-            return None
+            return []
         # Cache through the newest completed assistant turn while leaving the
-        # current user/tool-result tail outside the breakpoint. The previous
-        # 4k-tail heuristic prevented ordinary conversations from ever moving
-        # the history cache beyond system/tools.
+        # current user/tool-result tail outside the breakpoint. Retaining the
+        # prior assistant boundary lets the next request address the cache it
+        # just wrote instead of relying on provider lookback heuristics.
+        found: list[int] = []
         for index in range(len(messages) - 2, -1, -1):
             message = messages[index]
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
-            return index
-        return None
+            found.append(index)
+            if len(found) >= max(1, int(limit)):
+                break
+        return sorted(found)
 
     def _attach_cache_control_to_anthropic_tools(
         self,

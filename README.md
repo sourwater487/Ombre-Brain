@@ -230,9 +230,11 @@ Operit 会把时间、设备、工作区、照顾备忘和其它 app context 包
 - `anthropic`：只发送顶层 `cache_control`，用于仅接受这种格式的中转站。
 - 空值：不主动添加缓存提示。DeepSeek 等提供方仍可能自行执行前缀缓存。
 
-Gateway 会兼容记录 OpenAI 与 Anthropic 返回的 cache read / creation / cached token 字段，可通过 `/api/debug/upstream-usage` 查看实际是否命中。缓存只减少重复前缀费用或延迟，不缓存 Ombre 的召回结果；每轮动态记忆仍会重新经过门控。
+Gateway 会兼容记录 OpenAI 与 Anthropic 返回的 cache read / creation / cached token 字段，可通过 `/api/debug/upstream-usage` 查看实际是否命中。缓存不会代替 Ombre 对当前轮动态记忆重新门控：本轮新召回先放在未设断点的动态尾部；成功后，Lin-Che 会把完整 Ombre live-context 绑定到该 user 回合并在后续 provider 历史中重放，等它滚入历史缓存前缀后可以正常命中。autonomous keepalive 没有真实 user 回合，因此先把完整 live-context 存到对应 keepalive run，下一次真实聊天再连同自主活动一起绑定进历史。
 
-LinkAPI 的 Claude Native 路由默认使用 `anthropic_explicit` 和统一的 `5m`：断点会滚动到当前请求之前最新的完整 assistant 回合。该缓存按相同模型、上游缓存作用域与完全一致的提示前缀命中，不使用或依赖 `X-Ombre-Session-Id`；OpenRouter 仍保留 Lin-Che 原有的缓存断点结构。Gateway 会先移除 Native 请求中继承的旧缓存断点，再按 Anthropic 的 `tools → system → messages` 顺序重建全部显式为 5m 的断点，避免旧 1h 标记与中转侧 5m 标记混排。Gateway 不会在 Link 拒绝缓存参数时静默降级到无缓存，便于直接发现兼容性问题。Lin-Che 的 Anthropic Provider Test 会同时覆盖 tools、system 和历史消息三个 5m 断点；成功代表这一完整参数结构被接受，实际命中仍以 cache usage 为准。
+LinkAPI 的 Claude Native 路由默认使用 `anthropic_explicit` 和统一的 `5m`：四个断点额度按 `tools → system → 前一完整 assistant → 最新完整 assistant` 放置。保留前一 assistant 断点可以让下一轮直接命中刚写下的大缓存，最新断点则写入新增的稳定历史；当前 user、召回 XML 和 tool-result 尾部不进入断点。该缓存按相同模型、上游缓存作用域与完全一致的提示前缀命中，不使用或依赖 `X-Ombre-Session-Id`；OpenRouter 仍保留 Lin-Che 原有的缓存断点结构。Gateway 会先移除 Native 请求中继承的旧缓存断点，再按统一 5m 重建，避免旧 1h 标记与中转侧 5m 标记混排。tool continuation 没有末尾 user 时，临时生成的召回 system 消息会在 Native 转换时搬到最后的 tool-result/user 尾部，避免动态记忆污染 system 缓存。Gateway 不会在 Link 拒绝缓存参数时静默降级到无缓存，便于直接发现兼容性问题。Lin-Che 的 Anthropic Provider Test 会覆盖 tools、system 和历史消息缓存参数；成功代表参数结构被接受，实际命中仍以 cache usage 为准。
+
+Claude 4.6 及更新的 Native 模型会把 Lin-Che 的 reasoning 开关转换为 `thinking: {type: "adaptive", display: "summarized"}`，并透传固定 effort；旧版 Claude 仍使用带预算的 `enabled` 模式。Native 流里的 `thinking_delta`、`signature_delta` 和 thinking token usage 会转换到 Lin-Che 可展示、可续调的字段。Anthropic usage 的上下文总量按 `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 计算，缓存读取和写入仍分别保留，避免只显示未缓存尾部 token。
 
 Lin-Che 会对全部历史图片重放原始图片数据，不再按最近回合数或累计字节数替换为文字占位符；即使旧文本进入 rolling summary，含图片的完整回合仍会保留在 provider 上下文中。图片文件缺失或不可读时请求会以 `provider_image_replay_incomplete` 明确失败，避免在不知情的情况下改变可缓存提示前缀。
 

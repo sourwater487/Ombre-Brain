@@ -196,7 +196,7 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
     }
     payload = {
         "model": "claude-opus-4-6",
-        "reasoning": {"enabled": True, "max_tokens": 4096},
+        "reasoning": {"enabled": True, "max_tokens": 4096, "effort": "max"},
         "messages": [
             {"role": "system", "content": "stable system"},
             {
@@ -231,7 +231,17 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
     }
 
     converted = service._anthropic_payload_for_upstream(payload, route)
-    assert converted["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert converted["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert converted["output_config"] == {"effort": "max"}
+    assert service._anthropic_thinking_config(
+        {"reasoning": {"enabled": True, "max_tokens": 4096}},
+        max_tokens=8192,
+        model="claude-opus-4-5",
+    ) == {
+        "type": "enabled",
+        "budget_tokens": 4096,
+        "display": "summarized",
+    }
     assert converted["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
     assert converted["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
     assistant_blocks = converted["messages"][0]["content"]
@@ -250,6 +260,92 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
             "type": "ephemeral",
             "ttl": "5m",
         },
+    ]
+
+    rolling_cache_payload = {
+        "tools": [{"name": "stable_tool", "input_schema": {"type": "object"}}],
+        "system": [{"type": "text", "text": "stable system"}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "old question"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "old answer"}]},
+            {"role": "user", "content": [{"type": "text", "text": "prior question"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "prior answer"}]},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "<ombre_live_context>dynamic recall</ombre_live_context>\ncurrent",
+                    }
+                ],
+            },
+        ],
+    }
+    service._apply_explicit_anthropic_cache_control(
+        rolling_cache_payload,
+        {"type": "ephemeral", "ttl": "5m"},
+    )
+    assert service._anthropic_cache_control_plan(rolling_cache_payload) == [
+        {"location": "tools[0]", "type": "ephemeral", "ttl": "5m"},
+        {"location": "system[0]", "type": "ephemeral", "ttl": "5m"},
+        {"location": "messages[1].content[0]", "type": "ephemeral", "ttl": "5m"},
+        {"location": "messages[3].content[0]", "type": "ephemeral", "ttl": "5m"},
+    ]
+    assert "cache_control" not in rolling_cache_payload["messages"][4]["content"][0]
+    assert service._anthropic_live_context_locations(rolling_cache_payload) == [
+        "messages[4].content[0]"
+    ]
+
+    tool_continuation_messages = service._inject_context_messages(
+        [
+            {"role": "system", "content": "stable system"},
+            {"role": "user", "content": "inspect it"},
+            {
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    {
+                        "id": "call-tail",
+                        "type": "function",
+                        "function": {"name": "journal_read", "arguments": '{"id":2}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-tail", "content": "tool result"},
+        ],
+        "stable recalled context",
+        "dynamic recalled context",
+    )
+    assert tool_continuation_messages[1]["role"] == "system"
+    assert "<ombre_live_context>" in tool_continuation_messages[1]["content"]
+    converted_tool_continuation = service._anthropic_payload_for_upstream(
+        {
+            "model": "claude-opus-4-6",
+            "messages": tool_continuation_messages,
+            "tools": payload["tools"],
+            "tool_choice": "auto",
+        },
+        route,
+    )
+    assert "<ombre_live_context>" not in "".join(
+        str(block.get("text") or "")
+        for block in converted_tool_continuation["system"]
+        if isinstance(block, dict)
+    )
+    tail_content = converted_tool_continuation["messages"][-1]["content"]
+    assert any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and "<ombre_live_context>" in str(block.get("text") or "")
+        for block in tail_content
+    )
+    assert all(
+        "cache_control" not in block
+        for block in tail_content
+        if isinstance(block, dict)
+    )
+    assert service._anthropic_live_context_locations(converted_tool_continuation) == [
+        f"messages[{len(converted_tool_continuation['messages']) - 1}].content[1]"
     ]
 
     mixed_ttl_payload = {
@@ -310,6 +406,35 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
             "signature": "response-signature",
         }
     ]
+
+    first_usage = service._anthropic_usage_to_openai_usage(
+        {
+            "input_tokens": 512,
+            "output_tokens": 190,
+            "cache_creation_input_tokens": 116_799,
+        }
+    )
+    assert first_usage["prompt_tokens"] == 117_311
+    assert first_usage["completion_tokens"] == 190
+    assert first_usage["total_tokens"] == 117_501
+    assert first_usage["input_tokens"] == 512
+    assert first_usage["cache_creation_input_tokens"] == 116_799
+
+    second_usage = service._anthropic_usage_to_openai_usage(
+        {
+            "input_tokens": 622,
+            "output_tokens": 233,
+            "cache_read_input_tokens": 87_599,
+            "cache_creation_input_tokens": 29_551,
+            "output_tokens_details": {"thinking_tokens": 101},
+        }
+    )
+    assert second_usage["prompt_tokens"] == 117_772
+    assert second_usage["completion_tokens"] == 233
+    assert second_usage["total_tokens"] == 118_005
+    assert second_usage["prompt_tokens_details"] == {"cached_tokens": 87_599}
+    assert second_usage["cache_creation_input_tokens"] == 29_551
+    assert second_usage["completion_tokens_details"] == {"reasoning_tokens": 101}
 
     thinking_chunks = service._openai_chunks_from_anthropic_event(
         {
