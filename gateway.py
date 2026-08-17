@@ -6099,18 +6099,97 @@ class GatewayService:
         payload: dict[str, Any],
         cache_control: dict[str, str],
     ) -> None:
+        # The Anthropic prefix order is tools -> system -> messages. A legacy
+        # implicit 5m marker anywhere before a new 1h marker makes the whole
+        # request invalid. This strategy owns the explicit breakpoint plan,
+        # so discard inherited markers and rebuild one consistent TTL plan.
+        removed_cache_controls = self._strip_anthropic_cache_controls(payload)
         self._attach_cache_control_to_anthropic_content(payload, "system", cache_control)
         self._attach_cache_control_to_anthropic_tools(payload, cache_control)
         messages = payload.get("messages", [])
-        if not isinstance(messages, list):
-            return
+        if isinstance(messages, list):
+            breakpoint_index = self._find_cache_breakpoint(messages)
+            if breakpoint_index is not None:
+                message = messages[breakpoint_index]
+                if isinstance(message, dict):
+                    self._attach_cache_control_to_anthropic_content(message, "content", cache_control)
 
-        breakpoint_index = self._find_cache_breakpoint(messages)
-        if breakpoint_index is None:
-            return
-        message = messages[breakpoint_index]
-        if isinstance(message, dict):
-            self._attach_cache_control_to_anthropic_content(message, "content", cache_control)
+        cache_plan = self._anthropic_cache_control_plan(payload)
+        logger.info(
+            "Gateway Anthropic cache plan | removed_inherited=%s breakpoints=%s",
+            removed_cache_controls,
+            cache_plan,
+        )
+
+    @staticmethod
+    def _strip_anthropic_cache_controls(payload: dict[str, Any]) -> int:
+        removed = 0
+        if payload.pop("cache_control", None) is not None:
+            removed += 1
+
+        tools = payload.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict) and tool.pop("cache_control", None) is not None:
+                    removed += 1
+
+        containers: list[dict[str, Any]] = [payload]
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            containers.extend(message for message in messages if isinstance(message, dict))
+        for container in containers:
+            fields = ("system",) if container is payload else ("content",)
+            for field in fields:
+                content = container.get(field)
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if isinstance(block, dict) and block.pop("cache_control", None) is not None:
+                        removed += 1
+        return removed
+
+    @staticmethod
+    def _anthropic_cache_control_plan(payload: dict[str, Any]) -> list[dict[str, str]]:
+        plan: list[dict[str, str]] = []
+
+        def append(location: str, value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            plan.append(
+                {
+                    "location": location,
+                    "type": str(value.get("type") or ""),
+                    "ttl": str(value.get("ttl") or "5m"),
+                }
+            )
+
+        tools = payload.get("tools")
+        if isinstance(tools, list):
+            for index, tool in enumerate(tools):
+                if isinstance(tool, dict):
+                    append(f"tools[{index}]", tool.get("cache_control"))
+
+        system = payload.get("system")
+        if isinstance(system, list):
+            for index, block in enumerate(system):
+                if isinstance(block, dict):
+                    append(f"system[{index}]", block.get("cache_control"))
+
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            for message_index, message in enumerate(messages):
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block_index, block in enumerate(content):
+                    if isinstance(block, dict):
+                        append(
+                            f"messages[{message_index}].content[{block_index}]",
+                            block.get("cache_control"),
+                        )
+        return plan
 
     def _find_cache_breakpoint(self, messages: list[Any]) -> int | None:
         if not isinstance(messages, list) or len(messages) < 2:
@@ -21410,10 +21489,11 @@ class GatewayService:
                 prompt_cache = str(raw.get("prompt_cache") or "").strip().lower()
                 prompt_cache_retention = str(raw.get("prompt_cache_retention") or "").strip()
                 if protocol == "anthropic" and "linkapi.ai" in base_url.lower():
-                    # Keep caching enabled for runtime upstream entries saved
-                    # before LinkAPI's native-Claude defaults were introduced.
+                    # Normalize runtime entries saved before LinkAPI's native
+                    # Claude defaults. In particular, an old explicit 5m value
+                    # must not coexist with request-scoped 1h breakpoints.
                     prompt_cache = prompt_cache or "anthropic_explicit"
-                    prompt_cache_retention = prompt_cache_retention or "1h"
+                    prompt_cache_retention = "1h"
                 anthropic_version = str(raw.get("anthropic_version") or "2023-06-01").strip()
                 anthropic_beta = str(raw.get("anthropic_beta") or "").strip()
                 upstreams.append(

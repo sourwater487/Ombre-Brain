@@ -118,6 +118,10 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
                 "protocol": "anthropic",
                 "api_key": "configured-linkapi-key",
                 "models": ["claude-sonnet-5"],
+                # Simulate a dashboard/runtime entry saved before Link's 1h
+                # default was introduced. Effective routing must normalize it
+                # without mutating the persisted config object.
+                "prompt_cache_retention": "5m",
             },
         ]
     }
@@ -125,7 +129,9 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
     service.upstream_default_model = "anthropic/claude-opus-4.6"
     assert service.upstreams[0]["prompt_cache"] == ""
     assert service.upstreams[1]["prompt_cache"] == "anthropic_explicit"
+    assert service.upstreams[1]["prompt_cache_retention"] == "1h"
     assert "prompt_cache" not in service.gateway_cfg["upstreams"][1]
+    assert service.gateway_cfg["upstreams"][1]["prompt_cache_retention"] == "5m"
 
     payload = {
         "model": "claude-sonnet-5",
@@ -236,6 +242,52 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
     }
     assert assistant_blocks[-1]["type"] == "tool_use"
     assert assistant_blocks[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert service._anthropic_cache_control_plan(converted) == [
+        {"location": "tools[0]", "type": "ephemeral", "ttl": "1h"},
+        {"location": "system[0]", "type": "ephemeral", "ttl": "1h"},
+        {
+            "location": f"messages[0].content[{len(assistant_blocks) - 1}]",
+            "type": "ephemeral",
+            "ttl": "1h",
+        },
+    ]
+
+    mixed_ttl_payload = {
+        "tools": [
+            {
+                "name": "legacy_tool",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        "system": [
+            {
+                "type": "text",
+                "text": "legacy system",
+                "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            }
+        ],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "completed turn",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            },
+            {"role": "user", "content": [{"type": "text", "text": "current"}]},
+        ],
+    }
+    service._apply_explicit_anthropic_cache_control(
+        mixed_ttl_payload,
+        {"type": "ephemeral", "ttl": "1h"},
+    )
+    normalized_plan = service._anthropic_cache_control_plan(mixed_ttl_payload)
+    assert len(normalized_plan) == 3
+    assert all(entry["ttl"] == "1h" for entry in normalized_plan)
 
     response_message = service._anthropic_response_body_to_openai_message(
         {
