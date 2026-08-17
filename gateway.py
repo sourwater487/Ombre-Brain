@@ -1299,7 +1299,7 @@ class GatewayService:
             if env_names:
                 sanitized["api_key_envs"] = env_names
             if "allow_request_api_key" in raw:
-                sanitized["allow_request_api_key"] = bool(raw.get("allow_request_api_key"))
+                sanitized["allow_request_api_key"] = self._upstream_allows_request_api_key(raw)
             for key in (
                 "default_model",
                 "prompt_cache",
@@ -1315,9 +1315,9 @@ class GatewayService:
                 sanitized["models"] = models
 
             existing = existing_by_name.get(name, {})
-            if "allow_request_api_key" not in raw and isinstance(existing, dict):
-                sanitized["allow_request_api_key"] = bool(
-                    existing.get("allow_request_api_key")
+            if "allow_request_api_key" not in raw:
+                sanitized["allow_request_api_key"] = self._upstream_allows_request_api_key(
+                    existing if isinstance(existing, dict) else {}
                 )
             for secret_key in ("api_key", "api_keys"):
                 if secret_key in raw:
@@ -21057,6 +21057,12 @@ class GatewayService:
     def _upstream_uses_anthropic_protocol(self, upstream: dict[str, Any]) -> bool:
         return str(upstream.get("protocol") or "").strip().lower() == "anthropic"
 
+    def _upstream_allows_request_api_key(self, upstream: dict[str, Any]) -> bool:
+        value = upstream.get("allow_request_api_key", True)
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() not in {"0", "false", "no", "off"}
+
     def _upstream_is_ready(self, upstream: dict[str, Any]) -> bool:
         return bool(
             upstream.get("base_url")
@@ -21168,7 +21174,7 @@ class GatewayService:
                         "protocol": protocol,
                         "api_key": api_keys[0]["value"] if api_keys else "",
                         "api_keys": api_keys,
-                        "allow_request_api_key": bool(raw.get("allow_request_api_key")),
+                        "allow_request_api_key": self._upstream_allows_request_api_key(raw),
                         "default_model": default_model,
                         "models": models,
                         "model_map": model_map,
@@ -21195,8 +21201,8 @@ class GatewayService:
                     self.gateway_cfg,
                     fallback_api_key=self.upstream_api_key,
                 ),
-                "allow_request_api_key": bool(
-                    self.gateway_cfg.get("allow_request_api_key")
+                "allow_request_api_key": self._upstream_allows_request_api_key(
+                    self.gateway_cfg
                 ),
                 "default_model": self.upstream_default_model,
                 "models": models,
@@ -21241,6 +21247,42 @@ class GatewayService:
                 return
         self.upstream_default_model = self.upstream_models[0] if self.upstream_models else configured_default
 
+    def _trusted_request_upstream(
+        self,
+        name: str,
+        model: str,
+    ) -> dict[str, Any] | None:
+        definitions = {
+            "linkapi-claude": {
+                "base_url": "https://linkapi.ai/v1",
+                "protocol": "anthropic",
+                "anthropic_version": "2023-06-01",
+            },
+            "linkapi-chat": {
+                "base_url": "https://linkapi.ai/v1",
+                "protocol": "openai",
+            },
+        }
+        definition = definitions.get(str(name or "").strip())
+        if definition is None:
+            return None
+        normalized_model = str(model or "").strip()
+        return {
+            "name": name,
+            "base_url": definition["base_url"],
+            "protocol": definition["protocol"],
+            "api_key": "",
+            "api_keys": [],
+            "allow_request_api_key": True,
+            "default_model": normalized_model,
+            "models": [normalized_model] if normalized_model else [],
+            "model_map": {normalized_model: normalized_model} if normalized_model else {},
+            "prompt_cache": "",
+            "prompt_cache_retention": "",
+            "anthropic_version": definition.get("anthropic_version", "2023-06-01"),
+            "anthropic_beta": "",
+        }
+
     def _resolve_upstream_for_model(
         self,
         model: str,
@@ -21262,6 +21304,11 @@ class GatewayService:
                 ),
                 None,
             )
+            if upstream is None:
+                upstream = self._trusted_request_upstream(
+                    normalized_upstream_name_override,
+                    normalized_model,
+                )
             if upstream is None:
                 raise ValueError(
                     f'gateway upstream "{normalized_upstream_name_override}" is not configured'

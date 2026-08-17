@@ -384,6 +384,15 @@ def _dashboard_sanitize_gateway_upstreams(raw_upstreams, existing_upstreams=None
             sanitized["models"] = models
 
         existing = existing_by_name.get(name, {})
+        sanitized["allow_request_api_key"] = _bool_value(
+            raw.get(
+                "allow_request_api_key",
+                existing.get("allow_request_api_key", True)
+                if isinstance(existing, dict)
+                else True,
+            ),
+            True,
+        )
         for secret_key in ("api_key", "api_keys"):
             if isinstance(existing, dict) and secret_key in existing:
                 sanitized[secret_key] = existing[secret_key]
@@ -458,6 +467,7 @@ def _dashboard_gateway_upstreams_payload(gateway_cfg: dict) -> list[dict]:
         elif isinstance(raw_api_keys, list):
             direct_key_count += len([item for item in raw_api_keys if item])
         env_key_count = len([env_name for env_name in env_names if os.environ.get(env_name, "")])
+        allow_request_api_key = _bool_value(raw.get("allow_request_api_key", True), True)
         payload.append(
             {
                 "name": str(raw.get("name") or "").strip(),
@@ -466,7 +476,11 @@ def _dashboard_gateway_upstreams_payload(gateway_cfg: dict) -> list[dict]:
                 "api_key_envs": env_names,
                 "has_direct_api_key": direct_key_count > 0,
                 "key_count": direct_key_count + env_key_count,
-                "ready": bool(str(raw.get("base_url") or "").strip() and (direct_key_count or env_key_count)),
+                "allow_request_api_key": allow_request_api_key,
+                "ready": bool(
+                    str(raw.get("base_url") or "").strip()
+                    and (direct_key_count or env_key_count or allow_request_api_key)
+                ),
                 "default_model": str(raw.get("default_model") or "").strip(),
                 "prompt_cache": str(raw.get("prompt_cache") or "").strip(),
                 "prompt_cache_retention": str(raw.get("prompt_cache_retention") or "").strip(),

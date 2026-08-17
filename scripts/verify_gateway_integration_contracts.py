@@ -110,7 +110,6 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
                 "base_url": "https://openrouter.ai/api/v1",
                 "protocol": "openai",
                 "api_key": "configured-openrouter-key",
-                "allow_request_api_key": True,
                 "models": ["anthropic/claude-opus-4.6"],
             },
             {
@@ -118,7 +117,6 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
                 "base_url": "https://linkapi.ai/v1",
                 "protocol": "anthropic",
                 "api_key": "configured-linkapi-key",
-                "allow_request_api_key": True,
                 "models": ["claude-sonnet-5"],
             },
         ]
@@ -135,6 +133,7 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
     route = service._resolve_upstream_for_payload(payload)
     assert route["upstream"]["name"] == "linkapi-claude"
     assert route["upstream"]["protocol"] == "anthropic"
+    assert route["upstream"]["allow_request_api_key"] is True
     assert route["upstream"]["api_keys"] == [
         {"value": "profile-linkapi-key", "label": "request:profile"}
     ]
@@ -157,6 +156,19 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
     )
     assert conflicting_model_route["upstream"]["name"] == "linkapi-claude"
     assert conflicting_model_route["upstream_model"] == "anthropic/claude-opus-4.6"
+
+    service.upstreams = service.upstreams[:1]
+    fallback_route = service._resolve_upstream_for_payload(
+        {
+            "model": "claude-sonnet-5",
+            OMBRE_UPSTREAM_NAME_FIELD: "linkapi-claude",
+            OMBRE_UPSTREAM_API_KEY_FIELD: "profile-linkapi-key",
+        }
+    )
+    assert fallback_route["upstream"]["name"] == "linkapi-claude"
+    assert fallback_route["upstream"]["base_url"] == "https://linkapi.ai/v1"
+    assert fallback_route["upstream"]["protocol"] == "anthropic"
+    assert [upstream["name"] for upstream in service.upstreams] == ["openrouter"]
 
 
 def verify_embedding_hot_update_rebuilds_gateway_engine() -> None:
@@ -211,6 +223,7 @@ def verify_dashboard_gateway_and_env_contracts() -> None:
     assert '_expected_gateway_hot_update_paths(gateway_payload) - confirmed_updates' in server_source
     assert '"status": "gateway_hot_reload_incomplete"' in server_source
     assert '"rolled_back": True' in server_source
+    assert 'sanitized["allow_request_api_key"] = _bool_value(' in server_source
     assert '"ok": False' in server_source
     assert "OMBRE_ENV_PATH: /app/.env" in compose_source
     assert "- ./.env:/app/.env" in compose_source
