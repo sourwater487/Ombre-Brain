@@ -127,6 +127,10 @@ GENERIC_LEXICAL_STOPWORD_KEYS = frozenset(
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
 OMBRE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+OMBRE_UPSTREAM_API_KEY_HEADER = "X-Ombre-Upstream-Api-Key"
+OMBRE_UPSTREAM_API_KEY_FIELD = "__ombre_upstream_api_key"
+OMBRE_UPSTREAM_NAME_HEADER = "X-Ombre-Upstream-Name"
+OMBRE_UPSTREAM_NAME_FIELD = "__ombre_upstream_name"
 MEMO_CONTEXT_RE = re.compile(
     r"<memo_context>\s*(.*?)\s*</memo_context>",
     re.IGNORECASE | re.DOTALL,
@@ -928,7 +932,7 @@ class GatewayService:
             "gateway": {
                 "token_configured": bool(self.gateway_token),
                 "upstream_ready": bool(self.upstreams) and all(
-                    bool(upstream.get("base_url") and upstream.get("api_keys"))
+                    self._upstream_is_ready(upstream)
                     for upstream in self.upstreams
                 ),
                 "upstream_base_url": self.upstream_base_url
@@ -992,7 +996,8 @@ class GatewayService:
                         "prompt_cache": upstream.get("prompt_cache", ""),
                         "prompt_cache_retention": upstream.get("prompt_cache_retention", ""),
                         "key_count": len(upstream.get("api_keys", [])),
-                        "ready": bool(upstream.get("base_url") and upstream.get("api_keys")),
+                        "allow_request_api_key": bool(upstream.get("allow_request_api_key")),
+                        "ready": self._upstream_is_ready(upstream),
                     }
                     for upstream in self.upstreams
                 ],
@@ -1198,7 +1203,8 @@ class GatewayService:
                     "api_key_envs": env_names,
                     "has_direct_api_key": direct_key_count > 0,
                     "key_count": len(upstream.get("api_keys", [])),
-                    "ready": bool(upstream.get("base_url") and upstream.get("api_keys")),
+                    "allow_request_api_key": bool(upstream.get("allow_request_api_key")),
+                    "ready": self._upstream_is_ready(upstream),
                     "default_model": upstream.get("default_model", ""),
                     "prompt_cache": upstream.get("prompt_cache", ""),
                     "prompt_cache_retention": upstream.get("prompt_cache_retention", ""),
@@ -1292,6 +1298,8 @@ class GatewayService:
             env_names = self._sanitize_env_names(raw.get("api_key_envs", raw.get("api_key_env", [])))
             if env_names:
                 sanitized["api_key_envs"] = env_names
+            if "allow_request_api_key" in raw:
+                sanitized["allow_request_api_key"] = bool(raw.get("allow_request_api_key"))
             for key in (
                 "default_model",
                 "prompt_cache",
@@ -1307,6 +1315,10 @@ class GatewayService:
                 sanitized["models"] = models
 
             existing = existing_by_name.get(name, {})
+            if "allow_request_api_key" not in raw and isinstance(existing, dict):
+                sanitized["allow_request_api_key"] = bool(
+                    existing.get("allow_request_api_key")
+                )
             for secret_key in ("api_key", "api_keys"):
                 if secret_key in raw:
                     sanitized[secret_key] = raw[secret_key]
@@ -1973,6 +1985,15 @@ class GatewayService:
                 status_code=400,
             )
 
+        payload.pop(OMBRE_UPSTREAM_API_KEY_FIELD, None)
+        payload.pop(OMBRE_UPSTREAM_NAME_FIELD, None)
+        upstream_api_key = str(request.headers.get(OMBRE_UPSTREAM_API_KEY_HEADER) or "").strip()
+        upstream_name = str(request.headers.get(OMBRE_UPSTREAM_NAME_HEADER) or "").strip()
+        if upstream_api_key:
+            payload[OMBRE_UPSTREAM_API_KEY_FIELD] = upstream_api_key
+        if upstream_name:
+            payload[OMBRE_UPSTREAM_NAME_FIELD] = upstream_name
+
         logger.info(
             "Gateway incoming chat | session=%s model=%s stream=%s messages=%s",
             session_id,
@@ -2037,7 +2058,7 @@ class GatewayService:
                     status_code=503,
                 )
 
-        route = self._resolve_upstream_for_model(str(forward_payload.get("model") or ""))
+        route = self._resolve_upstream_for_payload(forward_payload)
         if self._upstream_uses_anthropic_protocol(route["upstream"]):
             upstream_response = await self._forward_anthropic_upstream(forward_payload, route)
             if 200 <= upstream_response.status_code < 300:
@@ -2138,6 +2159,13 @@ class GatewayService:
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
 
+        upstream_api_key = str(request.headers.get(OMBRE_UPSTREAM_API_KEY_HEADER) or "").strip()
+        upstream_name = str(request.headers.get(OMBRE_UPSTREAM_NAME_HEADER) or "").strip()
+        if upstream_api_key:
+            openai_payload[OMBRE_UPSTREAM_API_KEY_FIELD] = upstream_api_key
+        if upstream_name:
+            openai_payload[OMBRE_UPSTREAM_NAME_FIELD] = upstream_name
+
         logger.info(
             "Gateway incoming Anthropic messages | session=%s model=%s messages=%s",
             session_id,
@@ -2184,7 +2212,7 @@ class GatewayService:
                 injection_debug,
             )
 
-        route = self._resolve_upstream_for_model(str(forward_payload.get("model") or ""))
+        route = self._resolve_upstream_for_payload(forward_payload)
         if self._upstream_uses_anthropic_protocol(route["upstream"]):
             upstream_response = await self._forward_anthropic_upstream(
                 forward_payload,
@@ -2690,7 +2718,7 @@ class GatewayService:
         model = payload.get("model") or self.upstream_default_model
         if not model:
             raise ValueError("model is required when gateway.upstream_default_model is empty")
-        self._get_upstream_for_model(model)
+        self._resolve_upstream_for_payload(payload)
         mark_step("resolve_model", stage_started_at)
 
         stage_started_at = time.perf_counter()
@@ -3401,7 +3429,7 @@ class GatewayService:
 
     def _apply_prompt_cache_hints(self, payload: dict[str, Any], session_id: str) -> None:
         model = str(payload.get("model") or "").strip()
-        route = self._resolve_upstream_for_model(model)
+        route = self._resolve_upstream_for_payload(payload)
         upstream = route["upstream"]
         strategy = str(upstream.get("prompt_cache") or "").strip().lower()
         if strategy != "openai":
@@ -3477,7 +3505,7 @@ class GatewayService:
 
     async def _forward_upstream(self, payload: dict) -> httpx.Response:
         model = str(payload.get("model") or "").strip()
-        route = self._resolve_upstream_for_model(model)
+        route = self._resolve_upstream_for_payload(payload)
         upstream = route["upstream"]
         upstream_payload = self._payload_for_upstream_model(payload, route["upstream_model"])
         url = f"{upstream['base_url']}/chat/completions"
@@ -3783,7 +3811,7 @@ class GatewayService:
             if str((injection_debug or {}).get("request_mode") or "") == "keepalive_autonomous"
             else "/v1/chat/completions"
         )
-        route = self._resolve_upstream_for_model(model)
+        route = self._resolve_upstream_for_payload(payload)
         if self._upstream_uses_anthropic_protocol(route["upstream"]):
             return await self._stream_anthropic_upstream_as_openai(
                 route,
@@ -6219,7 +6247,7 @@ class GatewayService:
         injection_debug: dict[str, Any] | None = None,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
-        route = self._resolve_upstream_for_model(model)
+        route = self._resolve_upstream_for_payload(payload)
         if self._upstream_uses_anthropic_protocol(route["upstream"]):
             return await self._stream_native_anthropic_upstream(
                 route,
@@ -21021,11 +21049,19 @@ class GatewayService:
 
     def _payload_for_upstream_model(self, payload: dict, upstream_model: str) -> dict:
         upstream_payload = deepcopy(payload)
+        upstream_payload.pop(OMBRE_UPSTREAM_API_KEY_FIELD, None)
+        upstream_payload.pop(OMBRE_UPSTREAM_NAME_FIELD, None)
         upstream_payload["model"] = upstream_model
         return upstream_payload
 
     def _upstream_uses_anthropic_protocol(self, upstream: dict[str, Any]) -> bool:
         return str(upstream.get("protocol") or "").strip().lower() == "anthropic"
+
+    def _upstream_is_ready(self, upstream: dict[str, Any]) -> bool:
+        return bool(
+            upstream.get("base_url")
+            and (upstream.get("api_keys") or upstream.get("allow_request_api_key"))
+        )
 
     def _normalize_upstream_protocol(self, raw_protocol: Any) -> str:
         protocol = str(raw_protocol or "openai").strip().lower()
@@ -21132,6 +21168,7 @@ class GatewayService:
                         "protocol": protocol,
                         "api_key": api_keys[0]["value"] if api_keys else "",
                         "api_keys": api_keys,
+                        "allow_request_api_key": bool(raw.get("allow_request_api_key")),
                         "default_model": default_model,
                         "models": models,
                         "model_map": model_map,
@@ -21157,6 +21194,9 @@ class GatewayService:
                 "api_keys": self._api_key_entries_from_config(
                     self.gateway_cfg,
                     fallback_api_key=self.upstream_api_key,
+                ),
+                "allow_request_api_key": bool(
+                    self.gateway_cfg.get("allow_request_api_key")
                 ),
                 "default_model": self.upstream_default_model,
                 "models": models,
@@ -21201,12 +21241,40 @@ class GatewayService:
                 return
         self.upstream_default_model = self.upstream_models[0] if self.upstream_models else configured_default
 
-    def _resolve_upstream_for_model(self, model: str) -> dict[str, Any]:
+    def _resolve_upstream_for_model(
+        self,
+        model: str,
+        *,
+        api_key_override: str = "",
+        upstream_name_override: str = "",
+    ) -> dict[str, Any]:
         if not self.upstreams:
             raise RuntimeError("gateway upstream is not configured")
 
         normalized_model = str(model or "").strip()
-        if len(self.upstreams) == 1:
+        normalized_upstream_name_override = str(upstream_name_override or "").strip()
+        if normalized_upstream_name_override:
+            upstream = next(
+                (
+                    candidate
+                    for candidate in self.upstreams
+                    if str(candidate.get("name") or "") == normalized_upstream_name_override
+                ),
+                None,
+            )
+            if upstream is None:
+                raise ValueError(
+                    f'gateway upstream "{normalized_upstream_name_override}" is not configured'
+                )
+            if not normalized_model:
+                upstream_models = upstream.get("models", []) or []
+                normalized_model = str(
+                    upstream.get("default_model")
+                    or (upstream_models[0] if upstream_models else "")
+                    or self.upstream_default_model
+                ).strip()
+            upstream_model = upstream.get("model_map", {}).get(normalized_model, normalized_model)
+        elif len(self.upstreams) == 1:
             upstream = self.upstreams[0]
             if not normalized_model:
                 upstream_models = upstream.get("models", []) or []
@@ -21232,6 +21300,18 @@ class GatewayService:
                 raise ValueError(f'model "{normalized_model}" is not configured in gateway.upstreams')
             upstream_model = upstream.get("model_map", {}).get(normalized_model, normalized_model)
 
+        normalized_api_key_override = str(api_key_override or "").strip()
+        if normalized_api_key_override:
+            if not upstream.get("allow_request_api_key"):
+                raise ValueError(
+                    f'gateway upstream "{upstream["name"]}" does not allow request-scoped API keys'
+                )
+            upstream = deepcopy(upstream)
+            upstream["api_key"] = normalized_api_key_override
+            upstream["api_keys"] = [
+                {"value": normalized_api_key_override, "label": "request:profile"}
+            ]
+
         if not upstream.get("base_url"):
             raise RuntimeError(f'gateway upstream "{upstream["name"]}" base_url is not configured')
         if not upstream.get("api_keys"):
@@ -21241,6 +21321,13 @@ class GatewayService:
             "public_model": normalized_model,
             "upstream_model": upstream_model,
         }
+
+    def _resolve_upstream_for_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._resolve_upstream_for_model(
+            str(payload.get("model") or ""),
+            api_key_override=str(payload.get(OMBRE_UPSTREAM_API_KEY_FIELD) or ""),
+            upstream_name_override=str(payload.get(OMBRE_UPSTREAM_NAME_FIELD) or ""),
+        )
 
     def _get_upstream_for_model(self, model: str) -> dict[str, Any]:
         return self._resolve_upstream_for_model(model)["upstream"]

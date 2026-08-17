@@ -13,7 +13,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway import GatewayService
+from gateway import (
+    GatewayService,
+    OMBRE_UPSTREAM_API_KEY_FIELD,
+    OMBRE_UPSTREAM_API_KEY_HEADER,
+    OMBRE_UPSTREAM_NAME_FIELD,
+    OMBRE_UPSTREAM_NAME_HEADER,
+)
 
 
 def make_service() -> GatewayService:
@@ -93,6 +99,64 @@ def verify_upstream_configuration_remains_authoritative() -> None:
     assert upstream["protocol"] == "anthropic"
     assert upstream["prompt_cache"] == "anthropic_explicit"
     assert upstream["prompt_cache_retention"] == "1h"
+
+
+def verify_authenticated_profile_key_override_is_request_scoped() -> None:
+    service = make_service()
+    service.gateway_cfg = {
+        "upstreams": [
+            {
+                "name": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "protocol": "openai",
+                "api_key": "configured-openrouter-key",
+                "allow_request_api_key": True,
+                "models": ["anthropic/claude-opus-4.6"],
+            },
+            {
+                "name": "linkapi-claude",
+                "base_url": "https://linkapi.ai/v1",
+                "protocol": "anthropic",
+                "api_key": "configured-linkapi-key",
+                "allow_request_api_key": True,
+                "models": ["claude-sonnet-5"],
+            },
+        ]
+    }
+    service.upstreams = service._load_upstreams()
+    service.upstream_default_model = "anthropic/claude-opus-4.6"
+
+    payload = {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "hello"}],
+        OMBRE_UPSTREAM_API_KEY_FIELD: "profile-linkapi-key",
+        OMBRE_UPSTREAM_NAME_FIELD: "linkapi-claude",
+    }
+    route = service._resolve_upstream_for_payload(payload)
+    assert route["upstream"]["name"] == "linkapi-claude"
+    assert route["upstream"]["protocol"] == "anthropic"
+    assert route["upstream"]["api_keys"] == [
+        {"value": "profile-linkapi-key", "label": "request:profile"}
+    ]
+    assert service.upstreams[1]["api_key"] == "configured-linkapi-key"
+
+    upstream_payload = service._payload_for_upstream_model(payload, route["upstream_model"])
+    assert OMBRE_UPSTREAM_API_KEY_FIELD not in upstream_payload
+    assert OMBRE_UPSTREAM_NAME_FIELD not in upstream_payload
+    assert upstream_payload["model"] == "claude-sonnet-5"
+    gateway_source = (ROOT / "gateway.py").read_text(encoding="utf-8")
+    assert OMBRE_UPSTREAM_API_KEY_HEADER in gateway_source
+    assert OMBRE_UPSTREAM_NAME_HEADER in gateway_source
+
+    conflicting_model_route = service._resolve_upstream_for_payload(
+        {
+            "model": "anthropic/claude-opus-4.6",
+            OMBRE_UPSTREAM_NAME_FIELD: "linkapi-claude",
+            OMBRE_UPSTREAM_API_KEY_FIELD: "profile-linkapi-key",
+        }
+    )
+    assert conflicting_model_route["upstream"]["name"] == "linkapi-claude"
+    assert conflicting_model_route["upstream_model"] == "anthropic/claude-opus-4.6"
 
 
 def verify_embedding_hot_update_rebuilds_gateway_engine() -> None:
@@ -197,6 +261,7 @@ def main() -> None:
     verify_request_ids_are_strict_and_session_scoped()
     verify_live_context_requires_a_valid_leading_envelope()
     verify_upstream_configuration_remains_authoritative()
+    verify_authenticated_profile_key_override_is_request_scoped()
     verify_embedding_hot_update_rebuilds_gateway_engine()
     verify_dashboard_gateway_and_env_contracts()
     asyncio.run(verify_debug_endpoint_filters_exact_request())

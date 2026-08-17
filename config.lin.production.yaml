@@ -145,6 +145,46 @@ gateway:
   upstream_default_model: "anthropic/claude-opus-4.6"
   upstream_models:
     - "anthropic/claude-opus-4.6"
+  # LinChe always talks to this Gateway. The public model id selects the real
+  # upstream. Authenticated LinChe requests also provide the selected upstream
+  # name and a request-scoped API key; the env keys below remain safe fallbacks.
+  # This keeps Ombre injection in-path when the active API profile changes.
+  upstreams:
+    - name: "openrouter"
+      protocol: "openai"
+      base_url: "https://openrouter.ai/api/v1"
+      api_key_env: "OMBRE_GATEWAY_UPSTREAM_API_KEY"
+      allow_request_api_key: true
+      default_model: "anthropic/claude-opus-4.6"
+      prompt_cache: ""
+      models:
+        - "anthropic/claude-opus-4.6"
+    - name: "linkapi-claude"
+      protocol: "anthropic"
+      base_url: "https://linkapi.ai/v1"
+      api_key_env: "OMBRE_GATEWAY_LINKAPI_API_KEY"
+      allow_request_api_key: true
+      default_model: "claude-sonnet-5"
+      anthropic_version: "2023-06-01"
+      prompt_cache: ""
+      models:
+        - "claude-sonnet-5"
+        - "claude-fable-5"
+    - name: "linkapi-chat"
+      protocol: "openai"
+      base_url: "https://linkapi.ai/v1"
+      api_key_env: "OMBRE_GATEWAY_LINKAPI_API_KEY"
+      allow_request_api_key: true
+      default_model: "deepseek-v4-flash"
+      prompt_cache: ""
+      models:
+        - "deepseek-v4-flash"
+        - "deepseek-v4-pro"
+        - "gpt-5.6-terra"
+        - "grok-4.5"
+        - "glm-5.2"
+        - "kimi-k3"
+  anthropic_max_tokens: 8192
   # Optional prompt cache hints / 可选提示缓存参数
   # openai: send prompt_cache_key using X-Ombre-Session-Id; leave empty for other providers.
   # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；其他供应商保持空值。
@@ -154,7 +194,7 @@ gateway:
   # When upstreams is set, the gateway aggregates all listed models and routes
   # each request by model name to the matching upstream.
   # 配置 upstreams 后，网关会聚合所有模型，并按模型名路由到对应上游。
-  # upstreams:
+  # More upstream examples:
   #   - name: "deepseek"
   #     base_url: "https://api.deepseek.com/v1"
   #     api_key_env: "OMBRE_GATEWAY_DEEPSEEK_API_KEY"
