@@ -348,6 +348,57 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
         f"messages[{len(converted_tool_continuation['messages']) - 1}].content[1]"
     ]
 
+    replayed_tool_continuation = service._inject_context_messages(
+        [
+            {"role": "system", "content": "stable system"},
+            {
+                "role": "user",
+                "content": (
+                    "<ombre_live_context>\nfirst request recall\n</ombre_live_context>\n\n"
+                    "<lin_message>inspect it</lin_message>"
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    {
+                        "id": "call-replayed-tail",
+                        "type": "function",
+                        "function": {"name": "journal_read", "arguments": '{"id":2}'},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-replayed-tail",
+                "content": "tool result",
+            },
+        ],
+        "stable recalled context",
+        "dynamic recalled context",
+    )
+    assert len(replayed_tool_continuation) == 5
+    assert replayed_tool_continuation[1]["role"] == "system"
+    assert replayed_tool_continuation[2]["content"].count("<ombre_live_context>") == 1
+    converted_replayed_tool_continuation = service._anthropic_payload_for_upstream(
+        {
+            "model": "claude-opus-4-6",
+            "messages": replayed_tool_continuation,
+            "tools": payload["tools"],
+            "tool_choice": "auto",
+        },
+        route,
+    )
+    assert service._anthropic_live_context_locations(converted_replayed_tool_continuation) == [
+        "messages[0]"
+    ]
+    assert all(
+        "<ombre_live_context>" not in str(block.get("text") or "")
+        for block in converted_replayed_tool_continuation["messages"][-1]["content"]
+        if isinstance(block, dict)
+    )
+
     mixed_ttl_payload = {
         "tools": [
             {

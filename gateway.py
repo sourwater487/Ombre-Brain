@@ -5975,6 +5975,9 @@ class GatewayService:
 
         system_parts: list[str] = []
         deferred_live_context_parts: list[str] = []
+        latest_user_has_live_context = self._latest_user_message_has_live_context(
+            payload.get("messages", [])
+        )
         for message in payload.get("messages", []):
             if not isinstance(message, dict):
                 continue
@@ -5989,7 +5992,13 @@ class GatewayService:
                         # processes system before all messages; keep this
                         # request-scoped context in the final user/tool-result
                         # tail instead of invalidating the stable prefix.
-                        deferred_live_context_parts.append(system_text)
+                        # Lin replays the initial call's captured context in
+                        # the latest user message. In that case this synthetic
+                        # tool-continuation block is a duplicate. Drop it only
+                        # in the native Anthropic adapter so OpenRouter keeps
+                        # its existing gateway request shape.
+                        if not latest_user_has_live_context:
+                            deferred_live_context_parts.append(system_text)
                     else:
                         system_parts.append(system_text)
                 continue
@@ -20318,6 +20327,15 @@ class GatewayService:
             insert_at = self._after_leading_system_index(new_messages)
             new_messages.insert(insert_at, context_message)
         return new_messages
+
+    def _latest_user_message_has_live_context(self, messages: list[dict]) -> bool:
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            return "<ombre_live_context>" in self._coerce_message_text(
+                message.get("content")
+            ).lower()
+        return False
 
     def _current_turn_user_index(self, messages: list[dict]) -> int | None:
         for index in range(len(messages) - 1, -1, -1):
