@@ -1100,6 +1100,13 @@ def _create_dashboard_session() -> str:
 
 
 def _dashboard_authenticated(request) -> bool:
+    # The private Linche app authenticates server-to-server. Never trust the marker alone.
+    if request.headers.get("x-linche-console") == "1":
+        expected = os.environ.get("OMBRE_GATEWAY_TOKEN") or str(config.get("gateway", {}).get("token") or "")
+        auth = request.headers.get("authorization", "")
+        if expected and auth.lower().startswith("bearer "):
+            if hmac.compare_digest(auth.split(" ", 1)[1].strip(), expected):
+                return True
     token = request.cookies.get("ombre_session")
     if not token:
         return False
