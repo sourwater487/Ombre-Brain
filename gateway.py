@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
 
 import httpx
 import uvicorn
@@ -5825,14 +5826,18 @@ class GatewayService:
         except (TypeError, ValueError):
             return 0
 
-    def _openai_message_to_anthropic_content(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+    def _openai_message_to_anthropic_content(self, message: dict[str, Any], *, preserve_cache: bool = False) -> list[dict[str, Any]]:
         # Native Claude tool continuations must replay signed thinking blocks
         # byte-for-byte. Lin-Che transports their streamed fragments through
         # reasoning_details; rebuild the complete blocks before visible text
         # and tool_use blocks.
         content_blocks = self._anthropic_thinking_blocks_from_openai_message(message)
         text = self._coerce_message_text(message.get("content"))
-        if text:
+        if preserve_cache:
+            converted = self._openai_content_to_anthropic_blocks(message.get("content"))
+            content_blocks.extend(converted if isinstance(converted, list)
+                                  else [{"type": "text", "text": converted}] if converted else [])
+        elif text:
             content_blocks.append({"type": "text", "text": text})
 
         tool_calls = message.get("tool_calls")
@@ -5973,6 +5978,8 @@ class GatewayService:
             "max_tokens": max_tokens,
         }
 
+        preserve_client_cache = upstream.get("prompt_cache") == "client_breakpoints"
+        system_blocks: list[dict[str, Any]] = []
         system_parts: list[str] = []
         deferred_live_context_parts: list[str] = []
         latest_user_has_live_context = self._latest_user_message_has_live_context(
@@ -6001,6 +6008,10 @@ class GatewayService:
                             deferred_live_context_parts.append(system_text)
                     else:
                         system_parts.append(system_text)
+                        if preserve_client_cache:
+                            converted_system = self._openai_content_to_anthropic_blocks(message.get("content"))
+                            system_blocks.extend(converted_system if isinstance(converted_system, list)
+                                                 else [{"type": "text", "text": converted_system}])
                 continue
             if role == "tool":
                 tool_use_id = str(message.get("tool_call_id") or message.get("tool_use_id") or "").strip()
@@ -6021,7 +6032,7 @@ class GatewayService:
             if role not in {"user", "assistant"}:
                 continue
             content = (
-                self._openai_message_to_anthropic_content(message)
+                self._openai_message_to_anthropic_content(message, preserve_cache=preserve_client_cache)
                 if role == "assistant"
                 else self._openai_content_to_anthropic_blocks(message.get("content"))
             )
@@ -6034,9 +6045,11 @@ class GatewayService:
             )
             if not moved_to_tail:
                 system_parts.extend(deferred_live_context_parts)
+                if preserve_client_cache:
+                    system_blocks.extend({"type": "text", "text": text} for text in deferred_live_context_parts)
 
         if system_parts:
-            upstream_payload["system"] = "\n\n".join(system_parts)
+            upstream_payload["system"] = system_blocks if preserve_client_cache else "\n\n".join(system_parts)
 
         for field in ("temperature", "top_p", "stream"):
             if field in payload:
@@ -6088,7 +6101,16 @@ class GatewayService:
             max_tokens,
         )
 
-        self._apply_anthropic_prompt_cache(upstream_payload, upstream)
+        if preserve_client_cache:
+            # The website owns the stable-prefix plan. Do not replace it with
+            # the gateway's LinkAPI tools/system/rolling-message plan.
+            plan = self._anthropic_cache_control_plan(upstream_payload)
+            if len(plan) > 4:
+                raise ValueError("Bedrock supports at most four explicit cache breakpoints")
+            logger.info("Gateway Bedrock client cache plan | breakpoints=%s", plan)
+        else:
+            self._strip_anthropic_cache_controls(upstream_payload)
+            self._apply_anthropic_prompt_cache(upstream_payload, upstream)
         return upstream_payload
 
     @staticmethod
@@ -6420,7 +6442,10 @@ class GatewayService:
                 continue
             block_type = item.get("type")
             if block_type == "text":
-                blocks.append({"type": "text", "text": str(item.get("text") or "")})
+                block = {"type": "text", "text": str(item.get("text") or "")}
+                if isinstance(item.get("cache_control"), dict):
+                    block["cache_control"] = deepcopy(item["cache_control"])
+                blocks.append(block)
                 continue
             if block_type == "image_url":
                 image_url = item.get("image_url")
@@ -6465,6 +6490,8 @@ class GatewayService:
             description = str(function.get("description") or "").strip()
             if description:
                 converted_tool["description"] = description
+            if isinstance(tool.get("cache_control"), dict):
+                converted_tool["cache_control"] = deepcopy(tool["cache_control"])
             converted.append(converted_tool)
         return converted
 
@@ -21753,6 +21780,23 @@ class GatewayService:
             },
         }
         definition = definitions.get(str(name or "").strip())
+        if name.startswith("bedrock:"):
+            url = urlsplit(name[len("bedrock:"):])
+            trusted_host = re.fullmatch(
+                r"bedrock-runtime(?:-fips)?\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?|bedrock-mantle\.[a-z0-9-]+\.api\.aws",
+                url.hostname or "",
+            )
+            if (not trusted_host or url.scheme != "https" or url.username or url.password
+                    or url.query or url.fragment or url.port not in (None, 443)
+                    or url.path != "/anthropic/v1"):
+                raise ValueError("Invalid Bedrock Messages upstream URL")
+            if not str(model or "").strip():
+                raise ValueError("Bedrock model ID is required")
+            definition = {
+                "base_url": f"https://{url.hostname}/anthropic/v1",
+                "protocol": "anthropic",
+                "anthropic_version": "2023-06-01",
+            }
         if definition is None:
             return None
         normalized_model = str(model or "").strip()
@@ -21766,7 +21810,7 @@ class GatewayService:
             "default_model": normalized_model,
             "models": [normalized_model] if normalized_model else [],
             "model_map": {normalized_model: normalized_model} if normalized_model else {},
-            "prompt_cache": "anthropic_explicit" if name == "linkapi-claude" else "",
+            "prompt_cache": "client_breakpoints" if name.startswith("bedrock:") else "anthropic_explicit" if name == "linkapi-claude" else "",
             "prompt_cache_retention": "5m" if name == "linkapi-claude" else "",
             "anthropic_version": definition.get("anthropic_version", "2023-06-01"),
             "anthropic_beta": "",
@@ -21785,14 +21829,16 @@ class GatewayService:
         normalized_model = str(model or "").strip()
         normalized_upstream_name_override = str(upstream_name_override or "").strip()
         if normalized_upstream_name_override:
-            upstream = next(
-                (
-                    candidate
-                    for candidate in self.upstreams
-                    if str(candidate.get("name") or "") == normalized_upstream_name_override
-                ),
-                None,
-            )
+            if normalized_upstream_name_override.startswith("bedrock:"):
+                if not str(api_key_override or "").strip():
+                    raise ValueError("Bedrock requires the request profile API key")
+                upstream = self._trusted_request_upstream(normalized_upstream_name_override, normalized_model)
+            else:
+                upstream = next(
+                    (candidate for candidate in self.upstreams
+                     if str(candidate.get("name") or "") == normalized_upstream_name_override),
+                    None,
+                )
             if upstream is None:
                 upstream = self._trusted_request_upstream(
                     normalized_upstream_name_override,
