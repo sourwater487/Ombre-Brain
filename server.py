@@ -13632,6 +13632,10 @@ async def api_import_review(request):
 
 
 # --- Entry point / 启动入口 ---
+from keepsakes import Keepsakes, register_keepsakes
+register_keepsakes(mcp, Keepsakes(config["buckets_dir"], bucket_mgr,
+    _delete_bucket_and_indexes, _delete_bucket_indexes, _queue_embedding_refresh, reminders=reminder_store), _require_dashboard_auth)
+
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")
