@@ -8414,16 +8414,13 @@ async def hold(
     tags: str = "",
     importance: int = 5,
     pinned: bool = False,
-    feel: bool = False,
-    whisper: bool = False,
-    source_bucket: str = "",
     valence: float = -1,
     arousal: float = -1,
     title: str = "",
     date: str = "",
     domain: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -8432,7 +8429,7 @@ async def hold(
     if not content or not content.strip():
         return "内容为空，无法存储。"
 
-    contract_error = _memory_write_contract_error(content, feel_only=bool(feel or whisper))
+    contract_error = _memory_write_contract_error(content)
     if contract_error:
         return f"写入被拒绝：{contract_error}"
 
@@ -8442,61 +8439,6 @@ async def hold(
     event_date = str(date or "").strip()
     requested_valence = valence if 0 <= valence <= 1 else None
     requested_arousal = arousal if 0 <= arousal <= 1 else None
-
-    async def create_whisper_bucket() -> str:
-        whisper_valence = requested_valence if requested_valence is not None else 0.5
-        whisper_arousal = requested_arousal if requested_arousal is not None else 0.3
-        whisper_tags = list(dict.fromkeys(extra_tags + ["whisper"]))
-        bucket_id = await bucket_mgr.create(
-            content=content,
-            tags=whisper_tags,
-            importance=5,
-            domain=requested_domain,
-            valence=whisper_valence,
-            arousal=whisper_arousal,
-            name=None,
-            bucket_type="feel",
-            date=event_date or None,
-        )
-        _queue_embedding_refresh(bucket_id)
-        return f"🫧whisper→{bucket_id}"
-
-    if whisper:
-        if source_bucket and source_bucket.strip():
-            return "whisper 不需要 source_bucket；有源记忆的感受请用 comment_bucket。"
-        return await create_whisper_bucket()
-
-    # --- Feel mode: attach to source bucket as a ring comment when possible ---
-        # --- Feel 模式：有源记忆时挂成年轮 ---
-    if feel:
-        # Feel valence/arousal = model's own perspective
-        feel_valence = requested_valence if requested_valence is not None else 0.5
-        feel_arousal = requested_arousal if requested_arousal is not None else 0.3
-        source_id = (source_bucket or "").strip()
-        if source_id:
-            if not MEMORY_ID_RE.fullmatch(source_id):
-                return "source_bucket 无效。"
-            source = await bucket_mgr.get(source_id)
-            if not source:
-                return f"源记忆不存在: {source_id}"
-            entry = await bucket_mgr.add_comment(
-                source_id,
-                content,
-                author=_ai_author_name(),
-                kind="feel",
-                valence=feel_valence,
-                arousal=feel_arousal,
-                source="hold(feel=True)",
-                touch=True,
-            )
-            if not entry:
-                return "年轮写入失败。"
-            _queue_embedding_refresh(source_id)
-            return f"年轮→{source_id}#{entry['id']}"
-
-        # No source bucket: keep a standalone feel for compatibility.
-        # 没有源记忆时保留独立 whisper，兼容旧用法。
-        return await create_whisper_bucket()
 
     content = _normalize_memory_sections_for_write(content)
 
