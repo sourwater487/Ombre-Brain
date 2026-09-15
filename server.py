@@ -7150,7 +7150,6 @@ def _reminder_public_payload(item: dict | None) -> dict:
 
 
 # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
-@mcp.tool()
 async def reminder_create(
     title: str,
     content: str,

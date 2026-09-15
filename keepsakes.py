@@ -8,6 +8,38 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from reminder_store import REMINDER_REPEAT_RULES
+
+
+def note_reminder_args(card, reminders):
+    """Validate a complete note before any card in its batch is persisted."""
+    defaults = dict(next_due_at="", start_at="", end_at="", repeat_rule="every_n_rounds",
+                    interval_rounds=6, cooldown_minutes=0, daily_limit=-1,
+                    max_injections=0, channel="global", session_id="")
+    unknown = set(card) - set(defaults) - {"type", "title", "content", "valence", "arousal"}
+    if unknown:
+        raise ValueError("Unsupported note fields: " + ", ".join(sorted(unknown)))
+    args = {key: card.get(key, default) for key, default in defaults.items()}
+    for key in ("next_due_at", "start_at", "end_at", "repeat_rule", "channel", "session_id"):
+        if not isinstance(args[key], str):
+            raise ValueError(key + " must be a string")
+    for key in ("interval_rounds", "cooldown_minutes", "daily_limit", "max_injections"):
+        if type(args[key]) is not int or args[key] < (-1 if key == "daily_limit" else 0):
+            raise ValueError(key + " must be a nonnegative integer (daily_limit also accepts -1)")
+    if args["repeat_rule"] not in REMINDER_REPEAT_RULES:
+        raise ValueError("Invalid repeat_rule")
+    for key in ("next_due_at", "start_at", "end_at"):
+        reminders._validate_optional_time(args[key])
+    if args["start_at"] and args["end_at"]:
+        now = datetime.now(timezone.utc)
+        start = reminders._parse_time(args["start_at"], now=now, end_of_day=False)
+        end = reminders._parse_time(args["end_at"], now=now, end_of_day=True)
+        if start > end:
+            raise ValueError("开始时间不能晚于到期时间")
+    args["daily_limit"] = None if args["daily_limit"] == -1 else args["daily_limit"]
+    args["title"] = str(card.get("title") or "").strip() or card["content"].strip()[:60]
+    args["content"] = card["content"].strip()
+    return args
 
 
 class Keepsakes:
@@ -98,19 +130,10 @@ class Keepsakes:
             if not isinstance(card.get("content"), str) or not card["content"].strip() or len(card["content"]) > 20000:
                 raise ValueError("卡片正文为空或过长")
             title = card.get("title", "")
-            if not isinstance(title, str) or len(title) > 160 or (card["type"] == "note" and title):
-                raise ValueError("便签不写标题；碎碎念标题最多160字")
+            if not isinstance(title, str) or len(title) > 160 or (card["type"] == "note" and title and not self.reminders):
+                raise ValueError("卡片标题最多160字")
             if card["type"] == "note" and self.reminders:
-                for field in ("start_at", "end_at"):
-                    value = card.get(field, "")
-                    if not isinstance(value, str):
-                        raise ValueError(field + " 必须为日期字符串")
-                    self.reminders._validate_optional_time(value)
-                if card.get("start_at") and card.get("end_at"):
-                    start = self.reminders._parse_time(card["start_at"], now=datetime.now(timezone.utc), end_of_day=False)
-                    end = self.reminders._parse_time(card["end_at"], now=datetime.now(timezone.utc), end_of_day=True)
-                    if start > end:
-                        raise ValueError("开始时间不能晚于到期时间")
+                note_reminder_args(card, self.reminders)
                 continue
             for field in ("valence", "arousal"):
                 value = card.get(field)
@@ -145,9 +168,8 @@ class Keepsakes:
                             row["state"] = "deleted"
                             self.save(rows)
                             continue
-                        self.reminders.create(reminder_id=key, title=card["content"].strip()[:60],
-                            content=card["content"].strip(), source="keepsake_note", channel="global",
-                            start_at=card.get("start_at", ""), end_at=card.get("end_at", ""))
+                        self.reminders.create(reminder_id=key, source="keepsake_note",
+                            **note_reminder_args(card, self.reminders))
                     if not await self.public(row):
                         raise RuntimeError("无法回查已写入的便签")
                     row["state"] = "ready"
