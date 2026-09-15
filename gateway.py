@@ -2373,6 +2373,73 @@ class GatewayService:
         return JSONResponse({"items": items[: max(1, min(100, limit))]})
 
     # LOCAL-ADAPTATION: [新增/改动] 相对 upstream/main@1dac438，含本地新增、采用本地适配版本。
+    async def handle_external_context(self, request: Request) -> JSONResponse:
+        """Use the full injection pipeline with a client-owned model transport."""
+        auth = self._authorize(request.headers.get("Authorization", ""))
+        if auth is not None:
+            return auth
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        session_id = str(request.headers.get("X-Ombre-Session-Id") or "").strip()
+        if not isinstance(body, dict) or not session_id:
+            return JSONResponse({"error": "session and object body required"}, status_code=400)
+        now = time.monotonic()
+        pending = getattr(self, "_external_context_turns", {})
+        self._external_context_turns = pending
+        for key in list(pending):
+            if pending[key]["expires"] < now:
+                pending.pop(key)
+        if request.url.path.endswith("/complete"):
+            ticket = str(body.get("ticket") or "")
+            turn = pending.get(ticket)
+            if not turn or turn["session_id"] != session_id:
+                return JSONResponse({"error": "unknown or expired context ticket"}, status_code=409)
+            assistant = body.get("assistant_message")
+            if not isinstance(assistant, dict) or not isinstance(assistant.get("content"), str):
+                return JSONResponse({"error": "assistant text required"}, status_code=400)
+            # Claim before awaiting: duplicate completion must never consume twice.
+            pending.pop(ticket)
+            await self._record_successful_round(
+                session_id, turn["recalled_ids"], turn["debug"],
+                user_message=turn["query"], assistant_message={"role": "assistant", "content": assistant["content"]},
+                model=turn["model"], client="linche-cc", route="/api/context/complete",
+            )
+            if turn["debug"].get("request_mode") != "keepalive_autonomous" and assistant["content"].strip():
+                await self._update_persona_after_assistant_message(
+                    session_id, turn["query"], {"role": "assistant", "content": assistant["content"]},
+                    turn["recalled_ids"] or [],
+                )
+            return JSONResponse({"ok": True})
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages or any(not isinstance(m, dict) for m in messages):
+            return JSONResponse({"error": "messages required"}, status_code=400)
+        if len(pending) >= 256:
+            return JSONResponse({"error": "too many pending contexts"}, status_code=503)
+        mode = "keepalive_autonomous" if body.get("request_mode") == "keepalive_autonomous" else "chat"
+        payload = {"model": str(body.get("model") or "claude-code"), "messages": messages}
+        payload, favorite = self._strip_favorite_memory_marker_from_payload(payload)
+        try:
+            prepared, recalled_ids, debug = await self.prepare_payload(
+                payload, session_id, request_mode=mode, include_favorite_memory=favorite,
+                include_debug=True, debug_detail="compact", external_transport=True,
+            )
+        except (ValueError, RuntimeError):
+            return JSONResponse({"error": "context preparation failed"}, status_code=503)
+        debug["request_mode"] = mode
+        debug["request_id"] = self._normalize_ombre_request_id(request.headers.get("X-Ombre-Request-Id"))
+        ticket = secrets.token_urlsafe(32)
+        pending[ticket] = {
+            "session_id": session_id, "expires": time.monotonic() + 3600,
+            "recalled_ids": recalled_ids, "debug": debug, "model": payload["model"],
+            "query": (self._extract_keepalive_current_turn_query(messages) if mode == "keepalive_autonomous"
+                      else self._extract_last_user_query(messages)),
+        }
+        return JSONResponse({"ticket": ticket, "messages": prepared["messages"],
+                             "stable_context": debug.get("stable_context", ""),
+                             "dynamic_context": debug.get("dynamic_context", "")})
+
     async def handle_hook_recall(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
@@ -2707,6 +2774,7 @@ class GatewayService:
         include_favorite_memory: bool = False,
         include_debug: bool = False,
         debug_detail: str = "full",
+        external_transport: bool = False,
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
         prepare_steps_ms: dict[str, int] = {}
@@ -2723,7 +2791,8 @@ class GatewayService:
         model = payload.get("model") or self.upstream_default_model
         if not model:
             raise ValueError("model is required when gateway.upstream_default_model is empty")
-        self._resolve_upstream_for_payload(payload)
+        if not external_transport:
+            self._resolve_upstream_for_payload(payload)
         mark_step("resolve_model", stage_started_at)
 
         stage_started_at = time.perf_counter()
@@ -3316,7 +3385,8 @@ class GatewayService:
             stable_context,
             dynamic_context,
         )
-        self._apply_prompt_cache_hints(forward_payload, session_id)
+        if not external_transport:
+            self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
         mark_step("finalize_forward_payload", stage_started_at)
 
@@ -21971,6 +22041,9 @@ def create_gateway_app(
     async def injection_debug(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_injection_debug(request)
 
+    async def external_context(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_external_context(request)
+
     async def hook_recall(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_hook_recall(request)
 
@@ -21986,6 +22059,8 @@ def create_gateway_app(
             Route("/health", health, methods=["GET"]),
             Route("/api/config", config_route, methods=["GET", "POST"]),
             Route("/api/debug/injections", injection_debug, methods=["GET"]),
+            Route("/api/context/prepare", external_context, methods=["POST"]),
+            Route("/api/context/complete", external_context, methods=["POST"]),
             Route("/api/hook/recall", hook_recall, methods=["POST"]),
             Route("/api/debug/recall-eval", recall_eval_debug, methods=["GET"]),
             Route("/api/debug/upstream-usage", upstream_usage_debug, methods=["GET"]),
