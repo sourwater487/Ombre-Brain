@@ -103,6 +103,14 @@ class EmbeddingEngine:
             logger.warning(f"Embedding generation failed for {bucket_id}: {e}")
             return False
 
+    @property
+    def dimensions(self) -> int | None:
+        # Preserve the existing 1024-dimensional Qwen3-8B vector space across providers.
+        # Resolve from the live model so dashboard hot updates use the same policy.
+        if self.model in ("Qwen3-Embedding-8B", "Qwen/Qwen3-Embedding-8B"):
+            return 1024
+        return None
+
     async def _generate_embedding(self, text: str, *, kind: str = "document") -> list[float]:
         """Call API to generate embedding vector."""
         # Truncate to avoid token limits
@@ -112,9 +120,17 @@ class EmbeddingEngine:
             response = await self.client.embeddings.create(
                 model=self.model,
                 input=truncated,
+                # Qwen3-8B providers may take longer than the client's 30s default.
+                **({"dimensions": self.dimensions, "timeout": 180.0}
+                   if self.dimensions is not None else {}),
             )
             if response.data and len(response.data) > 0:
-                return response.data[0].embedding
+                embedding = response.data[0].embedding
+                if self.dimensions is not None and len(embedding) != self.dimensions:
+                    logger.warning("Embedding dimension mismatch: expected %s, received %s",
+                                   self.dimensions, len(embedding))
+                    return []
+                return embedding
             return []
         except Exception as e:
             logger.warning(f"Embedding API call failed: {e}")
@@ -246,7 +262,9 @@ class EmbeddingEngine:
             stored_dimension = int(dimension)
         except (TypeError, ValueError):
             return False
-        return stored_dimension == len(embedding)
+        return stored_dimension == len(embedding) and (
+            self.dimensions is None or stored_dimension == self.dimensions
+        )
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_type: str) -> None:
