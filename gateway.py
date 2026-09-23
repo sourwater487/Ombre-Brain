@@ -3582,7 +3582,7 @@ class GatewayService:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_payload(payload)
         upstream = route["upstream"]
-        upstream_payload = self._payload_for_upstream_model(payload, route["upstream_model"])
+        upstream_payload = self._openai_payload_for_upstream(payload, route)
         url = f"{upstream['base_url']}/chat/completions"
         key_entries = self._available_upstream_api_keys(upstream)
         last_error: Exception | None = None
@@ -3721,7 +3721,7 @@ class GatewayService:
     ) -> httpx.Response:
         upstream = route["upstream"]
         model = route["public_model"]
-        upstream_payload = self._payload_for_upstream_model(payload, route["upstream_model"])
+        upstream_payload = self._openai_payload_for_upstream(payload, route)
         url = f"{upstream['base_url']}/chat/completions"
         key_entries = self._available_upstream_api_keys(upstream)
         last_error: Exception | None = None
@@ -21634,6 +21634,35 @@ class GatewayService:
         upstream_payload["model"] = upstream_model
         return upstream_payload
 
+    def _openai_payload_for_upstream(self, payload: dict, route: dict[str, Any]) -> dict:
+        upstream = route["upstream"]
+        result = self._payload_for_upstream_model(payload, route["upstream_model"])
+        hostname = (urlsplit(upstream.get("base_url", "")).hostname or "").lower()
+        if hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai"):
+            return result
+        # Generic relays accept the Chat Completions schema, not cache hints
+        # carried over from another provider or inserted during context assembly.
+        for key in ("cache_control", "prompt_cache_key", "prompt_cache_retention",
+                    "provider", "reasoning", "verbosity"):
+            result.pop(key, None)
+        for message in result.get("messages") or []:
+            message.pop("cache_control", None)
+            message.pop("reasoning_details", None)
+            message.pop("thinking_blocks", None)
+            if message.get("role") == "tool":
+                message.pop("name", None)
+            if isinstance(message.get("content"), list):
+                for block in message["content"]:
+                    if isinstance(block, dict):
+                        block.pop("cache_control", None)
+        for tool in result.get("tools") or []:
+            tool.pop("cache_control", None)
+            # Do not recurse into function parameters: cache_control can be
+            # a legitimate property name in a user-defined tool schema.
+            if isinstance(tool.get("function"), dict):
+                tool["function"].pop("cache_control", None)
+        return result
+
     def _upstream_uses_anthropic_protocol(self, upstream: dict[str, Any]) -> bool:
         return str(upstream.get("protocol") or "").strip().lower() == "anthropic"
 
@@ -21867,6 +21896,17 @@ class GatewayService:
                 "protocol": "anthropic",
                 "anthropic_version": "2023-06-01",
             }
+        if name.startswith("openai:"):
+            url = urlsplit(name[len("openai:"):])
+            if (url.scheme not in {"https", "http"} or not url.hostname
+                    or url.username or url.password or url.query or url.fragment):
+                raise ValueError("Invalid OpenAI-compatible upstream URL")
+            if not str(model or "").strip():
+                raise ValueError("OpenAI-compatible model ID is required")
+            base_url = url.geturl().rstrip("/")
+            if base_url.endswith("/chat/completions"):
+                base_url = base_url[:-len("/chat/completions")]
+            definition = {"base_url": base_url, "protocol": "openai"}
         if definition is None:
             return None
         normalized_model = str(model or "").strip()
@@ -21899,9 +21939,9 @@ class GatewayService:
         normalized_model = str(model or "").strip()
         normalized_upstream_name_override = str(upstream_name_override or "").strip()
         if normalized_upstream_name_override:
-            if normalized_upstream_name_override.startswith("bedrock:"):
+            if normalized_upstream_name_override.startswith(("bedrock:", "openai:")):
                 if not str(api_key_override or "").strip():
-                    raise ValueError("Bedrock requires the request profile API key")
+                    raise ValueError("Request-selected upstream requires the request profile API key")
                 upstream = self._trusted_request_upstream(normalized_upstream_name_override, normalized_model)
             else:
                 upstream = next(
