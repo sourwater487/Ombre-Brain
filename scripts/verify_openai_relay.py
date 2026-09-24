@@ -14,7 +14,7 @@ async def verify():
     service.upstream_key_cooldowns = {}
     service.upstream_default_model = 'claude-test'
     body = {
-        'model': 'claude-test', 'prompt_cache_key': 'session', 'prompt_cache_retention': '1h',
+        'model': 'claude-test', 'prompt_cache_key': 'session', 'prompt_cache_retention': '1h', 'prompt_cache_ttl': '5m',
         'provider': {'only': ['anthropic']}, 'reasoning': {'enabled': True},
         OMBRE_UPSTREAM_NAME_FIELD: 'openai:https://relay.example/v1/chat/completions',
         OMBRE_UPSTREAM_API_KEY_FIELD: 'profile-test-key',
@@ -30,7 +30,7 @@ async def verify():
         actual = json.loads(request.content)
         assert str(request.url) == 'https://relay.example/v1/chat/completions'
         assert request.headers['Authorization'] == 'Bearer profile-test-key'
-        for field in ('prompt_cache_key', 'prompt_cache_retention', 'provider', 'reasoning', OMBRE_UPSTREAM_NAME_FIELD, OMBRE_UPSTREAM_API_KEY_FIELD):
+        for field in ('prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_ttl', 'provider', 'reasoning', OMBRE_UPSTREAM_NAME_FIELD, OMBRE_UPSTREAM_API_KEY_FIELD):
             assert field not in actual
         assert 'cache_control' not in actual['messages'][0]['content'][0]
         assert 'cache_control' not in actual['tools'][0]

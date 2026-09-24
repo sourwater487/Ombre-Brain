@@ -6048,7 +6048,10 @@ class GatewayService:
             "max_tokens": max_tokens,
         }
 
-        preserve_client_cache = upstream.get("prompt_cache") == "client_breakpoints"
+        preserve_client_cache = (
+            upstream.get("prompt_cache") == "client_breakpoints"
+            and not self._upstream_is_linkapi(upstream)
+        )
         system_blocks: list[dict[str, Any]] = []
         system_parts: list[str] = []
         deferred_live_context_parts: list[str] = []
@@ -6268,6 +6271,9 @@ class GatewayService:
         payload: dict[str, Any],
         upstream: dict[str, Any],
     ) -> None:
+        if self._upstream_is_linkapi(upstream):
+            self._strip_anthropic_cache_controls(payload)
+            return
         strategy = str(upstream.get("prompt_cache") or "").strip().lower()
         if strategy not in {"anthropic", "anthropic_explicit", "anthropic-explicit", "anthropic_block", "anthropic-block"}:
             return
@@ -21642,7 +21648,7 @@ class GatewayService:
             return result
         # Generic relays accept the Chat Completions schema, not cache hints
         # carried over from another provider or inserted during context assembly.
-        for key in ("cache_control", "prompt_cache_key", "prompt_cache_retention",
+        for key in ("cache_control", "prompt_cache_key", "prompt_cache_retention", "prompt_cache_ttl",
                     "provider", "reasoning", "verbosity"):
             result.pop(key, None)
         for message in result.get("messages") or []:
@@ -21662,6 +21668,11 @@ class GatewayService:
             if isinstance(tool.get("function"), dict):
                 tool["function"].pop("cache_control", None)
         return result
+
+    @staticmethod
+    def _upstream_is_linkapi(upstream: dict[str, Any]) -> bool:
+        hostname = (urlsplit(upstream.get("base_url", "")).hostname or "").lower()
+        return hostname == "linkapi.ai" or hostname.endswith(".linkapi.ai")
 
     def _upstream_uses_anthropic_protocol(self, upstream: dict[str, Any]) -> bool:
         return str(upstream.get("protocol") or "").strip().lower() == "anthropic"
@@ -21774,12 +21785,10 @@ class GatewayService:
                 )
                 prompt_cache = str(raw.get("prompt_cache") or "").strip().lower()
                 prompt_cache_retention = str(raw.get("prompt_cache_retention") or "").strip()
-                if protocol == "anthropic" and "linkapi.ai" in base_url.lower():
-                    # LinkAPI's native Claude route is deliberately normalized
-                    # at request time so stale dashboard/runtime values cannot
-                    # reintroduce mixed 1h/5m cache breakpoint plans.
-                    prompt_cache = prompt_cache or "anthropic_explicit"
-                    prompt_cache_retention = "5m"
+                if self._upstream_is_linkapi({"base_url": base_url}):
+                    # LinkAPI manages its own cache; ignore legacy local hints.
+                    prompt_cache = ""
+                    prompt_cache_retention = ""
                 anthropic_version = str(raw.get("anthropic_version") or "2023-06-01").strip()
                 anthropic_beta = str(raw.get("anthropic_beta") or "").strip()
                 upstreams.append(
@@ -21920,8 +21929,8 @@ class GatewayService:
             "default_model": normalized_model,
             "models": [normalized_model] if normalized_model else [],
             "model_map": {normalized_model: normalized_model} if normalized_model else {},
-            "prompt_cache": "client_breakpoints" if name.startswith("bedrock:") else "anthropic_explicit" if name == "linkapi-claude" else "",
-            "prompt_cache_retention": "5m" if name == "linkapi-claude" else "",
+            "prompt_cache": "client_breakpoints" if name.startswith("bedrock:") else "",
+            "prompt_cache_retention": "",
             "anthropic_version": definition.get("anthropic_version", "2023-06-01"),
             "anthropic_beta": "",
         }

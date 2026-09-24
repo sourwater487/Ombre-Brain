@@ -128,8 +128,8 @@ def verify_authenticated_profile_key_override_is_request_scoped() -> None:
     service.upstreams = service._load_upstreams()
     service.upstream_default_model = "anthropic/claude-opus-4.6"
     assert service.upstreams[0]["prompt_cache"] == ""
-    assert service.upstreams[1]["prompt_cache"] == "anthropic_explicit"
-    assert service.upstreams[1]["prompt_cache_retention"] == "5m"
+    assert service.upstreams[1]["prompt_cache"] == ""
+    assert service.upstreams[1]["prompt_cache_retention"] == ""
     assert "prompt_cache" not in service.gateway_cfg["upstreams"][1]
     assert service.gateway_cfg["upstreams"][1]["prompt_cache_retention"] == "1h"
 
@@ -242,8 +242,8 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
         "budget_tokens": 4096,
         "display": "summarized",
     }
-    assert converted["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
-    assert converted["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert converted["system"] == "stable system"
+    assert "cache_control" not in json.dumps(converted)
     assistant_blocks = converted["messages"][0]["content"]
     assert assistant_blocks[0] == {
         "type": "thinking",
@@ -251,16 +251,25 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
         "signature": "opaque-signature",
     }
     assert assistant_blocks[-1]["type"] == "tool_use"
-    assert assistant_blocks[-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
-    assert service._anthropic_cache_control_plan(converted) == [
-        {"location": "tools[0]", "type": "ephemeral", "ttl": "5m"},
-        {"location": "system[0]", "type": "ephemeral", "ttl": "5m"},
-        {
-            "location": f"messages[0].content[{len(assistant_blocks) - 1}]",
-            "type": "ephemeral",
-            "ttl": "5m",
-        },
-    ]
+    assert service._anthropic_cache_control_plan(converted) == []
+    # Stale runtime settings and inherited cache markers must never reach LinkAPI.
+    from copy import deepcopy
+    cached_payload = deepcopy(payload)
+    cached_payload["messages"].insert(1, {"role": "user", "content": [
+        {"type": "text", "text": "previous turn", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    ]})
+    cached_payload["tools"][0]["cache_control"] = {"type": "ephemeral", "ttl": "5m"}
+    for strategy in ("anthropic", "anthropic_explicit", "client_breakpoints", ""):
+        for stream in (True, False):
+            candidate = service._anthropic_payload_for_upstream(
+                {**cached_payload, "stream": stream},
+                {**route, "upstream": {**upstream, "prompt_cache": strategy, "prompt_cache_retention": "1h"}},
+            )
+            assert "cache_control" not in json.dumps(candidate)
+            assert "prompt_cache" not in json.dumps(candidate)
+            assert candidate["messages"][-1]["content"][0]["tool_use_id"] == "call-1"
+    trusted = service._trusted_request_upstream("linkapi-claude", "claude-opus-4-6")
+    assert trusted["prompt_cache"] == trusted["prompt_cache_retention"] == ""
 
     rolling_cache_payload = {
         "tools": [{"name": "stable_tool", "input_schema": {"type": "object"}}],
@@ -327,11 +336,8 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
         },
         route,
     )
-    assert "<ombre_live_context>" not in "".join(
-        str(block.get("text") or "")
-        for block in converted_tool_continuation["system"]
-        if isinstance(block, dict)
-    )
+    assert "<ombre_live_context>" not in converted_tool_continuation["system"]
+    assert "cache_control" not in json.dumps(converted_tool_continuation)
     tail_content = converted_tool_continuation["messages"][-1]["content"]
     assert any(
         isinstance(block, dict)
@@ -516,8 +522,8 @@ def verify_native_anthropic_thinking_and_cache_contracts() -> None:
     assert signature_delta["reasoning_details"][0]["signature"] == "stream-signature"
 
     trusted = service._trusted_request_upstream("linkapi-claude", "claude-opus-4-6")
-    assert trusted["prompt_cache"] == "anthropic_explicit"
-    assert trusted["prompt_cache_retention"] == "5m"
+    assert trusted["prompt_cache"] == ""
+    assert trusted["prompt_cache_retention"] == ""
 
 
 def verify_embedding_hot_update_rebuilds_gateway_engine() -> None:
