@@ -18,6 +18,14 @@ async def verify():
             "persona": {"enabled": False}, "embedding": {"enabled": False},
         })
         try:
+            for mode in ("task", "intimate", "playful", "memory_lookup", "conflict_repair", "reflective_repair"):
+                assert service._build_injected_context_messages("", "", "", context_mode=mode) == ("", "")
+                _, reminder = service._build_injected_context_messages(
+                    "", "", "", context_mode=mode, active_reminders="REMINDER_FIXTURE")
+                assert "REMINDER_FIXTURE" in reminder and "context_mode:" not in reminder
+                stable, dynamic = service._build_injected_context_messages(
+                    "", "CORE_FIXTURE", "", context_mode=mode)
+                assert "CORE_FIXTURE" in stable and dynamic == ""
             assert service._gateway_memory_config_payload()["recalled_memory_interval_rounds"] == 2
             service.retrieval_mode = "graph"
             service._auto_recall_low_signal_query = lambda _: False
@@ -43,7 +51,7 @@ async def verify():
             # First-turn injection and existing modulo cadence: 1, 2, 4, 6, 8 / 1, 4, 8.
             for next_round in range(1, 9):
                 select.reset_mock(); render.reset_mock(); diffuse.reset_mock()
-                _, ids, debug = await prepare()
+                prepared, ids, debug = await prepare()
                 direct_due = next_round == 1 or next_round % 2 == 0
                 related_due = next_round == 1 or next_round % 4 == 0
                 assert bool(render.await_count) == direct_due, next_round
@@ -52,6 +60,16 @@ async def verify():
                 assert ("direct" in ids) == direct_due, (next_round, ids)
                 assert ("related" in ids) == related_due, (next_round, ids)
                 assert debug["recall_interval_debug"]["next_round"] == next_round
+                # Classification stays available internally, never in the model context.
+                assert debug["context_mode"] == "task"
+                assert "context_mode:" not in str(prepared["messages"])
+                assert "Context Mode" not in debug["dynamic_context"]
+                if not direct_due and not related_due:
+                    assert debug["dynamic_context"] == ""
+                    assert prepared["messages"] == [{"role": "user", "content": "technical fixture query"}]
+                else:
+                    assert "Live private context" in debug["dynamic_context"]
+                    assert "Memory Reading Policy" in debug["dynamic_context"]
                 assert service.state_store.get_current_round("a") == next_round - 1
                 # Preparing/retrying alone never advances the successful-round counter.
                 _, retry_ids, _ = await prepare()

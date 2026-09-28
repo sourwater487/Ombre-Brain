@@ -18646,7 +18646,6 @@ class GatewayService:
                 handoff_tool_hint,
                 dream_context,
                 active_reminders,
-                context_mode,
             ]
         )
         has_memory_reading_context = any(
@@ -18691,7 +18690,6 @@ class GatewayService:
 
             add_section("Just Now Chat Context", just_now_context)
             add_section("Date Recall", date_recall)
-            add_section("Context Mode", f"context_mode: {context_mode}" if context_mode.strip() else "")
             add_section("照顾备忘", active_reminders)
             add_section("Memory Detail Request", memory_detail_recall_instruction)
             add_section(
