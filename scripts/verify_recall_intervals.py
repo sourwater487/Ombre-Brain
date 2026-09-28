@@ -33,7 +33,8 @@ async def verify():
             service._route_domain_sentinel = AsyncMock(return_value={})
             service._domain_sentinel_should_skip_recall = lambda *_: False
             service._refresh_moment_graph = lambda _: ([], {}, [])
-            moment = {"bucket_id": "direct", "moment_id": "direct:1"}
+            moment = {"bucket_id": "direct", "moment_id": "direct:1",
+                      "text": "technical fixture query", "metadata": {"bucket_name": "technical fixture query"}}
             select = service._select_dynamic_moments = AsyncMock(
                 return_value=([moment], [moment], [], [], {}))
             render = service._format_recalled_moments = AsyncMock(return_value="DIRECT_FIXTURE")
@@ -68,8 +69,7 @@ async def verify():
                     assert debug["dynamic_context"] == ""
                     assert prepared["messages"] == [{"role": "user", "content": "technical fixture query"}]
                 else:
-                    assert "Live private context" in debug["dynamic_context"]
-                    assert "Memory Reading Policy" in debug["dynamic_context"]
+                    assert service._memory_reading_policy_context() in debug["dynamic_context"]
                 assert service.state_store.get_current_round("a") == next_round - 1
                 # Preparing/retrying alone never advances the successful-round counter.
                 _, retry_ids, _ = await prepare()
