@@ -651,6 +651,12 @@ class GatewayService:
         self.core_budget = int(self.gateway_cfg.get("core_memory_budget", 500))
         self.recent_budget = int(self.gateway_cfg.get("recent_context_budget", 300))
         self.recalled_budget = int(self.gateway_cfg.get("recalled_memory_budget", 900))
+        self.recalled_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("recalled_memory_interval_rounds", 1))
+        )
+        self.related_memory_interval_rounds = max(
+            0, int(self.gateway_cfg.get("related_memory_interval_rounds", 1))
+        )
         self.direct_render_mode = self._normalize_direct_render_mode(
             self.gateway_cfg.get("direct_render_mode", "auto")
         )
@@ -969,6 +975,8 @@ class GatewayService:
                 "date_recall_max_buckets": self.date_recall_max_buckets,
                 "date_recall_max_client_contexts": self.date_recall_max_client_contexts,
                 "recalled_memory_budget": self.recalled_budget,
+                "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
+                "related_memory_interval_rounds": self.related_memory_interval_rounds,
                 "related_memory_budget": self.related_memory_budget,
                 "operit_context_rewrite_enabled": self.operit_context_rewrite_enabled,
                 "semantic_candidate_top_k": self.semantic_candidate_top_k,
@@ -1050,6 +1058,8 @@ class GatewayService:
             "date_recall_max_buckets": self.date_recall_max_buckets,
             "date_recall_max_client_contexts": self.date_recall_max_client_contexts,
             "recalled_memory_budget": self.recalled_budget,
+            "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
+            "related_memory_interval_rounds": self.related_memory_interval_rounds,
             "related_memory_budget": self.related_memory_budget,
             "operit_context_rewrite_enabled": self.operit_context_rewrite_enabled,
             "semantic_candidate_top_k": self.semantic_candidate_top_k,
@@ -1339,6 +1349,12 @@ class GatewayService:
     # LOCAL-ADAPTATION: [新增] 相对 upstream/main@1dac438，含本地新增。
     def _apply_gateway_memory_config(self, payload: dict[str, Any]) -> list[str]:
         updated: list[str] = []
+        for key in ("recalled_memory_interval_rounds", "related_memory_interval_rounds"):
+            if key in payload:
+                value = max(0, int(payload[key]))
+                setattr(self, key, value)
+                self.gateway_cfg[key] = value
+                updated.append(f"gateway.{key}")
         if "upstreams" in payload:
             updated.extend(self._apply_gateway_upstreams_config(payload["upstreams"]))
         if "cooldown_hours" in payload:
@@ -2911,6 +2927,12 @@ class GatewayService:
         date_persona_trace_requested = False
 
         if is_new_user_turn:
+            direct_recall_due = self.recalled_budget > 0 and self._should_inject_interval(
+                session_id, self.recalled_memory_interval_rounds
+            )
+            related_recall_due = self.related_memory_budget > 0 and self._should_inject_interval(
+                session_id, self.related_memory_interval_rounds
+            )
             stage_started_at = time.perf_counter()
             skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
                 current_user_query,
@@ -3069,7 +3091,7 @@ class GatewayService:
                 stage_started_at = time.perf_counter()
                 portrait_memory, portrait_memory_debug = self._build_portrait_memory_block(all_buckets)
                 mark_step("portrait_memory", stage_started_at)
-            if self.recalled_budget > 0 or self.related_memory_budget > 0:
+            if direct_recall_due or related_recall_due:
                 if skip_broad_dynamic_recall:
                     logger.info(
                         "Gateway broad dynamic recall skipped | session=%s reason=%s",
@@ -3150,14 +3172,15 @@ class GatewayService:
                 suppressed_moments = []
                 suppressed_buckets = []
             stage_started_at = time.perf_counter()
-            recalled_memory = await self._format_recalled_moments(
-                recalled_moments,
-                grouped_moments,
-                all_buckets,
-                self.recalled_budget,
-                current_user_query,
-                context_mode=context_mode,
-            )
+            if direct_recall_due:
+                recalled_memory = await self._format_recalled_moments(
+                    recalled_moments,
+                    grouped_moments,
+                    all_buckets,
+                    self.recalled_budget,
+                    current_user_query,
+                    context_mode=context_mode,
+                )
             mark_step("format_recalled_memory", stage_started_at)
             date_persona_trace_requested = self._query_requests_date_persona_trace(current_user_query)
             if needs_handoff_first or just_now_context_requested:
@@ -3191,7 +3214,7 @@ class GatewayService:
                 stage_started_at = time.perf_counter()
                 favorite_memory, favorite_ids = await self._build_favorite_memory_block(all_buckets, session_id)
                 mark_step("favorite_memory", stage_started_at)
-            if self.retrieval_mode == "graph":
+            if self.retrieval_mode == "graph" and related_recall_due:
                 stage_started_at = time.perf_counter()
                 related_memory, diffused_moment_debug = self._build_moment_diffused_memory_with_debug(
                     recalled_moments,
@@ -3205,6 +3228,9 @@ class GatewayService:
                 mark_step("memory_diffusion", stage_started_at)
             else:
                 related_memory = ""
+            # Candidates used only as diffusion seeds were not injected directly.
+            if not direct_recall_due:
+                recalled_moments = []
             stage_started_at = time.perf_counter()
             current_direct_bucket_ids = [
                 str(moment.get("bucket_id") or "")
@@ -3497,6 +3523,13 @@ class GatewayService:
             prepare_timing_debug["total_ms"] = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
             prepare_timing_debug["steps_ms"] = dict(prepare_steps_ms)
             debug_payload["prepare_timing_debug"] = prepare_timing_debug
+            debug_payload["recall_interval_debug"] = {
+                "next_round": self.state_store.get_current_round(session_id) + 1,
+                "recalled_memory_interval_rounds": self.recalled_memory_interval_rounds,
+                "related_memory_interval_rounds": self.related_memory_interval_rounds,
+                "direct_recall_due": direct_recall_due if is_new_user_turn else False,
+                "related_recall_due": related_recall_due if is_new_user_turn else False,
+            }
             log_prepare_timing()
             return forward_payload, injected_ids, debug_payload
         log_prepare_timing()
