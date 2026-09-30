@@ -22,3 +22,4 @@ backup_*/
 *.db
 import_state.json
 .codex
+.last_deploy_commit
