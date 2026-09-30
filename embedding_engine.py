@@ -205,13 +205,15 @@ class EmbeddingEngine:
                 output[str(bucket_id)] = embedding
         return output
 
-    async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
+    async def search_similar(
+        self, query: str, top_k: int = 10, *, bucket_ids: set[str] | None = None,
+    ) -> list[tuple[str, float]]:
         """
         Search for buckets similar to query text.
         Returns list of (bucket_id, similarity_score) sorted by score desc.
         搜索与查询文本相似的桶。返回 (bucket_id, 相似度分数) 列表。
         """
-        if not self.enabled:
+        if not self.enabled or bucket_ids == set():
             return []
 
         try:
@@ -233,6 +235,8 @@ class EmbeddingEngine:
         # Calculate cosine similarity
         results = []
         for bucket_id, emb_json, model, dimension in rows:
+            if bucket_ids is not None and bucket_id not in bucket_ids:
+                continue
             try:
                 stored_embedding = json.loads(emb_json)
                 if not self._row_matches_current_model(model, dimension, stored_embedding):

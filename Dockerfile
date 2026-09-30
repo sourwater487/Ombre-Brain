@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && python -c "from mcp.server.fastmcp import Context, FastMCP"
 
 # Copy project files / 复制项目文件
-COPY *.py .
+COPY *.py ./
 COPY resources ./resources
 COPY scripts ./scripts
 COPY dashboard.html .

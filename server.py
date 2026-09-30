@@ -69,6 +69,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import Context, FastMCP
 
 from bucket_manager import BucketManager
+from ramble_recall import select_rambles, render_rambles
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from darkroom import DarkroomStore
@@ -7288,6 +7289,8 @@ async def breath(
     retrieval_mode = _normalize_retrieval_mode(retrieval_mode)
     mode_key = _normalize_breath_mode(mode)
     domain_key = domain.strip().lower()
+    if domain_key == "ramble":
+        domain_key = "whisper"
     raw_date = str(date or "").strip()
     date_hint = parse_human_date_reference(raw_date or query)
     if raw_date and not date_hint:
@@ -7335,6 +7338,14 @@ async def breath(
                 ]
             if date_key:
                 feels = [b for b in feels if _bucket_matches_breath_date(b, date_key)]
+            if domain_key == "whisper":
+                selected = await select_rambles(
+                    feels, _strip_breath_date_query_shell(query) if date_key else query,
+                    embedding_engine=embedding_engine,
+                    policy=_recall_policy(), limit=max_results,
+                )
+                rendered, _ = render_rambles(selected, max_tokens)
+                return rendered or "没有找到符合查询及长度限制的 whisper。"
             feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
             if not feels:
                 if date_key:

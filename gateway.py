@@ -24,6 +24,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from bucket_manager import BucketManager
+from ramble_recall import select_rambles, render_rambles
 from dehydrator import Dehydrator
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
@@ -3380,6 +3381,37 @@ class GatewayService:
                 "Operit Activity Context",
                 operit_activity_context,
             )
+        ramble_memory = ""
+        ramble_ids: list[str] = []
+        ramble_debug = {"status": "skipped", "reason": "not_current_user_turn"}
+        if is_new_user_turn:
+            ramble_debug["reason"] = "handoff_or_low_signal"
+            if not (needs_handoff_first or just_now_context_requested or date_recall_requested
+                    or low_signal_auto_recall):
+                stage_started_at = time.perf_counter()
+                remaining = max(0, self.inject_total_budget
+                    - count_tokens_approx(stable_context)
+                    - count_tokens_approx(dynamic_context + "\n\nRamble\n") - 4)
+                ramble_budget = min(remaining, max(0, int(
+                    self.gateway_cfg.get("ramble_memory_budget", 320))))
+                ramble_debug["reason"] = "budget_exhausted" if ramble_budget <= 0 else "no_new_relevant_ramble"
+                if ramble_budget > 0:
+                    # Include this turn's other context too (e.g. dream source material).
+                    visible_messages = [*messages_for_forward, {
+                        "role": "system", "content": stable_context + "\n" + dynamic_context,
+                    }]
+                    selected_rambles = await select_rambles(
+                        all_buckets, current_user_query, embedding_engine=self.embedding_engine,
+                        policy=self.recall_policy, automatic=True, messages=visible_messages, limit=1,
+                        semantic_threshold=max(0.0, min(1.0, float(
+                            self.gateway_cfg.get("ramble_semantic_threshold", 0.78)))),
+                    )
+                    ramble_memory, ramble_ids = render_rambles(selected_rambles, ramble_budget)
+                    if ramble_memory:
+                        dynamic_context = self._append_named_context_section(dynamic_context, "Ramble", ramble_memory)
+                        injected_ids = list(dict.fromkeys([*(injected_ids or []), *ramble_ids]))
+                        ramble_debug = {"status": "injected", "bucket_ids": ramble_ids}
+                mark_step("ramble_recall", stage_started_at)
         forward_payload["messages"] = self._inject_context_messages(
             messages_for_forward,
             stable_context,
@@ -3497,6 +3529,10 @@ class GatewayService:
             prepare_timing_debug["total_ms"] = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
             prepare_timing_debug["steps_ms"] = dict(prepare_steps_ms)
             debug_payload["prepare_timing_debug"] = prepare_timing_debug
+            debug_payload["ramble_memory"] = ramble_memory
+            debug_payload["ramble_recall_debug"] = ramble_debug
+            debug_payload["injected_bucket_ids"] = list(dict.fromkeys(
+                [*(debug_payload.get("injected_bucket_ids") or []), *ramble_ids]))
             log_prepare_timing()
             return forward_payload, injected_ids, debug_payload
         log_prepare_timing()

@@ -26,7 +26,7 @@
 - 如果上下文里出现 `[bucket_id:...]`，而本轮需要更多细节：用 read_bucket(bucket_id)。不要猜新 id。
 - 如果只出现 `[moment_id:...]`，优先使用同一段上下文里已有的 bucket_id；没有 bucket_id 时不要硬猜。
 - `[memory_detail ids="..."]` 只给 Gateway 内部二次取细节用，不是普通 MCP 工具。
-- 旧独立感受：breath(domain="feel")。domain="feel" 不包含日印象；domain="whisper" 只读悄悄话。某条旧记忆的新年轮要 read_bucket(bucket_id)。
+- 旧独立感受：breath(domain="feel")。domain="feel" 不包含日印象；domain="whisper"（也接受 "ramble"）只读悄悄话：带 query 按主题检索，不带 query 按创建时间倒序，可结合 date、max_results、max_tokens。某条旧记忆的新年轮要 read_bucket(bucket_id)。
 - 自我锚点总入口：breath(domain="self_anchor")；domain="自我" / domain="self_identity" 兼容。
 - 查自我锚点分段：breath(domain="self_anchor", query="关键词")。
 - 管理/调试所有自我桶完整内容：breath(query="tag:self_anchor") 或 breath(query="tag:自我")。
@@ -36,13 +36,13 @@
 
 写入：
 - 想保存/记住/别忘：单条长期事实用 hold；长片段多条信息用 grow。
-- 知道事件日期时，写入时传 date，例如 hold(content="...", date="2026-06-15")；知道固定领域时传 domain，例如 hold(content="...", domain="relationship")；显式 domain/valence/arousal 会作为这条记忆或 whisper/feel 的元数据，不会被自动打标覆盖。
+- 知道事件日期时，写入时传 date，例如 hold(content="...", date="2026-06-15")；知道固定领域时传 domain，例如 hold(content="...", domain="relationship")；显式 domain/valence/arousal 会作为这条记忆的元数据，不会被自动打标覆盖。
 - 已有旧记忆的新感受/补充：先 read_bucket，再 comment_bucket。
 - 删除自己通过 comment_bucket 写错的一条年轮：先 read_bucket 找到 comment_id，再 delete_bucket_comment；它不能删除用户/Dashboard 写的年轮，也不会删除 bucket。
 - 修改/归档/删除/沉底旧记忆：先 read_bucket，再 trace。只改事件日期用 trace(bucket_id="...", date="2026-06-15")；日期/元数据更新不会重建 embedding，正文或标题变更才会。
 - 稳定画像事实：先有证据 bucket，再 profile_fact(fact, evidence_bucket_id, ...)。
 - 不确定是否重复：先 breath/read_bucket，再写。
-- 碎碎念、突然的念头可以写 whisper：hold(content="...", whisper=True, ...)
+- 网页 ramble 卡片由现有卡片通道保存为 whisper（type=feel、tags=[whisper]）。hold 已不接受 whisper/feel 参数；不要使用旧版 hold(whisper=True) 调用。
 - content 最少只需要正文。确实需要结构化时再按需写：`### moment`（事件事实）/ `### original`（必须保留原味的短原话）/ `### reflection`（用“我……”第一人称写你的理解和以后如何回应）。没有的部分不写。不要写 `### affect_anchor`、`### followup` 或 `### todo`；长期回应变化写进 reflection，到时提醒用 reminder_create。feel 年轮和 whisper 只写第一人称正文，不写标题、列表或任何 Markdown 分段。
 
 照顾备忘：
