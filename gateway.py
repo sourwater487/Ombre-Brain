@@ -26,6 +26,7 @@ from starlette.routing import Route
 from bucket_manager import BucketManager
 from automatic_recall import select_automatic_fragment
 from ramble_recall import select_rambles, render_rambles
+from diary_recall import recall_diaries, DIARY_RERANK_THRESHOLD
 from dehydrator import Dehydrator
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
@@ -3450,6 +3451,22 @@ class GatewayService:
                         injected_ids = list(dict.fromkeys([*(injected_ids or []), *ramble_ids]))
                         ramble_debug = {"status": "injected", "bucket_ids": ramble_ids}
                 mark_step("ramble_recall", stage_started_at)
+        diary_memory = ""
+        diary_debug = {"status": "skipped", "reason": "interval_or_route",
+                       "threshold": DIARY_RERANK_THRESHOLD}
+        if (is_new_user_turn and direct_recall_due and not skip_broad_dynamic_recall
+                and not low_signal_auto_recall):
+            stage_started_at = time.perf_counter()
+            remaining = max(0, self.inject_total_budget - count_tokens_approx(stable_context)
+                            - count_tokens_approx(dynamic_context + "\n\nRiJi Diary\n") - 4)
+            diary_memory, diary_debug = await recall_diaries(
+                current_user_query, policy=self.recall_policy, reranker=self.reranker_engine,
+                messages=[*messages_for_forward, {"role": "system", "content": stable_context + "\n" + dynamic_context}],
+                budget=min(remaining, 500),
+            )
+            if diary_memory:
+                dynamic_context = self._append_named_context_section(dynamic_context, "RiJi Diary", diary_memory)
+            mark_step("diary_recall", stage_started_at)
         forward_payload["messages"] = self._inject_context_messages(
             messages_for_forward,
             stable_context,
@@ -3574,6 +3591,8 @@ class GatewayService:
                 "direct_recall_due": direct_recall_due if is_new_user_turn else False,
                 "related_recall_due": related_recall_due if is_new_user_turn else False,
             }
+            debug_payload["diary_recall_debug"] = diary_debug
+            debug_payload["diary_memory"] = diary_memory
             debug_payload["ramble_memory"] = ramble_memory
             debug_payload["ramble_recall_debug"] = ramble_debug
             debug_payload["injected_bucket_ids"] = list(dict.fromkeys(
